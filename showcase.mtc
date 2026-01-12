@@ -8,7 +8,7 @@ void hello(arg1, arg2){
         set x = 5
     }
     else{
-        term.print(x.string())
+        term.print(x.str())
     }
 
 }
@@ -24,5 +24,5 @@ for (item in test_array){
     term.print(item)
 }
 for (i in range(20)){
-    term.print(i.string())
+    term.print(i.str())
 }

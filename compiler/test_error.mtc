@@ -1,0 +1,4 @@
+int x
+int y
+set y = 5
+
