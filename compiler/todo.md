@@ -108,11 +108,11 @@ What information does an if/else need to hold?
 
 Start with the simplest ones first:
 
-- [ ] Create `NumberLiteral` class with a `value` property
-- [ ] Create `StringLiteral` class with a `value` property
-- [ ] Create `Identifier` class with a `name` property
-- [ ] Create `BinaryExpression` class with `left`, `operator`, and `right` properties
-- [ ] Create `ArrayLiteral` class with an `elements` property (a list)
+- [x] Create `NumberLiteral` class with a `value` property
+- [x] Create `StringLiteral` class with a `value` property
+- [x] Create `Identifier` class with a `name` property
+- [x] Create `BinaryExpression` class with `left`, `operator`, and `right` properties
+- [x] Create `ArrayLiteral` class with an `elements` property (a list)
 
 Test tip: After creating each one, try making an instance in Python to make sure it works:
 ```
@@ -123,24 +123,24 @@ node = BinaryExpression(Identifier("x"), "+", NumberLiteral(5))
 
 ### Step 4: Create the statement node classes
 
-- [ ] Create `VariableDeclaration` with `var_type`, `name`, and `value` (value can be None)
-- [ ] Create `SetStatement` with `name` and `value`
-- [ ] Create `ReturnStatement` with `value` (can be None for void functions)
-- [ ] Create `Block` with `statements` (a list)
-- [ ] Create `ExpressionStatement` with `expression`
+- [x] Create `VariableDeclaration` with `var_type`, `name`, and `value` (value can be None)
+- [x] Create `SetStatement` with `name` and `value`
+- [x] Create `ReturnStatement` with `value` (can be None for void functions)
+- [x] Create `Block` with `statements` (a list)
+- [x] Create `ExpressionStatement` with `expression`
 
 ---
 
 ### Step 5: Create the remaining node classes
 
-- [ ] Create `CallExpression` with `callee` and `arguments` (a list)
-- [ ] Create `MemberExpression` with `object` and `property`
-- [ ] Create `TypeofExpression` with `argument`
-- [ ] Create `IfStatement` with `condition`, `then_body`, and `else_body` (else can be None)
-- [ ] Create `ForInStatement` with `variable`, `iterable`, and `body`
-- [ ] Create `FunctionDeclaration` with `return_type`, `name`, `parameters`, and `body`
-- [ ] Create `ImportStatement` with `module_path`, `symbol`, and `alias` (alias can be None)
-- [ ] Create `Program` with `statements` (a list of all top-level stuff)
+- [x] Create `CallExpression` with `callee` and `arguments` (a list)
+- [x] Create `MemberExpression` with `object` and `property`
+- [x] Create `TypeofExpression` with `argument`
+- [x] Create `IfStatement` with `condition`, `then_body`, and `else_body` (else can be None)
+- [x] Create `ForInStatement` with `variable`, `iterable`, and `body`
+- [x] Create `FunctionDeclaration` with `return_type`, `name`, `parameters`, and `body`
+- [x] Create `ImportStatement` with `module_path`, `symbol`, and `alias` (alias can be None)
+- [x] Create `Program` with `statements` (a list of all top-level stuff)
 
 ---
 
@@ -273,12 +273,12 @@ Start simple:
 
 ## Progress Checklist
 
-- [ ] Basic nodes created (NumberLiteral, StringLiteral, Identifier)
-- [ ] Expression nodes created (BinaryExpression, CallExpression, etc.)
-- [ ] Statement nodes created (VariableDeclaration, IfStatement, etc.)
-- [ ] Parser class with helper methods
-- [ ] Can parse simple expressions
-- [ ] Can parse function calls and member access
+- [x] Basic nodes created (NumberLiteral, StringLiteral, Identifier)
+- [x] Expression nodes created (BinaryExpression, CallExpression, etc.)
+- [x] Statement nodes created (VariableDeclaration, IfStatement, etc.)
+- [x] Parser class with helper methods
+- [x] Can parse simple expressions
+- [x] Can parse function calls and member access
 - [ ] Can parse binary expressions with correct precedence
 - [ ] Can parse all statement types
 - [ ] Can parse the full `showcase.mtc` into an AST
