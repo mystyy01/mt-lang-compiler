@@ -1,0 +1,24 @@
+make a treesitter and autocomplete for vs code
+if i have syntax highlighting thats enough i dont NEED auto complete in mt-lang
+thats for the future, after the compiler is done.
+
+we need function decorators like python
+like with a @ symbol
+i want this to be a decorator:
+from essentials use terminal as term
+@entry
+int start(){
+    term.print("started!")
+}
+
+the @entry decorator makes that the function ran when the script is ran
+treat this like the python equivalent:
+
+def start():
+    print("started!")
+if __name__ == "__main__":
+    start()
+
+the @entry should only be effective if the file is ran, not imported
+
+there should only be one @entry per file, if theres more the compiler screams
