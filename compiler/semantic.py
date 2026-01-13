@@ -47,10 +47,21 @@ class SemanticAnalyzer:
             return self.analyze_from_import(node)
         if isinstance(node, SimpleImportStatement):
             return self.analyze_simple_import(node)
+        if isinstance(node, NumberLiteral):
+            return self.analyze_number_literal(node)
+        if isinstance(node, ArrayLiteral):
+            return self.analyze_array_literal(node)
+        if isinstance(node, StringLiteral):
+            return self.analyze_string_literal(node)
+        # cant implement bools yet since they arent an AST class yet (adding soon)
     def analyze_program(self, node: Program):
         for statement in node.statements:
             self.analyze(statement)
     def analyze_variable_declaration(self, node: VariableDeclaration):
+        if node.value:
+            type_of_node = self.analyze(node.value)
+            if type_of_node != node.type:
+                self.errors.append(f"Type mismatch. Cannot assign type {type_of_node} to {node.type}")
         self.symbol_table.declare(node.name, "variable", node.type)
     def analyze_function_declaration(self, node: FunctionDeclaration):
         self.symbol_table.declare(node.name, "function", node.return_type)
@@ -64,12 +75,19 @@ class SemanticAnalyzer:
         res = self.symbol_table.lookup(node.name) # check if its declared or not
         if not res:
             self.errors.append(f"Undeclared variable: {node.name}")
+            return
+        return res["data_type"]
     def analyze_expression_statement(self, node: ExpressionStatement):
         self.analyze(node.expression)
     def analyze_set_statement(self, node: SetStatement):
         if not self.symbol_table.lookup(node.name):
             self.errors.append(f"Undeclared variable: {node.name}")
             return None
+        original_type = self.symbol_table.lookup(node.name)["data_type"]
+        type_assigned = self.analyze(node.value)
+        if original_type != type_assigned:
+                self.errors.append(f"Type mismatch. Cannot assign type {type_assigned} to {original_type}")
+                return None
         self.analyze(node.value)
     def analyze_binary_expression(self, node: BinaryExpression):
         self.analyze(node.left)
@@ -108,3 +126,11 @@ class SemanticAnalyzer:
             self.symbol_table.declare(node.alias, node.symbol, "any")
         else:
             self.symbol_table.declare(node.symbol, node.symbol, "any")
+    def analyze_number_literal(self, node):
+        return "int"
+    def analyze_string_literal(self, node):
+        return "string"
+    def analyze_array_literal(self, node):
+        return "array"
+    def analyze_bool_literal(self, node):
+        return "bool"
