@@ -1,4 +1,0 @@
-int x = "hello"
-string y = 5
-int z = 10
-set z = "wrong"

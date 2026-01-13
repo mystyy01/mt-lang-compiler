@@ -1,5 +1,5 @@
-KEYWORDS = ["from", "use", "as", "int", "void", "array", "string", "bool", "if", "else", "for", "in", "set", "return", "typeof"]
-SINGLE_CHAR_SYMBOLS = ["(", ")", "[", "]", "{", "}", ",", ".", "+", "-", "*", "/", "="]
+KEYWORDS = ["from", "use", "as", "int", "void", "array", "string", "bool", "if", "else", "for", "in", "set", "return", "typeof", "while", "bool", "true", "false"]
+SINGLE_CHAR_SYMBOLS = ["(", ")", "[", "]", "{", "}", ",", ".", "+", "-", "*", "/", "=", ">", "<"]
 DOUBLE_CHAR_SYMBOLS = ["==", "!=", "+=", ">=", "<=", "&&", "||"]
 QUOTES = ['"', "'"]
 WHITESPACE = [" ", "\t", "\n"] # space, tab, newline (i think thats a tab char i may be wrong)

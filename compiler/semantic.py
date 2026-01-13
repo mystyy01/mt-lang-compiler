@@ -19,6 +19,7 @@ class SymbolTable:
 class SemanticAnalyzer:
     def __init__(self):
         self.symbol_table = SymbolTable()
+        self.symbol_table.declare("print", "builtin", "function")
         self.errors = []
     def analyze(self, node):
         if isinstance(node, Program):
@@ -131,6 +132,15 @@ class SemanticAnalyzer:
     def analyze_string_literal(self, node):
         return "string"
     def analyze_array_literal(self, node):
+        if len(node.elements) == 0:
+            return "array"
+
+        first_type = self.analyze(node.elements[0])
+        for element in node.elements[1:]:
+            elem_type = self.analyze(element)
+            if elem_type != first_type:
+                self.errors.append(f"Array elements must all be the same type. Expected {first_type}, got {elem_type}")
+
         return "array"
     def analyze_bool_literal(self, node):
         return "bool"

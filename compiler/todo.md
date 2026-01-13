@@ -1,79 +1,97 @@
-# mt-lang Compiler Progress
+# mt-lang Compiler - LLVM Code Generation
 
-## Completed Phases
+## Completed
 
-### Phase 1: Tokenizer ✓
-- Tokenizes source code into tokens (keywords, names, numbers, strings, symbols)
-- Handles comments
-- File: `tokenizer.py`
-
-### Phase 2: Parser ✓
-- Builds AST from tokens
-- Handles all expressions (binary, calls, member access, typeof, arrays)
-- Handles all statements (if, for, set, return, variable/function declarations, imports)
-- Files: `parser.py`, `ast_nodes.py`
-
-### Phase 3: Semantic Analysis (In Progress)
-- Symbol table with scopes ✓
-- Undeclared variable checking ✓
-- Scope management for functions, if, for ✓
-- File: `semantic.py`
-
-**Still to do for semantic analysis:**
-- [ ] Type checking (does `int x = "hello"` produce an error?)
-- [ ] Function return type validation (does `int foo()` actually return an int?)
-- [ ] Check function calls have correct number of arguments
-- [ ] Check that `return` only appears inside functions
-- [ ] Warn about unused variables (optional)
+- [x] Basic setup (module, int_type, void_type)
+- [x] create_main_function()
+- [x] NumberLiteral → LLVM constant
+- [x] BinaryExpression → add, sub, mul, div
+- [x] Compile to object file and link
 
 ---
 
-## Next Phase: Code Generation (LLVM)
+## Current: Variables
 
-This is where we turn the AST into actual machine code using LLVM.
+### VariableDeclaration (`int x = 5`)
 
-### Step 1: Set up llvmlite
+- [ ] Allocate stack space with `alloca`
+- [ ] Save the pointer in `self.variables` dictionary
+- [ ] If there's an initial value, generate it and `store` it
 
-- [ ] Install llvmlite: `pip install llvmlite`
-- [ ] Create `codegen.py`
-- [ ] Set up basic LLVM module, builder, and execution engine
+### Identifier (`x`)
 
-### Step 2: Generate code for simple expressions
+- [ ] Look up the pointer in `self.variables`
+- [ ] Load and return the value with `load`
 
-- [ ] NumberLiteral → LLVM integer constant
-- [ ] BinaryExpression → LLVM add/sub/mul/div instructions
-- [ ] Test: `5 + 3` should produce LLVM IR that evaluates to 8
+### SetStatement (`set x = 10`)
 
-### Step 3: Generate code for variables
-
-- [ ] VariableDeclaration → LLVM alloca (allocate stack space)
-- [ ] Identifier → LLVM load (read from variable)
-- [ ] SetStatement → LLVM store (write to variable)
-
-### Step 4: Generate code for functions
-
-- [ ] FunctionDeclaration → LLVM function definition
-- [ ] ReturnStatement → LLVM return instruction
-- [ ] CallExpression → LLVM function call
-
-### Step 5: Generate code for control flow
-
-- [ ] IfStatement → LLVM conditional branch
-- [ ] ForInStatement → LLVM loop with phi nodes (this is tricky)
-
-### Step 6: Link with runtime
-
-- [ ] Create external functions for print, etc.
-- [ ] Link everything together
-- [ ] Compile to executable or run with JIT
+- [ ] Look up the pointer in `self.variables`
+- [ ] Generate code for the new value
+- [ ] Store it with `store`
 
 ---
 
-## Progress Checklist
+## Next: Functions
 
-- [x] Tokenizer complete
-- [x] Parser complete
-- [x] Basic semantic analysis
-- [ ] Full type checking
-- [ ] LLVM code generation
-- [ ] Can compile `showcase.mtc` to executable
+### FunctionDeclaration (`int foo(a, b) { ... }`)
+
+- [ ] Create function type with parameters
+- [ ] Create function in module
+- [ ] Create entry block
+- [ ] Handle parameters (store them as variables)
+- [ ] Generate code for body statements
+- [ ] Handle return statement
+
+### CallExpression (`foo(1, 2)`)
+
+- [ ] Look up the function
+- [ ] Generate code for each argument
+- [ ] Call the function with `builder.call`
+
+---
+
+## Later: Control Flow
+
+### IfStatement
+
+- [ ] Generate condition
+- [ ] Create "then" and "else" blocks
+- [ ] Create "merge" block (where both paths join)
+- [ ] Use conditional branch
+
+### ForInStatement
+
+- [ ] This is tricky - needs iterator pattern
+- [ ] Maybe start with a simpler while loop first
+
+---
+
+## Later: Print Function
+
+- [ ] Declare external `printf` function
+- [ ] Handle string literals (i8 pointer)
+- [ ] Format strings for integers
+
+---
+
+## LLVM Cheat Sheet
+
+**Types:**
+- `llvmlite.ir.IntType(32)` - 32-bit integer
+- `llvmlite.ir.VoidType()` - void
+- `llvmlite.ir.IntType(8)` - byte (for strings)
+- `llvmlite.ir.PointerType(type)` - pointer to type
+
+**Instructions:**
+- `builder.alloca(type, name="x")` - allocate stack space, returns pointer
+- `builder.store(value, pointer)` - write value to pointer
+- `builder.load(type, pointer, name="x")` - read value from pointer
+- `builder.add(a, b, name="tmp")` - addition
+- `builder.sub(a, b, name="tmp")` - subtraction
+- `builder.mul(a, b, name="tmp")` - multiplication
+- `builder.sdiv(a, b, name="tmp")` - signed division
+- `builder.ret(value)` - return from function
+- `builder.call(func, args, name="tmp")` - call a function
+
+**Constants:**
+- `llvmlite.ir.Constant(type, value)` - create a constant

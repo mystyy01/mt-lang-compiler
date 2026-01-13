@@ -70,7 +70,13 @@ class Parser:
                         self.advance()
                         elements.append(self.parse_expression())
                 self.expect("SYMBOL", "]")
-                return ArrayLiteral(elements)   
+                return ArrayLiteral(elements) 
+        elif self.match("KEYWORD", "true"):
+            self.advance()
+            return BoolLiteral(True)
+        elif self.match("KEYWORD", "false"):
+            self.advance()
+            return BoolLiteral(False)
     def parse_call_member(self):
         base = self.parse_primary()
         while self.match("SYMBOL", "(") or self.match("SYMBOL", "."):
@@ -162,6 +168,8 @@ class Parser:
             return self.parse_declaration()
         elif self.match("KEYWORD", "from") or self.match("KEYWORD", "use"):
             return self.parse_import_statement()
+        elif self.match("KEYWORD", "while"):
+            return self.parse_while_statement()
         else:
             return self.parse_expression_statement()
     def parse_expression_statement(self):
@@ -210,6 +218,13 @@ class Parser:
         self.expect("SYMBOL", ")")
         body = self.parse_block()
         return ForInStatement(loop_var_name, iterable, body)
+    def parse_while_statement(self):
+        self.advance()
+        self.expect("SYMBOL", "(")
+        loop_condition = self.parse_expression()
+        self.expect("SYMBOL", ")")
+        body = self.parse_block()
+        return WhileStatement(loop_condition, body)
     def parse_function_declaration(self):
         return_type = self.current_token().value
         self.advance()

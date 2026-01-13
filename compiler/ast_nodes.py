@@ -77,6 +77,12 @@ class IfStatement:
         self.else_body = else_body
     def __repr__(self):
         return f"IfStatement({self.condition}, {self.then_body}, {self.else_body})"
+class WhileStatement:
+    def __init__(self, condition, then_body: Block):
+        self.condition = condition
+        self.then_body = then_body
+    def __repr__(self):
+        return f"WhileStatement({self.condition}, {self.then_body})"
 class ForInStatement:
     def __init__(self, variable, iterable, body: Block):
         self.variable = variable
@@ -115,3 +121,8 @@ class TypeLiteral:
         self.name = name
     def __repr__(self):
         return f"TypeLiteral({self.name})"
+class BoolLiteral:
+    def __init__(self, value: bool):
+        self.value = value
+    def __repr__(self):
+        return f"BoolLiteral({self.value})"
