@@ -20,6 +20,9 @@ class SemanticAnalyzer:
     def __init__(self):
         self.symbol_table = SymbolTable()
         self.symbol_table.declare("print", "builtin", "function")
+        # Declare built-in array methods
+        self.symbol_table.declare("length", "builtin", "method")
+        self.symbol_table.declare("append", "builtin", "method")
         self.errors = []
     
     def get_position_info(self, node):

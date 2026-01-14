@@ -45,6 +45,14 @@ class Parser:
             token = self.current_token()
             literal = Identifier(token.value, token.line, token.column)
             self.advance()
+            
+            # Check for array indexing: identifier[expression]
+            if self.current_token().type == "SYMBOL" and self.current_token().value == "[":
+                self.advance()  # consume '['
+                index = self.parse_expression()
+                self.expect("SYMBOL", "]")
+                return IndexExpression(literal, index)
+            
             return literal
         elif self.current_token().type == "KEYWORD" and self.current_token().value == "typeof":
             self.advance()
@@ -249,14 +257,22 @@ class Parser:
         self.expect("SYMBOL", "(")
         params = []
         if not self.match("SYMBOL", ")"):
-            element = self.parse_primary()
-            params.append(element)
+            param = self.parse_parameter()
+            params.append(param)
             while self.match("SYMBOL", ","):
                 self.advance()
-                params.append(self.parse_primary())
+                param = self.parse_parameter()
+                params.append(param)
         self.expect("SYMBOL", ")")
-        body = self.parse_block() 
+        body = self.parse_block()
         return FunctionDeclaration(return_type, func_name, params, body)
+    
+    def parse_parameter(self):
+        param_type = self.current_token().value
+        self.expect("KEYWORD")
+        param_name = self.current_token().value
+        self.expect("NAME")
+        return Parameter(param_name, param_type)
     def parse_variable_declaration(self):
         var_type = self.current_token().value
         self.advance()

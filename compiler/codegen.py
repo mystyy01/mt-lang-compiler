@@ -361,19 +361,14 @@ class CodeGenerator:
                 # Logical OR: both operands must be boolean
                 return self.builder.or_(left, right, name="ortmp")
         if isinstance(node, VariableDeclaration):
-            if node.type == "int":
-                pointer = self.builder.alloca(self.int_type, name=node.name)
-                self.variables[node.name] = pointer
-                if node.value:
-                    value = self.generate(node.value) # generate code for the int
-                    return self.builder.store(value, pointer)
-            elif node.type == "bool":
-                pointer = self.builder.alloca(self.bool_type, name=node.name)
-                self.variables[node.name] = pointer
-                if node.value:
-                    value = self.generate(node.value)
-                    return self.builder.store(value, pointer)
-            elif node.type == "array":
+            # Determine the LLVM type for this variable
+            llvm_type = self.get_llvm_type(node.type)
+            
+            # Track the variable's type
+            self.variable_types[node.name] = llvm_type
+            
+            if node.type == "array":
+                # Arrays are special - we store the pointer directly
                 if isinstance(node.value, ArrayLiteral):
                     elements = node.value.elements
                     if len(elements) > 0 and isinstance(elements[0], StringLiteral):
@@ -382,27 +377,93 @@ class CodeGenerator:
                     else:
                         elem_type = self.int_type
                         elem_size = 4
+                    
                     # Generate values for all elements
                     elem_values = []
                     for element in elements:
                         elem_values.append(self.generate(element))
-                    # Create dynamic array
+                    
+                    # Create dynamic array - returns pointer to struct
                     array_ptr, _, _ = self.create_dynamic_array(elem_values, elem_type)
-                    self.variables[node.name] = array_ptr
-                    self.array_lengths[node.name] = (elem_type, elem_size)  # Store elem_type and elem_size
+                    self.variables[node.name] = array_ptr  # Store pointer directly
+                    self.array_lengths[node.name] = (elem_type, elem_size)
                 else:
                     # Array assignment from function call or variable
                     array_ptr = self.generate(node.value)
+                    
+                    # Type check: make sure the value is actually an array pointer
+                    if array_ptr.type != self.dyn_array_ptr_type:
+                        raise TypeError(f"Cannot assign {array_ptr.type} to array variable '{node.name}': expected {self.dyn_array_ptr_type}")
+                    
                     self.variables[node.name] = array_ptr
                     # For function returns, assume int elements for now (could be improved)
                     self.array_lengths[node.name] = (self.int_type, 4)
+            else:
+                # For non-array types (int, bool, string), allocate space on stack
+                pointer = self.builder.alloca(llvm_type, name=node.name)
+                self.variables[node.name] = pointer
+                
+                if node.value:
+                    value = self.generate(node.value)
+                    
+                    # Type check before storing
+                    if value.type != llvm_type:
+                        raise TypeError(f"Cannot assign {value.type} to variable '{node.name}' of type {llvm_type}: type mismatch")
+                    
+                    return self.builder.store(value, pointer)
+        if isinstance(node, IndexExpression):
+            # Handle array indexing: arr[index]
+            array = self.generate(node.object)
+            index = self.generate(node.index)
+            
+            # Determine the element type based on the array
+            if isinstance(node.object, Identifier):
+                elem_type, elem_size = self.array_lengths[node.object.name]
+            else:
+                # For more complex expressions, assume int elements for now
+                elem_type = self.int_type
+                elem_size = 4
+            
+            return self.array_get(array, index, elem_type)
         if isinstance(node, Identifier):
-            pointer = self.variables[node.name]
-            return self.builder.load(pointer, name=node.name)
+            if node.name not in self.variables:
+                raise Exception(f"Variable '{node.name}' not declared")
+            
+            storage = self.variables[node.name]
+            var_type = self.variable_types[node.name]
+            
+            # Special handling for arrays - return the pointer directly
+            if var_type == self.dyn_array_ptr_type:
+                return storage  # Return the pointer directly, no load needed
+            else:
+                # For non-array types, load from the allocated space
+                return self.builder.load(storage, name=node.name)
         if isinstance(node, SetStatement):
-            pointer = self.variables[node.name]
+            if node.name not in self.variables:
+                raise Exception(f"Variable '{node.name}' not declared")
+            
+            # Get the variable's storage and expected type
+            storage = self.variables[node.name]
+            expected_type = self.variable_types[node.name]
+            
+            # Generate the value
             value = self.generate(node.value)
-            return self.builder.store(value, pointer)
+            
+            # Special handling for arrays
+            if expected_type == self.dyn_array_ptr_type:
+                # For arrays, we store the pointer directly
+                if value.type != self.dyn_array_ptr_type:
+                    raise TypeError(f"Cannot assign {value.type} to array variable '{node.name}': expected {self.dyn_array_ptr_type}")
+                
+                # For arrays, replace the pointer in variables dict
+                self.variables[node.name] = value
+                return None  # No store operation needed for arrays
+            else:
+                # For non-array types, store into the allocated space
+                if value.type != expected_type:
+                    raise TypeError(f"Cannot assign {value.type} to variable '{node.name}' of type {expected_type}: type mismatch")
+                
+                return self.builder.store(value, storage)
         if isinstance(node, ExpressionStatement):
             return self.generate(node.expression)
         if isinstance(node, CallExpression):
@@ -475,7 +536,14 @@ class CodeGenerator:
             self.variables = dict(old_variables)
             self.variable_types = dict(old_variable_types)
             
-            param_types = [self.int_type] * len(node.parameters)
+            # Use parameter types instead of defaulting to int
+            param_types = []
+            for param in node.parameters:
+                if param.param_type:
+                    param_types.append(self.get_llvm_type(param.param_type))
+                else:
+                    param_types.append(self.int_type)  # Default to int if no type specified
+            
             return_type = self.get_llvm_type(node.return_type)
             self.current_return_type = return_type  # Track current function's return type
             
@@ -485,10 +553,23 @@ class CodeGenerator:
             block = func.append_basic_block(name="entry")
             self.builder = llvmlite.ir.IRBuilder(block)
             for arg, param in zip(func.args, node.parameters):
-                pointer = self.builder.alloca(self.int_type, name=param.name)
-                self.builder.store(arg, pointer)
-                self.variables[param.name] = pointer
-                self.variable_types[param.name] = self.int_type  # Track parameter type
+                # Use the parameter's actual type for allocation
+                if param.param_type:
+                    llvm_type = self.get_llvm_type(param.param_type)
+                else:
+                    llvm_type = self.int_type
+                
+                if param.param_type == "array":
+                    # For array parameters, store the pointer directly without allocation
+                    self.variables[param.name] = arg
+                    self.variable_types[param.name] = llvm_type
+                    self.array_lengths[param.name] = (self.int_type, 4)  # Default to int elements
+                else:
+                    # For non-array types, allocate space and store the value
+                    pointer = self.builder.alloca(llvm_type, name=param.name)
+                    self.builder.store(arg, pointer)
+                    self.variables[param.name] = pointer
+                    self.variable_types[param.name] = llvm_type  # Track parameter type
             for statement in node.body.statements:
                 self.generate(statement)
             # Add default return if block has no terminator
@@ -545,9 +626,14 @@ class CodeGenerator:
             if not self.builder.block.is_terminated:
                 self.builder.branch(merge_block)
             
-            # Always position at merge block and add unreachable
+            # Position at merge block - only add unreachable if both branches terminated
             self.builder.position_at_end(merge_block)
-            self.builder.unreachable()
+            then_terminated = not then_block.is_terminated
+            else_terminated = not else_block.is_terminated if node.else_body else True
+            
+            # If both branches are terminated (e.g., both have return), add unreachable
+            if then_terminated and else_terminated:
+                self.builder.unreachable()
         if isinstance(node, WhileStatement):
             func = self.builder.block.parent
 
@@ -609,8 +695,8 @@ class CodeGenerator:
 
             # Evaluate the iterable (could be variable or function call)
             if isinstance(node.iterable, Identifier):
-                # Variable reference
-                array_ptr = self.variables[node.iterable.name]
+                # Variable reference - use Identifier generation to get proper value
+                array_ptr = self.generate(node.iterable)
                 elem_type, elem_size = self.array_lengths[node.iterable.name]
             else:
                 # Function call or expression - evaluate to get array
@@ -619,6 +705,7 @@ class CodeGenerator:
                 elem_type = self.int_type
                 elem_size = 4
 
+            # Allocate loop index and loop variable
             index_ptr = self.builder.alloca(self.int_type, name="loop_index")
             self.builder.store(llvmlite.ir.Constant(self.int_type, 0), index_ptr)
 
@@ -626,31 +713,53 @@ class CodeGenerator:
             self.variables[node.variable] = loop_var_ptr
             self.variable_types[node.variable] = elem_type
 
+            # Create basic blocks for the loop structure
             loop_block = func.append_basic_block(name="for_loop")
             body_block = func.append_basic_block(name="for_body")
             exit_block = func.append_basic_block(name="for_exit")
 
+            # Entry: branch to loop condition check
             self.builder.branch(loop_block)
 
+            # Loop condition block: check index < length
             self.builder.position_at_end(loop_block)
             index = self.builder.load(index_ptr, name="index")
             length = self.array_length(array_ptr)  # Get dynamic length
             condition = self.builder.icmp_signed("<", index, length, name="for_cond")
             self.builder.cbranch(condition, body_block, exit_block)
 
+            # Loop body block: execute loop statements
             self.builder.position_at_end(body_block)
-
-            elem_value = self.array_get(array_ptr, index, elem_type)  # Get element from dynamic array
+            
+            # Get current element and store in loop variable
+            elem_value = self.array_get(array_ptr, index, elem_type)
             self.builder.store(elem_value, loop_var_ptr)
 
+            # Save current state for cleanup
+            old_variables = dict(self.variables)
+            old_variable_types = dict(self.variable_types)
+            old_array_lengths = dict(self.array_lengths)
+
+            # Generate loop body statements
             for statement in node.body.statements:
                 self.generate(statement)
+                
+                # If the body contains a return/break, the block is already terminated
+                if self.builder.block.is_terminated:
+                    break
 
-            index_val = self.builder.load(index_ptr, name="index_val")
-            next_index = self.builder.add(index_val, llvmlite.ir.Constant(self.int_type, 1), name="next_index")
-            self.builder.store(next_index, index_ptr)
-            self.builder.branch(loop_block)
+            # Only increment and branch if block is not terminated
+            if not self.builder.block.is_terminated:
+                index_val = self.builder.load(index_ptr, name="index_val")
+                next_index = self.builder.add(index_val, llvmlite.ir.Constant(self.int_type, 1), name="next_index")
+                self.builder.store(next_index, index_ptr)
+                self.builder.branch(loop_block)
 
+            # Restore state and continue to exit block
+            self.variables = old_variables
+            self.variable_types = old_variable_types  
+            self.array_lengths = old_array_lengths
+            
             self.builder.position_at_end(exit_block)
 if __name__ == "__main__":
     from tokenizer import Tokenizer

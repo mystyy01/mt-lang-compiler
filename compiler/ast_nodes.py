@@ -75,6 +75,12 @@ class MemberExpression:
         self.property = property
     def __repr__(self):
         return f"MemberExpression({self.object}, {self.property})"
+class IndexExpression:
+    def __init__(self, object, index):
+        self.object = object
+        self.index = index
+    def __repr__(self):
+        return f"IndexExpression({self.object}, {self.index})"
 class TypeofExpression:
     def __init__(self, argument):
         self.argument = argument
@@ -130,6 +136,13 @@ class TypeLiteral:
         self.name = name
     def __repr__(self):
         return f"TypeLiteral({self.name})"
+class Parameter:
+    def __init__(self, name, param_type=None):
+        self.name = name
+        self.param_type = param_type  # Type annotation like "array", "int", etc.
+    def __repr__(self):
+        type_info = f": {self.param_type}" if self.param_type else ""
+        return f"Parameter({self.name}{type_info})"
 class BoolLiteral:
     def __init__(self, value: bool):
         self.value = value
