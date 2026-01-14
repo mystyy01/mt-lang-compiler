@@ -32,3 +32,15 @@ int sum(array arr){
     }
     return total
 }
+float avgmean(array arr){
+    float total = 0.0
+    for (item in arr){
+        set total = total + item
+    }
+    int arrlength = arr.length()
+    float mean = total / arrlength
+    return mean
+}
+float floatround(float num, int decimals){
+
+}

@@ -5,6 +5,13 @@ class NumberLiteral:
         self.column = column
     def __repr__(self):
         return f"NumberLiteral({self.value})"
+class FloatLiteral:
+    def __init__(self, value: float, line=None, column=None):
+        self.value = value
+        self.line = line
+        self.column = column
+    def __repr__(self):
+        return f"FloatLiteral({self.value})"
 class StringLiteral:
     def __init__(self, string: str, line=None, column=None):
         self.value = string

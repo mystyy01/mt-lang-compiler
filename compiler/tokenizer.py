@@ -1,4 +1,4 @@
-KEYWORDS = ["from", "use", "as", "int", "void", "array", "string", "bool", "if", "else", "for", "in", "set", "return", "typeof", "while", "bool", "true", "false"]
+KEYWORDS = ["from", "use", "as", "int", "float", "void", "array", "string", "bool", "if", "else", "for", "in", "set", "return", "typeof", "while", "bool", "true", "false"]
 SINGLE_CHAR_SYMBOLS = ["(", ")", "[", "]", "{", "}", ",", ".", "+", "-", "*", "/", "=", ">", "<"]
 DOUBLE_CHAR_SYMBOLS = ["==", "!=", "+=", ">=", "<=", "&&", "||"]
 QUOTES = ['"', "'"]
@@ -46,6 +46,9 @@ class Tokenizer:
             self.advance()
     def skip_comment(self):
         if not self.is_at_end() and self.current_char() == "/" and self.peek_next() == "/":
+            # C-style comment: //
+            self.advance()  # consume first /
+            self.advance()  # consume second /
             while not self.is_at_end() and self.current_char() != "\n":
                 self.advance()
     def read_word(self):
@@ -61,12 +64,53 @@ class Tokenizer:
             return Token("NAME", word, start_line, start_column)
     def read_number(self):
         number = ""
+        has_decimal = False
+        has_exponent = False
         start_line = self.line
         start_column = self.column
+        
+        # Read digits before decimal point
         while not self.is_at_end() and self.current_char().isdigit():
             number += self.current_char()
             self.advance()
-        return Token("NUMBER", number, start_line, start_column)
+        
+        # Handle decimal point
+        if not self.is_at_end() and self.current_char() == '.':
+            has_decimal = True
+            number += '.'
+            self.advance()
+            
+            # Read digits after decimal point (at least one digit required)
+            if not self.is_at_end() and self.current_char().isdigit():
+                while not self.is_at_end() and self.current_char().isdigit():
+                    number += self.current_char()
+                    self.advance()
+            else:
+                raise Exception(f"Invalid float literal at line {start_line}: expected digits after decimal point")
+        
+        # Handle scientific notation
+        if not self.is_at_end() and self.current_char().lower() == 'e':
+            has_exponent = True
+            number += 'e'
+            self.advance()
+            
+            # Handle exponent sign
+            if not self.is_at_end() and self.current_char() in '+-':
+                number += self.current_char()
+                self.advance()
+                
+            # Read exponent digits (at least one digit required)
+            if not self.is_at_end() and self.current_char().isdigit():
+                while not self.is_at_end() and self.current_char().isdigit():
+                    number += self.current_char()
+                    self.advance()
+            else:
+                raise Exception(f"Invalid float literal at line {start_line}: expected digits in exponent")
+        
+        # Determine token type based on whether we saw a decimal point or exponent
+        is_float = has_decimal or has_exponent
+        token_type = "FLOAT_LITERAL" if is_float else "INTEGER_LITERAL"
+        return Token(token_type, number, start_line, start_column)
     def read_string(self):
         string = ""
         # double check the current char is a quote
@@ -102,6 +146,28 @@ class Tokenizer:
                 break
             if self.current_char() in QUOTES:
                 tokens.append(self.read_string())
+            elif self.current_char() == '-':
+                # Check if this is a negative number (unary minus)
+                # Look ahead to see if next character starts a number
+                next_char = self.peek_next() if not self.is_at_end() else None
+                
+                # If next character is a digit, this is a negative number
+                if next_char and next_char.isdigit():
+                    self.advance()  # consume the minus
+                    number = "-"
+                    start_line = self.line
+                    start_column = self.column
+                    
+                    # Read the actual number
+                    num_token = self.read_number()
+                    number += num_token.value
+                    
+                    # Determine if it's float or int based on the number token
+                    token_type = "FLOAT_LITERAL" if num_token.type == "FLOAT_LITERAL" else "INTEGER_LITERAL"
+                    tokens.append(Token(token_type, number, start_line, start_column))
+                else:
+                    # This is a binary minus operator
+                    tokens.append(self.read_symbol())
             elif self.current_char() in SINGLE_CHAR_SYMBOLS or (self.peek_next() and (self.current_char() + self.peek_next()) in DOUBLE_CHAR_SYMBOLS):
                 tokens.append(self.read_symbol())
             elif self.current_char().isalpha() or self.current_char() == "_":
@@ -109,5 +175,7 @@ class Tokenizer:
             elif self.current_char().isdigit():
                 tokens.append(self.read_number())
             else:
-                raise CompilerError(f"Tokenizer failed at char: {self.position}", "ERROR")
+                # Debug: show what character is causing issue
+                char = self.current_char() if not self.is_at_end() else "EOF"
+                raise CompilerError(f"Tokenizer failed at char {self.position}: '{char}' (line {self.line}, col {self.column})", "ERROR")
         return tokens

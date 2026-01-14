@@ -62,6 +62,8 @@ class SemanticAnalyzer:
             return self.analyze_simple_import(node)
         if isinstance(node, NumberLiteral):
             return self.analyze_number_literal(node)
+        if isinstance(node, FloatLiteral):
+            return self.analyze_float_literal(node)
         if isinstance(node, ArrayLiteral):
             return self.analyze_array_literal(node)
         if isinstance(node, StringLiteral):
@@ -107,8 +109,28 @@ class SemanticAnalyzer:
                 return None
         self.analyze(node.value)
     def analyze_binary_expression(self, node: BinaryExpression):
-        self.analyze(node.left)
-        self.analyze(node.right)
+        left_type = self.analyze(node.left)
+        right_type = self.analyze(node.right)
+        
+        # Comparison operators always return bool
+        if node.operator.value in ["==", "!=", ">", "<", ">=", "<="]:
+            return "bool"
+        
+        # Logical operators always return bool
+        elif node.operator.value in ["&&", "||"]:
+            return "bool"
+        
+        # Arithmetic operators use type promotion
+        else:  # +, -, *, /
+            if left_type == "float" or right_type == "float":
+                return "float"
+            elif left_type == "int" or right_type == "int":
+                return "int"
+            elif left_type == "bool" or right_type == "bool":
+                return "bool"
+            else:
+                # For mixed types (string, array, etc.), return "any" for now
+                return "any"
     def analyze_call_expression(self, node: CallExpression):
         callee_type = self.analyze(node.callee)
         for arg in node.arguments:
@@ -150,6 +172,8 @@ class SemanticAnalyzer:
             self.symbol_table.declare(symbol, "function", "any")
     def analyze_number_literal(self, node):
         return "int"
+    def analyze_float_literal(self, node):
+        return "float"
     def analyze_string_literal(self, node):
         return "string"
     def analyze_array_literal(self, node):

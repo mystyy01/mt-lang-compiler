@@ -31,9 +31,14 @@ class Parser:
         else:
             raise CompilerError("Unexpected token", "ERROR")
     def parse_primary(self):
-        if self.current_token().type == "NUMBER":
+        if self.current_token().type == "INTEGER_LITERAL":
             token = self.current_token()
             literal = NumberLiteral(token.value, token.line, token.column)
+            self.advance()
+            return literal
+        elif self.current_token().type == "FLOAT_LITERAL":
+            token = self.current_token()
+            literal = FloatLiteral(float(token.value), token.line, token.column)
             self.advance()
             return literal
         elif self.current_token().type == "STRING":
@@ -61,7 +66,7 @@ class Parser:
             node = self.parse_expression()
             self.expect("SYMBOL", ")")
             return TypeofExpression(node)
-        elif self.match("KEYWORD", "int") or self.match("KEYWORD", "string") or self.match("KEYWORD", "array") or self.match("KEYWORD", "bool") or self.match("KEYWORD", "void"):
+        elif self.match("KEYWORD", "int") or self.match("KEYWORD", "float") or self.match("KEYWORD", "string") or self.match("KEYWORD", "array") or self.match("KEYWORD", "bool") or self.match("KEYWORD", "void"):
             value = self.current_token().value
             self.advance()
             return TypeLiteral(value)  
@@ -187,7 +192,7 @@ class Parser:
             return self.parse_if_statement()
         elif self.match("KEYWORD", "for"):
             return self.parse_for_statement()
-        elif self.match("KEYWORD", "int") or self.match("KEYWORD", "void") or self.match("KEYWORD", "array") or self.match("KEYWORD", "string") or self.match("KEYWORD", "bool"):
+        elif self.match("KEYWORD", "int") or self.match("KEYWORD", "float") or self.match("KEYWORD", "void") or self.match("KEYWORD", "array") or self.match("KEYWORD", "string") or self.match("KEYWORD", "bool"):
             return self.parse_declaration()
         elif self.match("KEYWORD", "from") or self.match("KEYWORD", "use"):
             return self.parse_import_statement()

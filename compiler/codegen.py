@@ -11,6 +11,7 @@ class CodeGenerator:
         self.modules = {}  # alias -> {func_name: llvm_func}
         self.module = llvmlite.ir.Module(name="mt_lang")
         self.int_type = llvmlite.ir.IntType(32)
+        self.float_type = llvmlite.ir.DoubleType()  # 64-bit double as requested
         self.void_type = llvmlite.ir.VoidType()
         self.i8_ptr_type = llvmlite.ir.IntType(8).as_pointer()
         self.bool_type = llvmlite.ir.IntType(1)
@@ -31,6 +32,8 @@ class CodeGenerator:
         """Map AST type strings to LLVM types"""
         if type_str == "int":
             return self.int_type
+        elif type_str == "float":
+            return self.float_type
         elif type_str == "void":
             return self.void_type
         elif type_str == "bool":
@@ -42,6 +45,42 @@ class CodeGenerator:
         else:
             # Default to int for unknown types
             return self.int_type
+
+    def get_common_type(self, left_type, right_type):
+        """Get common type for binary operations with promotion rules"""
+        # Type precedence: float > int > bool
+        if left_type == self.float_type or right_type == self.float_type:
+            return self.float_type
+        elif left_type == self.int_type or right_type == self.int_type:
+            return self.int_type
+        else:
+            return self.bool_type
+
+    def promote_to_common_type(self, value, target_type):
+        """Promote a value to target type"""
+        if value.type == target_type:
+            return value
+        elif value.type == self.int_type and target_type == self.float_type:
+            return self.builder.sitofp(value, self.float_type, name="int_to_float")
+        elif value.type == self.bool_type and target_type == self.int_type:
+            return self.builder.zext(value, self.int_type, name="bool_to_int")
+        elif value.type == self.bool_type and target_type == self.float_type:
+            # bool -> int -> float
+            int_val = self.builder.zext(value, self.int_type, name="bool_to_int")
+            return self.builder.sitofp(int_val, self.float_type, name="bool_to_float")
+        else:
+            raise TypeError(f"Cannot promote {value.type} to {target_type}")
+
+    def promote_to_bool(self, value):
+        """Promote any numeric value to boolean"""
+        if value.type == self.bool_type:
+            return value
+        elif value.type == self.int_type:
+            return self.builder.icmp_signed("!=", value, llvmlite.ir.Constant(self.int_type, 0), name="int_to_bool")
+        elif value.type == self.float_type:
+            return self.builder.fcmp_ordered("!=", value, llvmlite.ir.Constant(self.float_type, 0.0), name="float_to_bool")
+        else:
+            raise TypeError(f"Cannot promote {value.type} to bool")
 
     def resolve_module_path(self, module_path):
         """Resolve module path to actual file path"""
@@ -312,6 +351,8 @@ class CodeGenerator:
             return None
         if isinstance(node, NumberLiteral):
             return llvmlite.ir.Constant(self.int_type, int(node.value))
+        if isinstance(node, FloatLiteral):
+            return llvmlite.ir.Constant(self.float_type, float(node.value))
         if isinstance(node, BinaryExpression):
             left = self.generate(node.left)
             right = self.generate(node.right)
@@ -333,33 +374,76 @@ class CodeGenerator:
                 elif node.operator.value == ">=":
                     return self.builder.icmp_signed(">=", left, right, name="getmp")
             
-            # Numeric operations
+            # Determine common type and promote operands
+            common_type = self.get_common_type(left.type, right.type)
+            left_promoted = self.promote_to_common_type(left, common_type)
+            right_promoted = self.promote_to_common_type(right, common_type)
+            
+            # Arithmetic operations with proper type handling
             if node.operator.value == "+":
-                return self.builder.add(left, right, name="addtmp")
+                if common_type == self.float_type:
+                    return self.builder.fadd(left_promoted, right_promoted, name="faddtmp")
+                else:
+                    return self.builder.add(left_promoted, right_promoted, name="addtmp")
             elif node.operator.value == "-":
-                return self.builder.sub(left, right, name="subtmp")
+                if common_type == self.float_type:
+                    return self.builder.fsub(left_promoted, right_promoted, name="fsubtmp")
+                else:
+                    return self.builder.sub(left_promoted, right_promoted, name="subtmp")
             elif node.operator.value == "*":
-                return self.builder.mul(left, right, name="multmp")
+                if common_type == self.float_type:
+                    return self.builder.fmul(left_promoted, right_promoted, name="fmultmp")
+                else:
+                    return self.builder.mul(left_promoted, right_promoted, name="multmp")
             elif node.operator.value == "/":
-                return self.builder.sdiv(left, right, name="divtmp")
+                if common_type == self.float_type:
+                    return self.builder.fdiv(left_promoted, right_promoted, name="fdivtmp")
+                else:
+                    return self.builder.sdiv(left_promoted, right_promoted, name="divtmp")
+            
+            # Comparison operations
             elif node.operator.value == "==":
-                return self.builder.icmp_signed("==", left, right, name="eqtmp")
+                if common_type == self.float_type:
+                    return self.builder.fcmp_ordered("==", left_promoted, right_promoted, name="feqtmp")
+                else:
+                    return self.builder.icmp_signed("==", left_promoted, right_promoted, name="eqtmp")
             elif node.operator.value == "!=":
-                return self.builder.icmp_signed("!=", left, right, name="netmp")
+                if common_type == self.float_type:
+                    return self.builder.fcmp_ordered("!=", left_promoted, right_promoted, name="fnetmp")
+                else:
+                    return self.builder.icmp_signed("!=", left_promoted, right_promoted, name="netmp")
             elif node.operator.value == ">":
-                return self.builder.icmp_signed(">", left, right, name="gttmp")
+                if common_type == self.float_type:
+                    return self.builder.fcmp_ordered(">", left_promoted, right_promoted, name="fgttmp")
+                else:
+                    return self.builder.icmp_signed(">", left_promoted, right_promoted, name="gttmp")
             elif node.operator.value == "<":
-                return self.builder.icmp_signed("<", left, right, name="lttmp")
+                if common_type == self.float_type:
+                    return self.builder.fcmp_ordered("<", left_promoted, right_promoted, name="flttmp")
+                else:
+                    return self.builder.icmp_signed("<", left_promoted, right_promoted, name="lttmp")
             elif node.operator.value == "<=":
-                return self.builder.icmp_signed("<=", left, right, name="letmp")
+                if common_type == self.float_type:
+                    return self.builder.fcmp_ordered("<=", left_promoted, right_promoted, name="fletmp")
+                else:
+                    return self.builder.icmp_signed("<=", left_promoted, right_promoted, name="letmp")
             elif node.operator.value == ">=":
-                return self.builder.icmp_signed(">=", left, right, name="getmp")
+                if common_type == self.float_type:
+                    return self.builder.fcmp_ordered(">=", left_promoted, right_promoted, name="fgetmp")
+                else:
+                    return self.builder.icmp_signed(">=", left_promoted, right_promoted, name="getmp")
+            
+            # Logical operations (both operands must be boolean)
             elif node.operator.value == "&&":
-                # Logical AND: both operands must be boolean
-                return self.builder.and_(left, right, name="andtmp")
+                # Promote to bool if needed
+                bool_left = self.promote_to_bool(left_promoted)
+                bool_right = self.promote_to_bool(right_promoted)
+                return self.builder.and_(bool_left, bool_right, name="andtmp")
             elif node.operator.value == "||":
-                # Logical OR: both operands must be boolean
-                return self.builder.or_(left, right, name="ortmp")
+                # Promote to bool if needed
+                bool_left = self.promote_to_bool(left_promoted)
+                bool_right = self.promote_to_bool(right_promoted)
+                return self.builder.or_(bool_left, bool_right, name="ortmp")
         if isinstance(node, VariableDeclaration):
             # Determine the LLVM type for this variable
             llvm_type = self.get_llvm_type(node.type)
@@ -501,16 +585,34 @@ class CodeGenerator:
                 return self.builder.call(func, args)
             elif isinstance(node.callee, Identifier) and node.callee.name == "print":
                 arg = node.arguments[0]
-                is_string = False
+                
+                # Determine the type of the argument to choose format string
                 if isinstance(arg, StringLiteral):
-                    is_string = True
-                elif isinstance(arg, Identifier):
-                    if arg.name in self.variable_types and self.variable_types[arg.name] == self.i8_ptr_type:
-                        is_string = True
-                if is_string:
                     format_ptr = self.create_string_constant("%s\n")
-                else:
+                elif isinstance(arg, FloatLiteral):
+                    format_ptr = self.create_string_constant("%f\n")
+                elif isinstance(arg, NumberLiteral):
                     format_ptr = self.create_string_constant("%d\n")
+                elif isinstance(arg, Identifier):
+                    var_type = self.variable_types.get(arg.name)
+                    if var_type == self.i8_ptr_type:
+                        format_ptr = self.create_string_constant("%s\n")
+                    elif var_type == self.float_type:
+                        format_ptr = self.create_string_constant("%f\n")
+                    else:
+                        format_ptr = self.create_string_constant("%d\n")
+                else:
+                    # For expressions, generate first and check type
+                    value = self.generate(arg)
+                    if value.type == self.float_type:
+                        format_ptr = self.create_string_constant("%f\n")
+                    elif value.type == self.i8_ptr_type:
+                        format_ptr = self.create_string_constant("%s\n")
+                    else:
+                        format_ptr = self.create_string_constant("%d\n")
+                    return self.builder.call(self.printf, [format_ptr, value])
+                
+                # Generate the value for non-expression arguments
                 value = self.generate(arg)
                 return self.builder.call(self.printf, [format_ptr, value])
             else:

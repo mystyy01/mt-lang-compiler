@@ -1,0 +1,27 @@
+float myfloat = 5.2
+int integer = 5
+
+// Basic float operations
+float result1 = integer + myfloat      // int + float = float
+float result2 = integer / 2.0        // float division
+float result3 = myfloat * 3.14      // float multiplication
+
+// Test scientific notation
+float scientific = 1.5e-3
+float negative = -3.14
+
+// Print all results
+print(myfloat)
+print(result1) 
+print(result2)
+print(result3)
+print(scientific)
+print(negative)
+
+// Test comparisons
+bool comparison = integer < myfloat
+print(comparison)
+
+// Test float comparison
+bool float_comparison = 3.14 < 2.71
+print(float_comparison)
