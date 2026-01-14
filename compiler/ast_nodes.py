@@ -121,6 +121,14 @@ class FunctionDeclaration:
         self.body = body
     def __repr__(self):
         return f"FunctionDeclaration({self.return_type}, {self.name}, {self.parameters}, {self.body})"
+class DynamicFunctionDeclaration:
+    def __init__(self, name, parameters: list, body: Block):
+        self.name = name
+        self.parameters = parameters
+        self.body = body
+        # No return_type - will be inferred
+    def __repr__(self):
+        return f"DynamicFunctionDeclaration({self.name}, {self.parameters}, {self.body})"
 class FromImportStatement:
     def __init__(self, module_path, symbols):
         self.module_path = module_path

@@ -118,11 +118,20 @@ class CodeGenerator:
         raise FileNotFoundError(f"Module not found: {rel_path}")
 
     def load_module(self, module_path):
-        """Load and compile a module file, returning dict of functions"""
+        """Load and compile a module file, returning module name"""
         file_path = self.resolve_module_path(module_path)
 
         if file_path in self.imported_modules:
-            return  # Already imported
+            # Already imported, return existing module name
+            for name, module_data in self.modules.items():
+                if module_data.get('_file_path') == file_path:
+                    return name
+            # Fallback to generating module name
+            if isinstance(module_path, MemberExpression):
+                return f"{module_path.object.name}.{module_path.property}"
+            else:
+                return module_path.name
+        
         self.imported_modules.add(file_path)
 
         # Import tokenizer and parser here to avoid circular imports
@@ -135,10 +144,30 @@ class CodeGenerator:
         tokens = Tokenizer(source).tokenize()
         ast = Parser(tokens).parse_program()
 
-        # Generate code for all function declarations in the module
+        # Track functions before and after to know what was added
+        before_funcs = set(self.functions.keys())
+        
+        # Generate code for all function declarations in module
         for statement in ast.statements:
-            if isinstance(statement, FunctionDeclaration):
+            if isinstance(statement, (FunctionDeclaration, DynamicFunctionDeclaration)):
                 self.generate(statement)
+        
+        after_funcs = set(self.functions.keys())
+        new_funcs = after_funcs - before_funcs
+        
+        # Register all new functions under the module name
+        if isinstance(module_path, MemberExpression):
+            module_name = f"{module_path.object.name}.{module_path.property}"
+        else:
+            module_name = module_path.name
+            
+        if module_name not in self.modules:
+            self.modules[module_name] = {}
+        self.modules[module_name]['_file_path'] = file_path  # Track file path
+        for func in new_funcs:
+            self.modules[module_name][func] = self.functions[func]
+        
+        return module_name
     def create_main_function(self):
         func_type = llvmlite.ir.FunctionType(self.int_type, [])
         func = llvmlite.ir.Function(self.module, func_type, name="main")
@@ -315,13 +344,15 @@ class CodeGenerator:
                 result = self.generate(statement)
             return result
         if isinstance(node, FromImportStatement):
-            # Load the module and import the symbols
-            self.load_module(node.module_path)
-            # For "from math use add, square" - register each function directly
+            # Load module and import symbols
+            # For both MemberExpression and Identifier, load_module can handle it
+            module_name = self.load_module(node.module_path)
+            
+            # For "from round_module use round" - register each function directly
             for symbol in node.symbols:
-                if symbol in self.functions:
+                if module_name in self.modules and symbol in self.modules[module_name]:
                     # Make it callable directly by its name
-                    self.functions[symbol] = self.functions[symbol]
+                    self.functions[symbol] = self.modules[module_name][symbol]
             return None
         if isinstance(node, SimpleImportStatement):
             # For "use math" - load module and register under module name for math.add() style
@@ -339,7 +370,7 @@ class CodeGenerator:
                 # Track functions before and after to know what was added
                 before_funcs = set(self.functions.keys())
                 for statement in ast.statements:
-                    if isinstance(statement, FunctionDeclaration):
+                    if isinstance(statement, (FunctionDeclaration, DynamicFunctionDeclaration)):
                         self.generate(statement)
                 after_funcs = set(self.functions.keys())
                 new_funcs = after_funcs - before_funcs
@@ -616,15 +647,37 @@ class CodeGenerator:
                 value = self.generate(arg)
                 return self.builder.call(self.printf, [format_ptr, value])
             else:
-                func = self.functions[node.callee.name]
+                # First check if function exists directly
+                func = self.functions.get(node.callee.name)
+                
+                # If not found directly, check imported modules
+                if func is None:
+                    for module_name, module_funcs in self.modules.items():
+                        if node.callee.name in module_funcs:
+                            func = module_funcs[node.callee.name]
+                            break
+                
+                if func is None:
+                    raise Exception(f"Unknown function: {node.callee.name}")
+                
                 args = []
                 for arg in node.arguments:
                     args.append(self.generate(arg))
                 call_result = self.builder.call(func, args)
-                # Return None for void functions, LLVM value for others
-                if func.function_type.return_type == self.void_type:
-                    return None
-                return call_result
+                
+                # Check if this is a dynamic function (returns struct with type tag)
+                if hasattr(func.function_type.return_type, 'elements'):
+                    # Extract type tag and value from dynamic return
+                    type_tag = self.builder.extract_value(call_result, 0)
+                    value = self.builder.extract_value(call_result, 1)
+                    
+                    # For now, return just the value (could be enhanced for runtime type handling)
+                    return value
+                else:
+                    # Return None for void functions, LLVM value for others
+                    if func.function_type.return_type == self.void_type:
+                        return None
+                    return call_result
         if isinstance(node, StringLiteral):
             return self.create_string_constant(node.value)
         if isinstance(node, FunctionDeclaration):
@@ -690,8 +743,112 @@ class CodeGenerator:
             self.array_lengths = old_array_lengths
             self.variable_types = old_variable_types
             self.current_return_type = old_current_return_type  # Restore previous return type
+        if isinstance(node, DynamicFunctionDeclaration):
+            old_builder = self.builder
+            old_variables = self.variables
+            old_array_lengths = self.array_lengths
+            old_variable_types = self.variable_types
+            old_current_return_type = getattr(self, 'current_return_type', None)
+            
+            self.array_lengths = dict(old_array_lengths)
+            self.variables = dict(old_variables)
+            self.variable_types = dict(old_variable_types)
+            
+            # Create parameter types from annotations
+            param_types = []
+            for param in node.parameters:
+                if param.param_type:
+                    param_types.append(self.get_llvm_type(param.param_type))
+                else:
+                    param_types.append(self.int_type)  # Default fallback
+            
+            # Use a tagged union approach for dynamic returns:
+            # struct { i8 type_tag; union { i32 int_val; double float_val; } value; }
+            return_struct_type = llvmlite.ir.LiteralStructType([
+                self.int_type,           # type tag (0=int, 1=float, 2=bool, 3=string, 4=array, 5=void)
+                self.int_type            # value (use largest type that can hold others)
+            ])
+            
+            func_type = llvmlite.ir.FunctionType(return_struct_type, param_types)
+            func = llvmlite.ir.Function(self.module, func_type, name=node.name)
+            self.functions[node.name] = func
+            block = func.append_basic_block(name="entry")
+            self.builder = llvmlite.ir.IRBuilder(block)
+            
+            # Track that we're in a dynamic function
+            self.current_return_type = return_struct_type
+            
+            # Allocate space for parameters with correct types
+            for arg, param in zip(func.args, node.parameters):
+                param_type = self.get_llvm_type(param.param_type) if param.param_type else self.int_type
+                pointer = self.builder.alloca(param_type, name=param.name)
+                self.builder.store(arg, pointer)
+                self.variables[param.name] = pointer
+                self.variable_types[param.name] = param_type
+            
+            # Generate function body
+            for statement in node.body.statements:
+                self.generate(statement)
+            
+            # Add default return if block has no terminator
+            if not self.builder.block.is_terminated:
+                # Return default int 0
+                type_tag = llvmlite.ir.Constant(self.int_type, 0)  # int type
+                value = llvmlite.ir.Constant(self.int_type, 0)     # int value 0
+                return_val = llvmlite.ir.Constant(return_struct_type, [type_tag, value])
+                self.builder.ret(return_val)
+            
+            self.builder = old_builder
+            self.variables = old_variables
+            self.array_lengths = old_array_lengths
+            self.variable_types = old_variable_types
+            self.current_return_type = old_current_return_type
+            self.variables = old_variables
+            self.array_lengths = old_array_lengths
+            self.variable_types = old_variable_types
+            self.current_return_type = old_current_return_type  # Restore previous return type
         if isinstance(node, ReturnStatement):
             expected_type = getattr(self, 'current_return_type', self.int_type)
+            
+            # Check if we're in a dynamic function
+            if hasattr(self, 'current_return_type') and hasattr(expected_type, 'elements'):
+                # Dynamic function with tagged union return
+                if node.value is None:
+                    # Return void/default value
+                    type_tag = llvmlite.ir.Constant(self.int_type, 5)  # void type
+                    value = llvmlite.ir.Constant(self.int_type, 0)
+                    return_val = llvmlite.ir.Constant(expected_type, [type_tag, value])
+                    return self.builder.ret(return_val)
+                
+                # Generate the value and determine its type
+                value = self.generate(node.value)
+                
+                # Determine type tag based on LLVM type
+                if value.type == self.int_type:
+                    type_tag = llvmlite.ir.Constant(self.int_type, 0)  # int
+                elif value.type == self.float_type:
+                    type_tag = llvmlite.ir.Constant(self.int_type, 1)  # float
+                    # Convert float to int for storage
+                    value = self.builder.fptosi(value, self.int_type)
+                elif value.type == self.bool_type:
+                    type_tag = llvmlite.ir.Constant(self.int_type, 2)  # bool
+                    value = self.builder.zext(value, self.int_type)
+                else:
+                    type_tag = llvmlite.ir.Constant(self.int_type, 0)  # default to int
+                    if value.type != self.int_type:
+                        value = self.builder.ptrtoint(value, self.int_type)
+                
+                # Create return struct by inserting into undef-like value
+                # First create a zero-initialized struct, then build it up
+                zero_val = llvmlite.ir.Constant(self.int_type, 0)
+                temp_struct = llvmlite.ir.Constant(expected_type, [zero_val, zero_val])
+                
+                # Use insert_value instructions to modify it properly
+                return_val = self.builder.insert_value(temp_struct, type_tag, 0)
+                return_val = self.builder.insert_value(return_val, value, 1)
+                return self.builder.ret(return_val)
+            
+            # Original static function handling
             if expected_type == self.void_type:
                 return self.builder.ret_void()
             

@@ -1,0 +1,5 @@
+from round_module use round
+
+// Test imported function
+print(round(0.7))
+print(round(0.3))

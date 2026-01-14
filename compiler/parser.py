@@ -112,7 +112,7 @@ class Parser:
                     member_property = self.current_token().value
                     self.advance()
                 else:
-                    raise CompilerError(f"Invalid member property: {self.current_token().value}")
+                    raise CompilerError(f"Invalid member property: {self.current_token().value}", "ERROR")
                 base = MemberExpression(base, member_property)
                 # Check if this is followed by function call parentheses
                 if self.match("SYMBOL", "("):
@@ -192,6 +192,8 @@ class Parser:
             return self.parse_if_statement()
         elif self.match("KEYWORD", "for"):
             return self.parse_for_statement()
+        elif self.match("KEYWORD", "func"):
+            return self.parse_dynamic_function()
         elif self.match("KEYWORD", "int") or self.match("KEYWORD", "float") or self.match("KEYWORD", "void") or self.match("KEYWORD", "array") or self.match("KEYWORD", "string") or self.match("KEYWORD", "bool"):
             return self.parse_declaration()
         elif self.match("KEYWORD", "from") or self.match("KEYWORD", "use"):
@@ -271,6 +273,32 @@ class Parser:
         self.expect("SYMBOL", ")")
         body = self.parse_block()
         return FunctionDeclaration(return_type, func_name, params, body)
+    
+    def parse_dynamic_function(self):
+        self.advance()  # consume 'func'
+        func_name = self.current_token().value
+        self.expect("NAME")
+        
+        self.expect("SYMBOL", "(")
+        params = []
+        if not self.match("SYMBOL", ")"):
+            # For dynamic functions, parameters have static type annotations
+            param = self.parse_parameter()
+            params.append(param)
+            while self.match("SYMBOL", ","):
+                self.advance()
+                param = self.parse_parameter()
+                params.append(param)
+        self.expect("SYMBOL", ")")
+        
+        # Parse function body
+        self.expect("SYMBOL", "{")
+        statements = []
+        while not self.match("SYMBOL", "}"):
+            statements.append(self.parse_statement())
+        self.expect("SYMBOL", "}")
+        body = Block(statements)
+        return DynamicFunctionDeclaration(func_name, params, body)
     
     def parse_parameter(self):
         param_type = self.current_token().value

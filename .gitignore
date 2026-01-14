@@ -1,0 +1,5 @@
+venv
+*/.claude
+.claude
+*/AGENTS.md
+*/prompt.txt

@@ -40,22 +40,8 @@ class SemanticAnalyzer:
             return self.analyze_variable_declaration(node)
         if isinstance(node, FunctionDeclaration):
             return self.analyze_function_declaration(node)
-        if isinstance(node, Identifier):
-            return self.analyze_identifier(node)
-        if isinstance(node, ExpressionStatement):
-            return self.analyze_expression_statement(node)
-        if isinstance(node, SetStatement):
-            return self.analyze_set_statement(node)
-        if isinstance(node, BinaryExpression):
-            return self.analyze_binary_expression(node)
-        if isinstance(node, CallExpression):
-            return self.analyze_call_expression(node)
-        if isinstance(node, IfStatement):
-            return self.analyze_if_statement(node)
-        if isinstance(node, MemberExpression):
-            return self.analyze_member_expression(node)
-        if isinstance(node, ForInStatement):
-            return self.analyze_for_statement(node)
+        if isinstance(node, DynamicFunctionDeclaration):
+            return self.analyze_dynamic_function_declaration(node)
         if isinstance(node, FromImportStatement):
             return self.analyze_from_import(node)
         if isinstance(node, SimpleImportStatement):
@@ -88,6 +74,27 @@ class SemanticAnalyzer:
         for statement in node.body.statements:
             self.analyze(statement)
         self.symbol_table.exit_scope()
+    
+    def analyze_dynamic_function_declaration(self, node: DynamicFunctionDeclaration):
+        # Dynamic function with statically typed parameters and dynamic return
+        self.symbol_table.declare(node.name, "function", "any")
+        self.symbol_table.enter_scope()
+        
+        # Validate and declare parameters with their static types
+        for param in node.parameters:
+            if param.param_type is None:
+                pos_info = self.get_position_info(node)
+                self.errors.append(f"Dynamic function '{node.name}' requires type annotation for parameter '{param.name}'{pos_info}")
+                param.param_type = "int"  # Default fallback
+            self.symbol_table.declare(param.name, "parameter", param.param_type)
+        
+        # Analyze function body
+        for statement in node.body.statements:
+            self.analyze(statement)
+        
+        self.symbol_table.exit_scope()
+        return "any"  # Dynamic function can return any type
+        
     def analyze_identifier(self, node: Identifier):
         res = self.symbol_table.lookup(node.name) # check if its declared or not
         if not res:
@@ -102,7 +109,10 @@ class SemanticAnalyzer:
             pos_info = self.get_position_info(node)
             self.errors.append(f"Undeclared variable '{node.name}' in assignment{pos_info}")
             return None
-        original_type = self.symbol_table.lookup(node.name)["data_type"]
+        var_info = self.symbol_table.lookup(node.name)
+        if not var_info:
+            return None
+        original_type = var_info["data_type"]
         type_assigned = self.analyze(node.value)
         if original_type != type_assigned:
                 self.errors.append(f"Type mismatch. Cannot assign type {type_assigned} to {original_type}")

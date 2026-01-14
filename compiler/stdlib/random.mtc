@@ -1,0 +1,4 @@
+// needs to be able to import c libs 
+// from c use rand
+// rand() can be used to have randint, choice, rand, etc.
+// or we can generate a hard coded seed but thats not efficent for true randomness

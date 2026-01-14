@@ -1,0 +1,13 @@
+from stdlib.math use min, max, sum, avgmean, round
+
+array arr = [1, 2, 3, 4, 5]
+
+print(min(arr))
+print("==========================")
+print(max(arr))
+print("==========================")
+print(sum(arr))
+print("==========================")
+print(avgmean(arr))
+print("==========================")
+print(round(2.4, 2)) // doesnt work see math.mtc
