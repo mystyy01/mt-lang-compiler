@@ -2,17 +2,18 @@ from tokenizer import Tokenizer
 from parser import Parser
 from semantic import SemanticAnalyzer
 
-with open("test_error.mtc", "r") as f:
+test_file = "test_error.mtc"
+with open(test_file, "r") as f:
     source = f.read()
-tokenizer = Tokenizer(source)
+tokenizer = Tokenizer(source, test_file)
 tokens = tokenizer.tokenize()
 print(tokens)
-parsed = Parser(tokens).parse_program()
+parsed = Parser(tokens, test_file).parse_program()
 print(parsed)
 print("=== AST ===")
 print(parsed)
 print("\n=== Semantic Analysis ===")
-analyzer = SemanticAnalyzer()
+analyzer = SemanticAnalyzer(test_file)
 analyzer.analyze(parsed)
 if analyzer.errors:
     print("Errors found:")

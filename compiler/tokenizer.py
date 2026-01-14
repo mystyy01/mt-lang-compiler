@@ -12,16 +12,18 @@ class Token:
     def __repr__(self):
         return f"{self.type}: {self.value}"
 class CompilerError(Exception):
-    def __init__(self, message, severity):
-        super().__init__(message + f" (Severity: {severity})")
+    def __init__(self, message, severity, file_path=None):
+        file_info = f" in {file_path}" if file_path and file_path != "unknown" else ""
+        super().__init__(message + f"{file_info} (Severity: {severity})")
         # change text colour to yellow for warnings and stop compiling and turn text red for error
 
 class Tokenizer:
-    def __init__(self, source: str):
+    def __init__(self, source: str, file_path=None):
         self.source = source
         self.position = 0
         self.line = 1
         self.column = 1
+        self.file_path = file_path or "unknown"
     def current_char(self):
         return self.source[self.position]
     def advance(self, offset=1):
@@ -86,7 +88,7 @@ class Tokenizer:
                     number += self.current_char()
                     self.advance()
             else:
-                raise Exception(f"Invalid float literal at line {start_line}: expected digits after decimal point")
+                raise CompilerError(f"Invalid float literal at line {start_line}: expected digits after decimal point", "ERROR", self.file_path)
         
         # Handle scientific notation
         if not self.is_at_end() and self.current_char().lower() == 'e':
@@ -105,7 +107,7 @@ class Tokenizer:
                     number += self.current_char()
                     self.advance()
             else:
-                raise Exception(f"Invalid float literal at line {start_line}: expected digits in exponent")
+                raise CompilerError(f"Invalid float literal at line {start_line}: expected digits in exponent", "ERROR", self.file_path)
         
         # Determine token type based on whether we saw a decimal point or exponent
         is_float = has_decimal or has_exponent
@@ -135,7 +137,7 @@ class Tokenizer:
                 self.advance()
                 return token
             else:
-                raise CompilerError(f"Unknown symbol '{self.current_char()}' at line {self.line}, column {self.column}", "ERROR")
+                raise CompilerError(f"Unknown symbol '{self.current_char()}' at line {self.line}, column {self.column}", "ERROR", self.file_path)
     def tokenize(self):
         tokens = []
         while not self.is_at_end():
@@ -177,5 +179,5 @@ class Tokenizer:
             else:
                 # Debug: show what character is causing issue
                 char = self.current_char() if not self.is_at_end() else "EOF"
-                raise CompilerError(f"Tokenizer failed at char {self.position}: '{char}' (line {self.line}, col {self.column})", "ERROR")
+                raise CompilerError(f"Tokenizer failed at char {self.position}: '{char}' (line {self.line}, col {self.column})", "ERROR", self.file_path)
         return tokens

@@ -1,9 +1,10 @@
 from tokenizer import Token, CompilerError
 from ast_nodes import *
 class Parser:
-    def __init__(self, tokens: list[Token]):
+    def __init__(self, tokens: list[Token], file_path=None):
         self.tokens = tokens
         self.position = 0
+        self.file_path = file_path or "unknown"
     def current_token(self):
         if self.position >= len(self.tokens):
             return Token("EOF", "")
@@ -18,6 +19,17 @@ class Parser:
         if self.position >= len(self.tokens):
             return True
         return False
+    
+    def get_position_info(self, token=None):
+        """Get formatted position information for error messages"""
+        if token is None:
+            token = self.current_token()
+        if hasattr(token, 'line') and token.line is not None:
+            pos_info = f" at line {token.line}"
+            if hasattr(token, 'column') and token.column is not None:
+                pos_info += f", column {token.column}"
+            return pos_info
+        return ""
     def match(self, token_type, value=None):
         if not self.current_token():
             return False
@@ -26,10 +38,19 @@ class Parser:
         else:
             return False
     def expect(self, token_type, value=None):
-        if self.current_token().type == token_type and (value is None or self.current_token().value == value):
+        current = self.current_token()
+        expected = value if value else token_type
+        
+        if current.type == token_type and (value is None or current.value == value):
             self.advance()
         else:
-            raise CompilerError("Unexpected token", "ERROR")
+            # Build detailed error message with position info
+            pos_info = self.get_position_info(current)
+            
+            if value:
+                raise CompilerError(f"Expected '{value}'{pos_info} but found '{current.value}' ({current.type})", "ERROR", self.file_path)
+            else:
+                raise CompilerError(f"Expected {token_type}{pos_info} but found '{current.value}' ({current.type})", "ERROR", self.file_path)
     def parse_primary(self):
         if self.current_token().type == "INTEGER_LITERAL":
             token = self.current_token()
@@ -112,7 +133,9 @@ class Parser:
                     member_property = self.current_token().value
                     self.advance()
                 else:
-                    raise CompilerError(f"Invalid member property: {self.current_token().value}", "ERROR")
+                    current = self.current_token()
+                    pos_info = self.get_position_info(current)
+                    raise CompilerError(f"Invalid member property: '{current.value}'{pos_info} - expected NAME or KEYWORD", "ERROR", self.file_path)
                 base = MemberExpression(base, member_property)
                 # Check if this is followed by function call parentheses
                 if self.match("SYMBOL", "("):

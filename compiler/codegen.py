@@ -141,8 +141,17 @@ class CodeGenerator:
         with open(file_path, "r") as f:
             source = f.read()
 
-        tokens = Tokenizer(source).tokenize()
-        ast = Parser(tokens).parse_program()
+        tokens = Tokenizer(source, file_path).tokenize()
+        ast = Parser(tokens, file_path).parse_program()
+        
+        # Run semantic analysis on the module
+        from semantic import SemanticAnalyzer
+        module_analyzer = SemanticAnalyzer(file_path)
+        module_analyzer.analyze(ast)
+        if module_analyzer.errors:
+            for error in module_analyzer.errors:
+                print(f"Error: {error}")
+            # Continue with compilation despite module errors for now
 
         # Track functions before and after to know what was added
         before_funcs = set(self.functions.keys())
@@ -365,8 +374,17 @@ class CodeGenerator:
                 self.imported_modules.add(file_path)
                 with open(file_path, "r") as f:
                     source = f.read()
-                tokens = Tokenizer(source).tokenize()
-                ast = Parser(tokens).parse_program()
+                tokens = Tokenizer(source, file_path).tokenize()
+                ast = Parser(tokens, file_path).parse_program()
+                
+                # Run semantic analysis on the module
+                from semantic import SemanticAnalyzer
+                module_analyzer = SemanticAnalyzer(file_path)
+                module_analyzer.analyze(ast)
+                if module_analyzer.errors:
+                    for error in module_analyzer.errors:
+                        print(f"Error: {error}")
+                
                 # Track functions before and after to know what was added
                 before_funcs = set(self.functions.keys())
                 for statement in ast.statements:

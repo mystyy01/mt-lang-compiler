@@ -17,22 +17,32 @@ class SymbolTable:
                 return scope[name]
         return None
 class SemanticAnalyzer:
-    def __init__(self):
+    def __init__(self, file_path=None):
         self.symbol_table = SymbolTable()
         self.symbol_table.declare("print", "builtin", "function")
         # Declare built-in array methods
         self.symbol_table.declare("length", "builtin", "method")
         self.symbol_table.declare("append", "builtin", "method")
         self.errors = []
+        self.file_path = file_path or "unknown"
     
     def get_position_info(self, node):
         """Get formatted position information for error messages"""
+        pos_info = ""
         if hasattr(node, 'line') and node.line is not None:
             pos_info = f" at line {node.line}"
             if hasattr(node, 'column') and node.column is not None:
                 pos_info += f", column {node.column}"
-            return pos_info
-        return ""
+        
+        return pos_info
+    
+    def add_error(self, message, include_file=True):
+        """Add an error with file information"""
+        if include_file:
+            file_info = f" in {self.file_path}" if self.file_path and self.file_path != "unknown" else ""
+            self.errors.append(f"{message}{file_info}")
+        else:
+            self.errors.append(message)
     def analyze(self, node):
         if isinstance(node, Program):
             return self.analyze_program(node)
@@ -64,7 +74,7 @@ class SemanticAnalyzer:
             # "any" is a wildcard that matches any type
             if type_of_node != node.type and type_of_node != "any":
                 pos_info = self.get_position_info(node)
-                self.errors.append(f"Type mismatch at {pos_info}. Cannot assign type {type_of_node} to {node.type}")
+                self.add_error(f"Type mismatch{pos_info}. Cannot assign type {type_of_node} to {node.type}")
         self.symbol_table.declare(node.name, "variable", node.type)
     def analyze_function_declaration(self, node: FunctionDeclaration):
         self.symbol_table.declare(node.name, "function", node.return_type)
@@ -84,7 +94,7 @@ class SemanticAnalyzer:
         for param in node.parameters:
             if param.param_type is None:
                 pos_info = self.get_position_info(node)
-                self.errors.append(f"Dynamic function '{node.name}' requires type annotation for parameter '{param.name}'{pos_info}")
+                self.add_error(f"Dynamic function '{node.name}' requires type annotation for parameter '{param.name}'{pos_info}")
                 param.param_type = "int"  # Default fallback
             self.symbol_table.declare(param.name, "parameter", param.param_type)
         
@@ -99,7 +109,7 @@ class SemanticAnalyzer:
         res = self.symbol_table.lookup(node.name) # check if its declared or not
         if not res:
             pos_info = self.get_position_info(node)
-            self.errors.append(f"Undeclared variable '{node.name}'{pos_info}")
+            self.add_error(f"Undeclared variable '{node.name}'{pos_info}")
             return
         return res["data_type"]
     def analyze_expression_statement(self, node: ExpressionStatement):
@@ -107,7 +117,7 @@ class SemanticAnalyzer:
     def analyze_set_statement(self, node: SetStatement):
         if not self.symbol_table.lookup(node.name):
             pos_info = self.get_position_info(node)
-            self.errors.append(f"Undeclared variable '{node.name}' in assignment{pos_info}")
+            self.add_error(f"Undeclared variable '{node.name}' in assignment{pos_info}")
             return None
         var_info = self.symbol_table.lookup(node.name)
         if not var_info:
@@ -115,7 +125,7 @@ class SemanticAnalyzer:
         original_type = var_info["data_type"]
         type_assigned = self.analyze(node.value)
         if original_type != type_assigned:
-                self.errors.append(f"Type mismatch. Cannot assign type {type_assigned} to {original_type}")
+                self.add_error(f"Type mismatch. Cannot assign type {type_assigned} to {original_type}")
                 return None
         self.analyze(node.value)
     def analyze_binary_expression(self, node: BinaryExpression):
@@ -194,7 +204,7 @@ class SemanticAnalyzer:
         for element in node.elements[1:]:
             elem_type = self.analyze(element)
             if elem_type != first_type:
-                self.errors.append(f"Array elements must all be the same type. Expected {first_type}, got {elem_type}")
+                self.add_error(f"Array elements must all be the same type. Expected {first_type}, got {elem_type}")
 
         return "array"
     def analyze_bool_literal(self, node):

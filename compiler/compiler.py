@@ -23,10 +23,13 @@ if __name__ == "__main__":
 
     with open(source_file, "r") as f:
         source_code = f.read()
-    tokens = Tokenizer(source_code).tokenize()
-    ast = Parser(tokens).parse_program()
+    
+    # Use absolute path for clearer error messages
+    abs_source_file = os.path.abspath(source_file)
+    tokens = Tokenizer(source_code, abs_source_file).tokenize()
+    ast = Parser(tokens, abs_source_file).parse_program()
     from semantic import SemanticAnalyzer
-    analyzer = SemanticAnalyzer()
+    analyzer = SemanticAnalyzer(abs_source_file)
     analyzer.analyze(ast)
     if analyzer.errors:
         for error in analyzer.errors:
@@ -39,9 +42,6 @@ if __name__ == "__main__":
         result = llvmlite.ir.Constant(gen.int_type, 0)
     gen.builder.ret(result)
 
-    # Print the IR
-    print("=== LLVM IR ===")
-    print(gen.module)
 
     # Compile to machine code
     llvm_ir = str(gen.module)
@@ -56,7 +56,7 @@ if __name__ == "__main__":
     with open(f"{out}.o", "wb") as f:
         f.write(target_machine.emit_object(mod))
 
-    print("\n=== Compiled to output.o ===")
+    print(f"\n=== Compiled to {out}.o ===")
     print("\n=== Compiling to binary ===")
     import os
     os.system(f"clang {out}.o -o {out}")

@@ -1,4 +1,4 @@
-array range(integer){
+array range(int integer){
     array arr = []
     int rnge = 0
     while (rnge < integer){

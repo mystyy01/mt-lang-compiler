@@ -1,9 +1,0 @@
-float myfloat = 5.2
-int integer = 5
-
-# Basic float operations
-float result1 = integer + myfloat
-
-# Test scientific notation
-float scientific = 1.5e-3
-print(myfloat)
