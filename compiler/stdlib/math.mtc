@@ -44,15 +44,8 @@ float avgmean(array arr){
 }
 // Round function (does not work at all needs to be fixed idk how)
 func round(float num, int decimals) {
-    float multiplier = 1.0
-    int i = 0
-    while (i < decimals) {
-        set multiplier = multiplier * 10.0
-        set i = i + 1
-    }
-    float temp = num * multiplier
-    float temp_int = temp + 0.5 
-    float result = temp_int / multiplier
-    return result
+   if (decimals == 0){
+      return 1 // return the nearest integer value of the float. Need an int(var) builtin 
+    } 
 }
 
