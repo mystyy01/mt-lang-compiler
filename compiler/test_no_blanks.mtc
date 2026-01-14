@@ -1,11 +1,9 @@
 class TestClass {
     int x
     string name
-
     void greet() {
         print("Hello from " + this.name)
     }
-
     int getX() {
         return this.x
     }

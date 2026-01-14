@@ -37,6 +37,14 @@ class Parser:
             return True
         else:
             return False
+
+    def peek_match(self, token_type, value=None, offset=0):
+        """Check if token at current position + offset matches without consuming"""
+        pos = self.position + offset
+        if pos >= len(self.tokens):
+            return False
+        token = self.tokens[pos]
+        return token.type == token_type and (value is None or token.value == value)
     def expect(self, token_type, value=None):
         current = self.current_token()
         expected = value if value else token_type
@@ -67,18 +75,18 @@ class Parser:
             literal = StringLiteral(token.value, token.line, token.column)
             self.advance()
             return literal
-        elif self.current_token().type == "NAME":
+        elif self.current_token().type == "NAME" or (self.current_token().type == "KEYWORD" and self.current_token().value in ["fopen", "fclose", "fread", "fwrite", "fseek", "ftell", "malloc", "free"]):
             token = self.current_token()
             literal = Identifier(token.value, token.line, token.column)
             self.advance()
-            
+
             # Check for array indexing: identifier[expression]
             if self.current_token().type == "SYMBOL" and self.current_token().value == "[":
                 self.advance()  # consume '['
                 index = self.parse_expression()
                 self.expect("SYMBOL", "]")
                 return IndexExpression(literal, index)
-            
+
             return literal
         elif self.current_token().type == "KEYWORD" and self.current_token().value == "typeof":
             self.advance()
@@ -87,6 +95,22 @@ class Parser:
             node = self.parse_expression()
             self.expect("SYMBOL", ")")
             return TypeofExpression(node)
+        elif self.match("KEYWORD", "this"):
+            self.advance()
+            return ThisExpression()
+        elif self.match("KEYWORD", "new"):
+            self.advance()
+            class_name = self.current_token().value
+            self.expect("NAME")
+            self.expect("SYMBOL", "(")
+            args = []
+            if not self.match("SYMBOL", ")"):
+                args.append(self.parse_expression())
+                while self.match("SYMBOL", ","):
+                    self.advance()
+                    args.append(self.parse_expression())
+            self.expect("SYMBOL", ")")
+            return NewExpression(class_name, args)
         elif self.match("KEYWORD", "int") or self.match("KEYWORD", "float") or self.match("KEYWORD", "string") or self.match("KEYWORD", "array") or self.match("KEYWORD", "bool") or self.match("KEYWORD", "void"):
             value = self.current_token().value
             self.advance()
@@ -217,23 +241,16 @@ class Parser:
             return self.parse_for_statement()
         elif self.match("KEYWORD", "func"):
             return self.parse_dynamic_function()
-        elif self.match("KEYWORD", "int") or self.match("KEYWORD", "float") or self.match("KEYWORD", "void") or self.match("KEYWORD", "array") or self.match("KEYWORD", "string") or self.match("KEYWORD", "bool"):
+        elif (self.match("KEYWORD", "int") or self.match("KEYWORD", "float") or self.match("KEYWORD", "void") or
+              self.match("KEYWORD", "array") or self.match("KEYWORD", "string") or self.match("KEYWORD", "bool") or
+              (self.current_token().type == "NAME" and self.peek_token() and self.peek_token().type == "NAME")):
             return self.parse_declaration()
         elif self.match("KEYWORD", "from") or self.match("KEYWORD", "use"):
             return self.parse_import_statement()
         elif self.match("KEYWORD", "while"):
             return self.parse_while_statement()
         elif self.match("KEYWORD", "class"):
-            # For now, skip class declarations (stub implementation)
-            self.advance()  # consume 'class'
-            class_name = self.current_token().value
-            self.expect("NAME")
-            # Skip to the end of class declaration
-            while not self.match("SYMBOL", "}"):
-                if self.is_at_end():
-                    break
-                self.advance()
-            return None  # Skip class definitions for now
+            return self.parse_class_declaration()
         else:
             return self.parse_expression_statement()
     def parse_expression_statement(self):
@@ -383,6 +400,147 @@ class Parser:
                 self.advance()
                 alias = self.current_token().value
             return SimpleImportStatement(module_name, alias)
+    def parse_class_declaration(self):
+        self.advance()  # consume 'class'
+        class_name = self.current_token().value
+        self.expect("NAME")
+        self.expect("SYMBOL", "{")
+
+        fields = []
+        methods = []
+
+        while not self.match("SYMBOL", "}"):
+            if self.is_at_end():
+                raise CompilerError("Unterminated class declaration", "ERROR", self.file_path)
+
+            # Look ahead without consuming to determine if this is a field or method
+            saved_pos = self.position
+
+            # Check for static/virtual modifiers
+            has_static = self.peek_match("KEYWORD", "static")
+            has_virtual = self.peek_match("KEYWORD", "virtual") if not has_static else False
+
+            # Skip modifiers in peek
+            peek_pos = self.position
+            if has_static:
+                peek_pos += 1
+            elif has_virtual:
+                peek_pos += 1
+
+            # Check if next is a type keyword, name (user-defined type), or func
+            type_match = False
+            is_func = False
+            has_arg = False
+            if peek_pos < len(self.tokens):
+                token = self.tokens[peek_pos]
+                if token.type == "KEYWORD" and token.value == "arg":
+                    has_arg = True
+                    peek_pos += 1  # skip 'arg'
+                    token = self.tokens[peek_pos] if peek_pos < len(self.tokens) else None
+
+                if token and token.type == "KEYWORD" and token.value in ["int", "float", "void", "string", "bool", "array"]:
+                    type_match = True
+                    peek_pos += 1  # skip type
+                elif token and token.type == "NAME":
+                    # User-defined type (class name)
+                    type_match = True
+                    peek_pos += 1  # skip type
+                elif token and token.type == "KEYWORD" and token.value == "func":
+                    is_func = True
+                    peek_pos += 1  # skip func
+
+                if type_match or is_func:
+                    # Check if next is name
+                    if peek_pos < len(self.tokens) and self.tokens[peek_pos].type == "NAME":
+                        peek_pos += 1  # skip name
+
+                        # Check if next is (
+                        if peek_pos < len(self.tokens) and self.tokens[peek_pos].type == "SYMBOL" and self.tokens[peek_pos].value == "(":
+                            # It's a method
+                            method = self.parse_method_declaration()
+                            methods.append(method)
+                        else:
+                            # It's a field
+                            field = self.parse_field_declaration()
+                            fields.append(field)
+                        continue
+
+            # If we get here, it didn't match the expected pattern
+            self.position = saved_pos  # reset position
+            current = self.current_token()
+            pos_info = self.get_position_info(current)
+            raise CompilerError(f"Expected field or method declaration in class{pos_info}", "ERROR", self.file_path)
+
+        self.expect("SYMBOL", "}")
+        return ClassDeclaration(class_name, fields, methods)
+
+    def parse_field_declaration(self):
+        # Check for arg keyword (only valid in class context)
+        is_constructor_arg = False
+        if self.match("KEYWORD", "arg"):
+            self.advance()
+            is_constructor_arg = True
+
+        field_type = self.current_token().value
+        self.advance()
+        field_name = self.current_token().value
+        self.expect("NAME")
+
+        # Check for initializer
+        initializer = None
+        if self.match("SYMBOL", "="):
+            self.advance()
+            initializer = self.parse_expression()
+
+        return FieldDeclaration(field_name, field_type, initializer=initializer, is_constructor_arg=is_constructor_arg)
+
+    def parse_method_declaration(self):
+        is_static = False
+        is_virtual = False
+
+        # Check for static/virtual modifiers
+        if self.match("KEYWORD", "static"):
+            self.advance()
+            is_static = True
+        elif self.match("KEYWORD", "virtual"):
+            self.advance()
+            is_virtual = True
+
+        # Parse return type or func keyword
+        if self.match("KEYWORD", "func"):
+            # Dynamic function method - no explicit return type
+            self.advance()
+            return_type = None
+        else:
+            # Regular method with return type (can be built-in or user-defined)
+            return_type = self.current_token().value
+            # Accept either KEYWORD or NAME (for user-defined types)
+            if self.current_token().type == "KEYWORD" or self.current_token().type == "NAME":
+                self.advance()  # consume return type
+            else:
+                raise CompilerError(f"Expected return type but found '{self.current_token().value}' ({self.current_token().type})", "ERROR", self.file_path)
+
+        # Parse method name
+        method_name = self.current_token().value
+        self.expect("NAME")
+
+        # Parse parameters
+        self.expect("SYMBOL", "(")
+        params = []
+        if not self.match("SYMBOL", ")"):
+            param = self.parse_parameter()
+            params.append(param)
+            while self.match("SYMBOL", ","):
+                self.advance()
+                param = self.parse_parameter()
+                params.append(param)
+        self.expect("SYMBOL", ")")
+
+        # Parse method body
+        body = self.parse_block()
+
+        return MethodDeclaration(method_name, params, return_type, body, is_virtual, is_static)
+
     def parse_program(self):
         statements = []
         while not self.is_at_end():

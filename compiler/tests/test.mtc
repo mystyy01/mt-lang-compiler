@@ -1,8 +1,0 @@
-array items = ["apple", "banana", "burger"]
-array prices = [2, 3, 5]
-void print_menu(){
-    for (item in items) { 
-        print(item)
-    }
-}
-print_menu()

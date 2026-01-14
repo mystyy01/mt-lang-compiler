@@ -1,1 +1,23 @@
-// may have to add new builtins for opening and closing file buffers
+class File{
+    arg string path
+    arg string mode
+
+    string read(){
+        if (this.mode != "r"){
+            return "Cannot read files without read permissions"
+        }
+        string file = fopen(this.path, "r")
+        fseek(file, 0, 2)
+        int fileSize = ftell(file)
+        fseek(file, 0, 0)
+        int bufferSize = fileSize + 1
+        string buffer = malloc(bufferSize)
+        fread(buffer, 1, fileSize, file)
+        fclose(file)
+        return buffer
+    }
+    // implement writing
+    // implement appending
+    // implement write bytes
+    // implement read bytes
+}

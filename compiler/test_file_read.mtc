@@ -1,0 +1,11 @@
+class File{
+    arg string path
+    arg string mode
+
+    string read(string filePath){
+    }
+}
+
+File file = new File("test.txt", "r")
+string contents = file.read("test.txt")
+print(contents)

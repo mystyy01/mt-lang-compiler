@@ -1,4 +1,5 @@
 from ast_nodes import *
+import os
 
 class SymbolTable:
     def __init__(self):
@@ -46,6 +47,8 @@ class SemanticAnalyzer:
     def analyze(self, node):
         if isinstance(node, Program):
             return self.analyze_program(node)
+        if isinstance(node, ClassDeclaration):
+            return self.analyze_class_declaration(node)
         if isinstance(node, VariableDeclaration):
             return self.analyze_variable_declaration(node)
         if isinstance(node, FunctionDeclaration):
@@ -64,17 +67,99 @@ class SemanticAnalyzer:
             return self.analyze_array_literal(node)
         if isinstance(node, StringLiteral):
             return self.analyze_string_literal(node)
+        if isinstance(node, NewExpression):
+            return self.analyze_new_expression(node)
+        if isinstance(node, CallExpression):
+            return self.analyze_call_expression(node)
+        if isinstance(node, MemberExpression):
+            return self.analyze_member_expression(node)
         # cant implement bools yet since they arent an AST class yet (adding soon)
     def analyze_program(self, node: Program):
         for statement in node.statements:
             self.analyze(statement)
+    def analyze_class_declaration(self, node: ClassDeclaration):
+        # Declare the class in the symbol table
+        self.symbol_table.declare(node.name, "class", node.name)
+
+        # Enter class scope for analyzing fields and methods
+        self.symbol_table.enter_scope()
+
+        # Analyze fields
+        for field in node.fields:
+            self.analyze_field_declaration(field)
+
+        # Analyze methods
+        for method in node.methods:
+            self.analyze_method_declaration(method)
+
+        self.symbol_table.exit_scope()
+
+    def analyze_field_declaration(self, node: FieldDeclaration):
+        # Fields are just stored in the class scope
+        self.symbol_table.declare(node.name, "field", node.type)
+
+        # Analyze initializer if present
+        if node.initializer:
+            init_type = self.analyze(node.initializer)
+            # Check type compatibility
+            if init_type != node.type and init_type != "any":
+                pos_info = self.get_position_info(node)
+                self.add_error(f"Field initializer type mismatch{pos_info}. Cannot assign {init_type} to {node.type}")
+
+    def analyze_method_declaration(self, node: MethodDeclaration):
+        # Declare method in current scope (class scope)
+        self.symbol_table.declare(node.name, "method", node.return_type)
+
+        # Enter method scope
+        self.symbol_table.enter_scope()
+
+        # Declare parameters
+        for param in node.params:
+            self.symbol_table.declare(param.name, "parameter", param.param_type or "any")
+
+        # Analyze method body
+        for statement in node.body.statements:
+            self.analyze(statement)
+
+        self.symbol_table.exit_scope()
+
+    def analyze_new_expression(self, node: NewExpression):
+        # Check that the class exists
+        class_symbol = self.symbol_table.lookup(node.class_name)
+        if not class_symbol or class_symbol["symbol_type"] != "class":
+            pos_info = self.get_position_info(node)
+            self.add_error(f"Unknown class '{node.class_name}'{pos_info}")
+            return "unknown"
+
+        # For now, we can't check constructor arguments here because we don't have
+        # access to the class definition during semantic analysis of the importing file.
+        # This would need to be checked during code generation or a separate pass.
+
+        return node.class_name  # Return the class name as the type
+
+
+
+    def analyze_member_expression(self, node: MemberExpression):
+        # Analyze the object
+        object_type = self.analyze(node.object)
+        # For now, return unknown - we'll need to look up fields/methods
+        return "unknown"
+
     def analyze_variable_declaration(self, node: VariableDeclaration):
+        # Check if the declared type is valid (built-in or user-defined class)
+        type_symbol = self.symbol_table.lookup(node.type)
+        if not type_symbol and node.type not in ["int", "float", "string", "bool", "array", "void"]:
+            pos_info = self.get_position_info(node)
+            self.add_error(f"Unknown type '{node.type}'{pos_info}")
+
         if node.value:
             type_of_node = self.analyze(node.value)
             # "any" is a wildcard that matches any type
-            if type_of_node != node.type and type_of_node != "any":
-                pos_info = self.get_position_info(node)
-                self.add_error(f"Type mismatch{pos_info}. Cannot assign type {type_of_node} to {node.type}")
+            if type_of_node != node.type and type_of_node != "any" and type_of_node != node.type:
+                # Allow assignment if both are user-defined classes or if value is a new expression of the right type
+                if not (isinstance(node.value, NewExpression) and node.value.class_name == node.type):
+                    pos_info = self.get_position_info(node)
+                    self.add_error(f"Type mismatch{pos_info}. Cannot assign type {type_of_node} to {node.type}")
         self.symbol_table.declare(node.name, "variable", node.type)
     def analyze_function_declaration(self, node: FunctionDeclaration):
         self.symbol_table.declare(node.name, "function", node.return_type)
@@ -151,12 +236,7 @@ class SemanticAnalyzer:
             else:
                 # For mixed types (string, array, etc.), return "any" for now
                 return "any"
-    def analyze_call_expression(self, node: CallExpression):
-        callee_type = self.analyze(node.callee)
-        for arg in node.arguments:
-            self.analyze(arg)
-        # Return the function's return type, or "any" if unknown
-        return callee_type if callee_type else "any"
+
     def analyze_if_statement(self, node: IfStatement):
         self.analyze(node.condition)
         self.symbol_table.enter_scope()
@@ -187,9 +267,110 @@ class SemanticAnalyzer:
         else:
             self.symbol_table.declare(node.module_name, "import", "module")
     def analyze_from_import(self, node: FromImportStatement):
-        # For "from math use add, square" style - declare each function for direct access
-        for symbol in node.symbols:
-            self.symbol_table.declare(symbol, "function", "any")
+        # Load the module and analyze it to find classes and functions
+        module_path = node.module_path
+
+        if isinstance(module_path, Identifier):
+            module_name = module_path.name
+        elif isinstance(module_path, MemberExpression):
+            # Handle module paths like stdlib.io
+            if isinstance(module_path.object, Identifier) and isinstance(module_path.property, str):
+                if module_path.object.name == "stdlib":
+                    module_name = module_path.property
+                else:
+                    return
+            else:
+                return
+        else:
+            # Handle more complex module paths if needed
+            return
+
+        # Try to load the module
+        try:
+            # Check stdlib first
+            stdlib_path = os.path.join(os.path.dirname(__file__), "stdlib", module_name + ".mtc")
+            if os.path.exists(stdlib_path):
+                with open(stdlib_path, "r") as f:
+                    module_source = f.read()
+            else:
+                # Could check other paths, but for now just skip
+                return
+
+            # Parse and analyze the module
+            from tokenizer import Tokenizer
+            from parser import Parser
+            tokens = Tokenizer(module_source, stdlib_path).tokenize()
+            module_ast = Parser(tokens, stdlib_path).parse_program()
+
+            # Analyze the module to find classes
+            module_analyzer = SemanticAnalyzer(stdlib_path)
+            module_analyzer.analyze(module_ast)
+
+            # Register imported symbols
+            for symbol in node.symbols:
+                # Check if it's a class in the module
+                class_symbol = module_analyzer.symbol_table.lookup(symbol)
+                if class_symbol and class_symbol["symbol_type"] == "class":
+                    # Register the class in our symbol table
+                    self.symbol_table.declare(symbol, "class", symbol)
+                else:
+                    # Assume it's a function
+                    self.symbol_table.declare(symbol, "function", "any")
+
+        except Exception as e:
+            # If we can't load the module, just declare as function for now
+            for symbol in node.symbols:
+                self.symbol_table.declare(symbol, "function", "any")
+
+    def analyze_call_expression(self, node: CallExpression):
+        if isinstance(node.callee, Identifier):
+            func_name = node.callee.name
+            # Check for built-in libc functions
+            libc_functions = {
+                "fopen": ("i8*", ["i8*", "i8*"]),  # FILE*
+                "fclose": ("int", ["i8*"]),        # int
+                "fread": ("int", ["i8*", "int", "int", "i8*"]),  # size_t
+                "fseek": ("int", ["i8*", "int", "int"]),  # int
+                "ftell": ("int", ["i8*"]),        # long
+                "malloc": ("i8*", ["int"]),       # void*
+                "free": ("void", ["i8*"]),        # void
+            }
+
+            if func_name in libc_functions:
+                # Validate argument count
+                expected_args = libc_functions[func_name][1]
+                if len(node.arguments) != len(expected_args):
+                    pos_info = self.get_position_info(node)
+                    self.add_error(f"{func_name} expects {len(expected_args)} arguments, got {len(node.arguments)}{pos_info}")
+            else:
+                # Check if function exists in symbol table
+                func_symbol = self.symbol_table.lookup(func_name)
+                if not func_symbol:
+                    pos_info = self.get_position_info(node)
+                    self.add_error(f"Unknown function '{func_name}'{pos_info}")
+
+        # Analyze arguments
+        for arg in node.arguments:
+            self.analyze(arg)
+
+        # For method calls, try to determine return type
+        if isinstance(node.callee, MemberExpression) and isinstance(node.callee.object, Identifier):
+            # This is a method call like obj.method()
+            # Look up the method in the symbol table
+            obj_name = node.callee.object.name
+            method_name = node.callee.property
+
+            # Get the object's type from the symbol table
+            obj_symbol = self.symbol_table.lookup(obj_name)
+            if obj_symbol and obj_symbol["symbol_type"] == "variable":
+                obj_type = obj_symbol["data_type"]
+                # For now, assume methods return the declared type
+                # In a full implementation, we'd look up the method in the class
+                if method_name == "read":
+                    return "string"  # File.read() returns string
+                # Add more method return types as needed
+
+        return "unknown"  # We don't know the return type
     def analyze_number_literal(self, node):
         return "int"
     def analyze_float_literal(self, node):

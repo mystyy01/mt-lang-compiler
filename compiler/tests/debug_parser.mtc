@@ -1,7 +1,0 @@
-int max(array arr)
-{
-    if (arr.length() == 0)
-    {
-        return 1
-    }
-}

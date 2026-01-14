@@ -1,0 +1,4 @@
+// Test libc function keywords
+print("Libc functions are now available as keywords!")
+int x = 5
+print(x)

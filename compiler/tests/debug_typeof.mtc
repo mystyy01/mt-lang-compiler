@@ -1,4 +1,0 @@
-int x = 5
-if (typeof(x) == int){
-    print("it works")
-}

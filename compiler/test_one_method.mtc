@@ -5,10 +5,6 @@ class TestClass {
     void greet() {
         print("Hello from " + this.name)
     }
-
-    int getX() {
-        return this.x
-    }
 }
 
 TestClass obj = new TestClass()

@@ -169,19 +169,26 @@ class ClassDeclaration:
         self.name = name
         self.fields = fields or []
         self.methods = methods or []
+        # Separate constructor args from regular fields
+        self.constructor_args = [f for f in self.fields if f.is_constructor_arg]
+        self.regular_fields = [f for f in self.fields if not f.is_constructor_arg]
         self.line = line
         self.column = column
     def __repr__(self):
-        return f"ClassDeclaration({self.name}, {len(self.fields)} fields, {len(self.methods)} methods)"
+        return f"ClassDeclaration({self.name}, {len(self.constructor_args)} args, {len(self.regular_fields)} fields, {len(self.methods)} methods)"
 
 class FieldDeclaration:
-    def __init__(self, name, field_type, line=None, column=None):
+    def __init__(self, name, field_type, initializer=None, is_constructor_arg=False, line=None, column=None):
         self.name = name
         self.type = field_type
+        self.initializer = initializer
+        self.is_constructor_arg = is_constructor_arg
         self.line = line
         self.column = column
     def __repr__(self):
-        return f"FieldDeclaration({self.name}: {self.type})"
+        arg_str = " arg" if self.is_constructor_arg else ""
+        init_str = f" = {self.initializer}" if self.initializer else ""
+        return f"FieldDeclaration({self.name}: {self.type}{arg_str}{init_str})"
 
 class MethodDeclaration:
     def __init__(self, name, params=None, return_type=None, body=None, is_virtual=False, is_static=False, line=None, column=None):

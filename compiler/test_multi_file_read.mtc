@@ -1,0 +1,20 @@
+class File{
+    arg string path
+    arg string mode
+
+    string read(string filePath){
+    }
+}
+
+File file = new File("example.txt", "r")
+
+// Read from test.txt
+string contents1 = file.read("test.txt")
+print("Contents of test.txt:")
+print(contents1)
+print("---")
+
+// Read from io_test.txt
+string contents2 = file.read("io_test.txt")
+print("Contents of io_test.txt:")
+print(contents2)

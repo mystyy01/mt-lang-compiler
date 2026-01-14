@@ -1,0 +1,13 @@
+from stdlib.io use File
+
+// Test with read mode
+File file1 = new File("test.txt", "r")
+string contents1 = file1.read()
+print("Read mode result:")
+print(contents1)
+
+// Test with write mode
+File file2 = new File("io_test.txt", "w")
+string contents2 = file2.read()
+print("Write mode result:")
+print(contents2)
