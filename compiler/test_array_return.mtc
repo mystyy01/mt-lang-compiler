@@ -7,3 +7,6 @@ array range(integer){
     }
     return arr
 }
+
+array result = range(5)
+print(result.length())

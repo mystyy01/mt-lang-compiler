@@ -27,6 +27,22 @@ class CodeGenerator:
         ])
         self.dyn_array_ptr_type = self.dyn_array_type.as_pointer()
 
+    def get_llvm_type(self, type_str: str):
+        """Map AST type strings to LLVM types"""
+        if type_str == "int":
+            return self.int_type
+        elif type_str == "void":
+            return self.void_type
+        elif type_str == "bool":
+            return self.bool_type
+        elif type_str == "string":
+            return self.i8_ptr_type
+        elif type_str == "array":
+            return self.dyn_array_ptr_type
+        else:
+            # Default to int for unknown types
+            return self.int_type
+
     def resolve_module_path(self, module_path):
         """Resolve module path to actual file path"""
         if isinstance(module_path, MemberExpression):
@@ -339,6 +355,12 @@ class CodeGenerator:
                     array_ptr, _, _ = self.create_dynamic_array(elem_values, elem_type)
                     self.variables[node.name] = array_ptr
                     self.array_lengths[node.name] = (elem_type, elem_size)  # Store elem_type and elem_size
+                else:
+                    # Array assignment from function call or variable
+                    array_ptr = self.generate(node.value)
+                    self.variables[node.name] = array_ptr
+                    # For function returns, assume int elements for now (could be improved)
+                    self.array_lengths[node.name] = (self.int_type, 4)
         if isinstance(node, Identifier):
             pointer = self.variables[node.name]
             return self.builder.load(pointer, name=node.name)
@@ -400,7 +422,11 @@ class CodeGenerator:
                 args = []
                 for arg in node.arguments:
                     args.append(self.generate(arg))
-                return self.builder.call(func, args)
+                call_result = self.builder.call(func, args)
+                # Return None for void functions, LLVM value for others
+                if func.function_type.return_type == self.void_type:
+                    return None
+                return call_result
         if isinstance(node, StringLiteral):
             return self.create_string_constant(node.value)
         if isinstance(node, FunctionDeclaration):
@@ -408,11 +434,17 @@ class CodeGenerator:
             old_variables = self.variables
             old_array_lengths = self.array_lengths
             old_variable_types = self.variable_types
+            old_current_return_type = getattr(self, 'current_return_type', None)
+            
             self.array_lengths = dict(old_array_lengths)
             self.variables = dict(old_variables)
             self.variable_types = dict(old_variable_types)
+            
             param_types = [self.int_type] * len(node.parameters)
-            func_type = llvmlite.ir.FunctionType(self.int_type, param_types)
+            return_type = self.get_llvm_type(node.return_type)
+            self.current_return_type = return_type  # Track current function's return type
+            
+            func_type = llvmlite.ir.FunctionType(return_type, param_types)
             func = llvmlite.ir.Function(self.module, func_type, name=node.name)
             self.functions[node.name] = func
             block = func.append_basic_block(name="entry")
@@ -425,12 +457,33 @@ class CodeGenerator:
                 self.generate(statement)
             # Add default return if block has no terminator
             if not self.builder.block.is_terminated:
-                self.builder.ret(llvmlite.ir.Constant(self.int_type, 0))
+                if return_type == self.void_type:
+                    self.builder.ret_void()
+                elif return_type == self.bool_type:
+                    self.builder.ret(llvmlite.ir.Constant(self.bool_type, 0))
+                elif return_type == self.dyn_array_ptr_type:
+                    # Return null pointer for arrays (should create empty array instead)
+                    self.builder.ret(llvmlite.ir.Constant(self.dyn_array_ptr_type, None))
+                else:
+                    self.builder.ret(llvmlite.ir.Constant(return_type, 0))
             self.builder = old_builder
             self.variables = old_variables
             self.array_lengths = old_array_lengths
             self.variable_types = old_variable_types
+            self.current_return_type = old_current_return_type  # Restore previous return type
         if isinstance(node, ReturnStatement):
+            expected_type = getattr(self, 'current_return_type', self.int_type)
+            if expected_type == self.void_type:
+                return self.builder.ret_void()
+            
+            # Special handling for array returns - need pointer, not loaded value
+            if (expected_type == self.dyn_array_ptr_type and 
+                isinstance(node.value, Identifier) and 
+                node.value.name in self.array_lengths):
+                # Return the array pointer directly
+                array_ptr = self.variables[node.value.name]
+                return self.builder.ret(array_ptr)
+            
             value = self.generate(node.value)
             return self.builder.ret(value)
         if isinstance(node, IfStatement):
@@ -482,9 +535,17 @@ class CodeGenerator:
         if isinstance(node, ForInStatement):
             func = self.builder.block.parent
 
-            array_name = node.iterable.name
-            array_ptr = self.variables[array_name]
-            elem_type, elem_size = self.array_lengths[array_name]
+            # Evaluate the iterable (could be variable or function call)
+            if isinstance(node.iterable, Identifier):
+                # Variable reference
+                array_ptr = self.variables[node.iterable.name]
+                elem_type, elem_size = self.array_lengths[node.iterable.name]
+            else:
+                # Function call or expression - evaluate to get array
+                array_ptr = self.generate(node.iterable)
+                # For function returns, assume int elements for now
+                elem_type = self.int_type
+                elem_size = 4
 
             index_ptr = self.builder.alloca(self.int_type, name="loop_index")
             self.builder.store(llvmlite.ir.Constant(self.int_type, 0), index_ptr)

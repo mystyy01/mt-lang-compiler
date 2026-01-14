@@ -35,7 +35,7 @@ if __name__ == "__main__":
     gen = CodeGenerator(source_dir=source_dir)
     gen.create_main_function()
     result = gen.generate(ast)
-    if not result:
+    if result is None:
         result = llvmlite.ir.Constant(gen.int_type, 0)
     gen.builder.ret(result)
 

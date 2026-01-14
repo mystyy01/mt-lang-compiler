@@ -1,4 +1,5 @@
 from stdlib.iter use range
 
-range(4)
-
+for (i in range(5)){
+    print(i)
+}
