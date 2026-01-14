@@ -61,7 +61,8 @@ class SemanticAnalyzer:
     def analyze_variable_declaration(self, node: VariableDeclaration):
         if node.value:
             type_of_node = self.analyze(node.value)
-            if type_of_node != node.type:
+            # "any" is a wildcard that matches any type
+            if type_of_node != node.type and type_of_node != "any":
                 self.errors.append(f"Type mismatch. Cannot assign type {type_of_node} to {node.type}")
         self.symbol_table.declare(node.name, "variable", node.type)
     def analyze_function_declaration(self, node: FunctionDeclaration):
@@ -94,9 +95,11 @@ class SemanticAnalyzer:
         self.analyze(node.left)
         self.analyze(node.right)
     def analyze_call_expression(self, node: CallExpression):
-        self.analyze(node.callee)
+        callee_type = self.analyze(node.callee)
         for arg in node.arguments:
             self.analyze(arg)
+        # Return the function's return type, or "any" if unknown
+        return callee_type if callee_type else "any"
     def analyze_if_statement(self, node: IfStatement):
         self.analyze(node.condition)
         self.symbol_table.enter_scope()
@@ -109,7 +112,11 @@ class SemanticAnalyzer:
                 self.analyze(statement)
             self.symbol_table.exit_scope()
     def analyze_member_expression(self, node: MemberExpression):
-        self.analyze(node.object)
+        obj_type = self.analyze(node.object)
+        # For module.function calls, return "any" since we don't track module function types
+        if obj_type == "module":
+            return "any"
+        return obj_type
     def analyze_for_statement(self, node: ForInStatement):
         self.analyze(node.iterable)
         self.symbol_table.enter_scope()
@@ -123,10 +130,9 @@ class SemanticAnalyzer:
         else:
             self.symbol_table.declare(node.module_name, "import", "module")
     def analyze_from_import(self, node: FromImportStatement):
-        if node.alias:
-            self.symbol_table.declare(node.alias, node.symbol, "any")
-        else:
-            self.symbol_table.declare(node.symbol, node.symbol, "any")
+        # For "from math use add, square" style - declare each function for direct access
+        for symbol in node.symbols:
+            self.symbol_table.declare(symbol, "function", "any")
     def analyze_number_literal(self, node):
         return "int"
     def analyze_string_literal(self, node):

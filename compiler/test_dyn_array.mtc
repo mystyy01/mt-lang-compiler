@@ -1,0 +1,18 @@
+// Test dynamic arrays with append
+array nums = [1, 2, 3]
+
+// Print initial elements
+for (n in nums) {
+    print(n)
+}
+
+// Append more elements
+nums.append(4)
+nums.append(5)
+
+print(100)
+
+// Print all elements after append
+for (n in nums) {
+    print(n)
+}

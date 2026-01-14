@@ -264,14 +264,17 @@ class Parser:
             self.advance()
             module_path = self.parse_expression()
             self.expect("KEYWORD", "use")
+            # Parse comma-separated symbols
+            symbols = []
             symbol_name = self.current_token().value
             self.expect("NAME")
-            alias = None
-            if self.match("KEYWORD", "as"):
+            symbols.append(symbol_name)
+            while self.match("SYMBOL", ","):
                 self.advance()
-                alias = self.current_token().value
+                symbol_name = self.current_token().value
                 self.expect("NAME")
-            return FromImportStatement(module_path, symbol_name, alias)
+                symbols.append(symbol_name)
+            return FromImportStatement(module_path, symbols)
         elif self.match("KEYWORD", "use"):
             self.advance()
             module_name = self.current_token().value

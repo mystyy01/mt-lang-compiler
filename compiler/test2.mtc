@@ -1,0 +1,24 @@
+print("Hello")
+int say_hello(){
+    print("hello")
+    return 1
+}
+say_hello()
+
+if ((1+1) == 2){
+    print("1+1 = 2")
+} else{
+    print("Incorrect calculation")
+}
+int i = 0
+while (i < 5){
+    print(i)
+    set i = i+1
+}
+
+print("============================")
+
+array test = [1, 2, 3, 4, 5]
+for (item in test){
+    print(item)
+}

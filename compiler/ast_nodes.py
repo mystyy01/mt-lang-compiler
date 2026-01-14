@@ -99,12 +99,11 @@ class FunctionDeclaration:
     def __repr__(self):
         return f"FunctionDeclaration({self.return_type}, {self.name}, {self.parameters}, {self.body})"
 class FromImportStatement:
-    def __init__(self, module_path, symbol, alias = None):
+    def __init__(self, module_path, symbols):
         self.module_path = module_path
-        self.symbol = symbol
-        self.alias = alias
+        self.symbols = symbols  # List of symbol names
     def __repr__(self):
-        return f"FromImportStatement({self.module_path}, {self.symbol}, {self.alias})"
+        return f"FromImportStatement({self.module_path}, {self.symbols})"
 class SimpleImportStatement:
     def __init__(self, module_name, alias = None):
         self.module_name = module_name

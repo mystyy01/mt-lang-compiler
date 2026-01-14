@@ -4,6 +4,7 @@ from tokenizer import Tokenizer
 from parser import Parser
 import llvmlite.binding as llvm
 import sys
+import os
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
@@ -11,15 +12,18 @@ if __name__ == "__main__":
         print("Example usage:\npython compiler.py source.mtc executable")
         exit(1)
     else:
-        source = sys.argv[1]
+        source_file = sys.argv[1]
         out = sys.argv[2]
 
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
 
-    with open(source, "r") as f:
-        source = f.read()
-    tokens = Tokenizer(source).tokenize()
+    # Get source directory for module imports
+    source_dir = os.path.dirname(os.path.abspath(source_file))
+
+    with open(source_file, "r") as f:
+        source_code = f.read()
+    tokens = Tokenizer(source_code).tokenize()
     ast = Parser(tokens).parse_program()
     from semantic import SemanticAnalyzer
     analyzer = SemanticAnalyzer()
@@ -28,7 +32,7 @@ if __name__ == "__main__":
         for error in analyzer.errors:
             print(f"Error: {error}")
         exit(1)
-    gen = CodeGenerator()
+    gen = CodeGenerator(source_dir=source_dir)
     gen.create_main_function()
     result = gen.generate(ast)
     if not result:

@@ -1,6 +1,5 @@
-from essentials use terminal as term // from <module> use <symbol> as <alias>
-from essentials.iter use range
-
+from stdlib.iter use range
+from stdlib.types use str
 
 int x // default value is 0 for ints
 void hello(arg1, arg2){
@@ -8,7 +7,7 @@ void hello(arg1, arg2){
         set x = 5
     }
     else{
-        term.print(x.str())
+        print(str(x))
     }
 
 }
@@ -21,8 +20,8 @@ int sum_int(num1, num2){
 
 array test_array = ["hello", "goodbye", "good morning", "good afternoon"]
 for (item in test_array){
-    term.print(item)
+    print(item)
 }
 for (i in range(20)){
-    term.print(i.str())
+    print(str(i))
 }
