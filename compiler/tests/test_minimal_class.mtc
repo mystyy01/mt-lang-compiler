@@ -1,0 +1,8 @@
+class TestClass {
+    int age
+}
+
+void main() {
+    TestClass obj = new TestClass()
+    return 0
+}

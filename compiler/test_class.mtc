@@ -1,0 +1,16 @@
+class TestClass {
+    string name
+    int age
+    
+    void speak() {
+        print("Hello, I'm " + this.name)
+    }
+}
+
+void test_main() {
+    TestClass p = new TestClass()
+    p.name = "Alice"
+    p.age = 25
+    p.speak()
+    return 0
+}

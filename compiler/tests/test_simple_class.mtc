@@ -1,0 +1,8 @@
+class Person {
+    int age
+}
+
+void test() {
+    Person p = new Person()
+    return 0
+}

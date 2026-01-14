@@ -1,0 +1,16 @@
+class Person {
+    int age
+    string name
+    
+    void speak() {
+        print("Hello, I'm " + this.name)
+    }
+}
+
+void person_test() {
+    Person p = new Person()
+    p.name = "Alice"
+    p.age = 25
+    p.speak()
+    return 0
+}

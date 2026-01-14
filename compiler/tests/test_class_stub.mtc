@@ -1,0 +1,7 @@
+class TestClass {
+    int age
+}
+
+void test() {
+    return 0
+}

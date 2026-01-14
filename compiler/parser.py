@@ -223,6 +223,17 @@ class Parser:
             return self.parse_import_statement()
         elif self.match("KEYWORD", "while"):
             return self.parse_while_statement()
+        elif self.match("KEYWORD", "class"):
+            # For now, skip class declarations (stub implementation)
+            self.advance()  # consume 'class'
+            class_name = self.current_token().value
+            self.expect("NAME")
+            # Skip to the end of class declaration
+            while not self.match("SYMBOL", "}"):
+                if self.is_at_end():
+                    break
+                self.advance()
+            return None  # Skip class definitions for now
         else:
             return self.parse_expression_statement()
     def parse_expression_statement(self):

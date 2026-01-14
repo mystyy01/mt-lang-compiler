@@ -163,3 +163,72 @@ class BoolLiteral:
         self.value = value
     def __repr__(self):
         return f"BoolLiteral({self.value})"
+
+class ClassDeclaration:
+    def __init__(self, name, fields=None, methods=None, line=None, column=None):
+        self.name = name
+        self.fields = fields or []
+        self.methods = methods or []
+        self.line = line
+        self.column = column
+    def __repr__(self):
+        return f"ClassDeclaration({self.name}, {len(self.fields)} fields, {len(self.methods)} methods)"
+
+class FieldDeclaration:
+    def __init__(self, name, field_type, line=None, column=None):
+        self.name = name
+        self.type = field_type
+        self.line = line
+        self.column = column
+    def __repr__(self):
+        return f"FieldDeclaration({self.name}: {self.type})"
+
+class MethodDeclaration:
+    def __init__(self, name, params=None, return_type=None, body=None, is_virtual=False, is_static=False, line=None, column=None):
+        self.name = name
+        self.params = params or []
+        self.return_type = return_type
+        self.body = body
+        self.is_virtual = is_virtual
+        self.is_static = is_static
+        self.line = line
+        self.column = column
+    def __repr__(self):
+        virtual = "virtual " if self.is_virtual else ""
+        static = "static " if self.is_static else ""
+        return f"MethodDeclaration({virtual}{static}{self.name}{': ' + self.return_type if self.return_type else ''})"
+
+class NewExpression:
+    def __init__(self, class_name, arguments=None, line=None, column=None):
+        self.class_name = class_name
+        self.arguments = arguments or []
+        self.line = line
+        self.column = column
+    def __repr__(self):
+        return f"NewExpression({self.class_name}, args={self.arguments})"
+
+class ThisExpression:
+    def __init__(self, line=None, column=None):
+        self.line = line
+        self.column = column
+    def __repr__(self):
+        return f"ThisExpression()"
+
+class MethodCallExpression:
+    def __init__(self, object_expr, method_name, arguments=None, line=None, column=None):
+        self.object_expr = object_expr
+        self.method_name = method_name
+        self.arguments = arguments or []
+        self.line = line
+        self.column = column
+    def __repr__(self):
+        return f"MethodCallExpression({self.object_expr}.{self.method_name}({self.arguments}))"
+
+class FieldAccessExpression:
+    def __init__(self, object_expr, field_name, line=None, column=None):
+        self.object_expr = object_expr
+        self.field_name = field_name
+        self.line = line
+        self.column = column
+    def __repr__(self):
+        return f"FieldAccessExpression({self.object_expr}.{self.field_name})"
