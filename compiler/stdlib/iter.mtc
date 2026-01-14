@@ -1,0 +1,12 @@
+array range(integer){
+    array arr = []
+    int rnge = 0
+    while (rnge < integer){
+        arr.append(rnge)
+        set rnge = rnge+1
+    }
+    for (i in arr){
+        print(i)
+    }
+    // return arr doesnt work because it doesnt match i32 type for some reason when the function definition is literally array and no where was there a 32 bit integer mentioned
+}
