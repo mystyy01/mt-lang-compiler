@@ -1,16 +1,22 @@
 class NumberLiteral:
-    def __init__(self, number):
+    def __init__(self, number, line=None, column=None):
         self.value = number
+        self.line = line
+        self.column = column
     def __repr__(self):
         return f"NumberLiteral({self.value})"
 class StringLiteral:
-    def __init__(self, string: str):
+    def __init__(self, string: str, line=None, column=None):
         self.value = string
+        self.line = line
+        self.column = column
     def __repr__(self):
         return f"StringLiteral({repr(self.value)})"
 class Identifier:
-    def __init__(self, name):
+    def __init__(self, name, line=None, column=None):
         self.name = name
+        self.line = line
+        self.column = column
     def __repr__(self):
         return f"Identifier({self.name})"
 class BinaryExpression:
@@ -26,16 +32,20 @@ class ArrayLiteral:
     def __repr__(self):
         return f"ArrayLiteral({self.elements})"
 class VariableDeclaration:
-    def __init__(self, var_type, name, value = None):
+    def __init__(self, var_type, name, value = None, line=None, column=None):
         self.type = var_type
         self.name = name
         self.value = value
+        self.line = line
+        self.column = column
     def __repr__(self):
         return f"VariableDeclaration({self.type}, {self.name}, {self.value})"
 class SetStatement:
-    def __init__(self, name, value):
+    def __init__(self, name, value, line=None, column=None):
         self.name = name
         self.value = value
+        self.line = line
+        self.column = column
     def __repr__(self):
         return f"SetStatement({self.name}, {self.value})"
 class ReturnStatement:

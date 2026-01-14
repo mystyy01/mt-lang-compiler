@@ -32,15 +32,18 @@ class Parser:
             raise CompilerError("Unexpected token", "ERROR")
     def parse_primary(self):
         if self.current_token().type == "NUMBER":
-            literal = NumberLiteral(self.current_token().value)
+            token = self.current_token()
+            literal = NumberLiteral(token.value, token.line, token.column)
             self.advance()
             return literal
         elif self.current_token().type == "STRING":
-            literal = StringLiteral(self.current_token().value)
+            token = self.current_token()
+            literal = StringLiteral(token.value, token.line, token.column)
             self.advance()
             return literal
         elif self.current_token().type == "NAME":
-            literal = Identifier(self.current_token().value)
+            token = self.current_token()
+            literal = Identifier(token.value, token.line, token.column)
             self.advance()
             return literal
         elif self.current_token().type == "KEYWORD" and self.current_token().value == "typeof":
@@ -177,11 +180,12 @@ class Parser:
         return ExpressionStatement(expression)
     def parse_set_statement(self):
         self.advance()
-        var_name = self.current_token().value
+        var_token = self.current_token()
+        var_name = var_token.value
         self.expect("NAME")
         self.expect("SYMBOL", "=")
         value = self.parse_expression()
-        return SetStatement(var_name, value)
+        return SetStatement(var_name, value, var_token.line, var_token.column)
     def parse_return_statement(self):
         self.advance()
         if self.match("SYMBOL", "}") or self.is_at_end():

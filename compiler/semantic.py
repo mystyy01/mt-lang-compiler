@@ -21,6 +21,15 @@ class SemanticAnalyzer:
         self.symbol_table = SymbolTable()
         self.symbol_table.declare("print", "builtin", "function")
         self.errors = []
+    
+    def get_position_info(self, node):
+        """Get formatted position information for error messages"""
+        if hasattr(node, 'line') and node.line is not None:
+            pos_info = f" at line {node.line}"
+            if hasattr(node, 'column') and node.column is not None:
+                pos_info += f", column {node.column}"
+            return pos_info
+        return ""
     def analyze(self, node):
         if isinstance(node, Program):
             return self.analyze_program(node)
@@ -63,7 +72,8 @@ class SemanticAnalyzer:
             type_of_node = self.analyze(node.value)
             # "any" is a wildcard that matches any type
             if type_of_node != node.type and type_of_node != "any":
-                self.errors.append(f"Type mismatch. Cannot assign type {type_of_node} to {node.type}")
+                pos_info = self.get_position_info(node)
+                self.errors.append(f"Type mismatch at {pos_info}. Cannot assign type {type_of_node} to {node.type}")
         self.symbol_table.declare(node.name, "variable", node.type)
     def analyze_function_declaration(self, node: FunctionDeclaration):
         self.symbol_table.declare(node.name, "function", node.return_type)
@@ -76,14 +86,16 @@ class SemanticAnalyzer:
     def analyze_identifier(self, node: Identifier):
         res = self.symbol_table.lookup(node.name) # check if its declared or not
         if not res:
-            self.errors.append(f"Undeclared variable: {node.name}")
+            pos_info = self.get_position_info(node)
+            self.errors.append(f"Undeclared variable '{node.name}'{pos_info}")
             return
         return res["data_type"]
     def analyze_expression_statement(self, node: ExpressionStatement):
         self.analyze(node.expression)
     def analyze_set_statement(self, node: SetStatement):
         if not self.symbol_table.lookup(node.name):
-            self.errors.append(f"Undeclared variable: {node.name}")
+            pos_info = self.get_position_info(node)
+            self.errors.append(f"Undeclared variable '{node.name}' in assignment{pos_info}")
             return None
         original_type = self.symbol_table.lookup(node.name)["data_type"]
         type_assigned = self.analyze(node.value)

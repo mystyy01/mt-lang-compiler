@@ -245,12 +245,22 @@ class CodeGenerator:
         return self.builder.load(elem_ptr, name="elem_val")
 
     def create_string_constant(self, string: str, as_constant=False):
-        encoded = string.encode("utf-8") + b'\x00'
-        array_type = llvmlite.ir.ArrayType(llvmlite.ir.IntType(8), len(encoded))
-        global_var = llvmlite.ir.GlobalVariable(self.module, array_type, name=f"str_{self.string_counter}")
-        self.string_counter += 1
-        global_var.global_constant = True
-        global_var.initializer = llvmlite.ir.Constant(array_type, bytearray(encoded))
+        # Use a simple string cache to avoid duplicate constants
+        cache_key = f"str_cache_{string}"
+        if hasattr(self, '_string_cache') and cache_key in self._string_cache:
+            global_var = self._string_cache[cache_key]
+        else:
+            if not hasattr(self, '_string_cache'):
+                self._string_cache = {}
+            
+            encoded = string.encode("utf-8") + b'\x00'
+            array_type = llvmlite.ir.ArrayType(llvmlite.ir.IntType(8), len(encoded))
+            global_var = llvmlite.ir.GlobalVariable(self.module, array_type, name=f"str_{self.string_counter}")
+            self.string_counter += 1
+            global_var.global_constant = True
+            global_var.initializer = llvmlite.ir.Constant(array_type, bytearray(encoded))
+            self._string_cache[cache_key] = global_var
+        
         zero = llvmlite.ir.Constant(llvmlite.ir.IntType(32), 0)
         if as_constant:
             # Return constant GEP for use in global initializers
@@ -305,6 +315,25 @@ class CodeGenerator:
         if isinstance(node, BinaryExpression):
             left = self.generate(node.left)
             right = self.generate(node.right)
+            
+            # Handle string comparisons specially
+            if left.type == self.i8_ptr_type and right.type == self.i8_ptr_type:
+                # String comparison using strcmp (would need to implement)
+                # For now, just use pointer equality
+                if node.operator.value == "==":
+                    return self.builder.icmp_signed("==", left, right, name="eqtmp")
+                elif node.operator.value == "!=":
+                    return self.builder.icmp_signed("!=", left, right, name="netmp")
+                elif node.operator.value == ">":
+                    return self.builder.icmp_signed(">", left, right, name="gttmp")
+                elif node.operator.value == "<":
+                    return self.builder.icmp_signed("<", left, right, name="lttmp")
+                elif node.operator.value == "<=":
+                    return self.builder.icmp_signed("<=", left, right, name="letmp")
+                elif node.operator.value == ">=":
+                    return self.builder.icmp_signed(">=", left, right, name="getmp")
+            
+            # Numeric operations
             if node.operator.value == "+":
                 return self.builder.add(left, right, name="addtmp")
             elif node.operator.value == "-":
@@ -325,6 +354,12 @@ class CodeGenerator:
                 return self.builder.icmp_signed("<=", left, right, name="letmp")
             elif node.operator.value == ">=":
                 return self.builder.icmp_signed(">=", left, right, name="getmp")
+            elif node.operator.value == "&&":
+                # Logical AND: both operands must be boolean
+                return self.builder.and_(left, right, name="andtmp")
+            elif node.operator.value == "||":
+                # Logical OR: both operands must be boolean
+                return self.builder.or_(left, right, name="ortmp")
         if isinstance(node, VariableDeclaration):
             if node.type == "int":
                 pointer = self.builder.alloca(self.int_type, name=node.name)
@@ -453,6 +488,7 @@ class CodeGenerator:
                 pointer = self.builder.alloca(self.int_type, name=param.name)
                 self.builder.store(arg, pointer)
                 self.variables[param.name] = pointer
+                self.variable_types[param.name] = self.int_type  # Track parameter type
             for statement in node.body.statements:
                 self.generate(statement)
             # Add default return if block has no terminator
@@ -499,15 +535,19 @@ class CodeGenerator:
             self.builder.position_at_end(then_block)
             for statement in node.then_body.statements:
                 self.generate(statement)
-            self.builder.branch(merge_block)
+            if not self.builder.block.is_terminated:
+                self.builder.branch(merge_block)
 
             self.builder.position_at_end(else_block)
             if node.else_body:
                 for statement in node.else_body.statements:
                     self.generate(statement)
-            self.builder.branch(merge_block)
+            if not self.builder.block.is_terminated:
+                self.builder.branch(merge_block)
             
+            # Always position at merge block and add unreachable
             self.builder.position_at_end(merge_block)
+            self.builder.unreachable()
         if isinstance(node, WhileStatement):
             func = self.builder.block.parent
 
@@ -532,6 +572,38 @@ class CodeGenerator:
             self.builder.position_at_end(exit_block)
         if isinstance(node, BoolLiteral):
             return llvmlite.ir.Constant(llvmlite.ir.IntType(1), 1 if node.value else 0)
+        if isinstance(node, TypeofExpression):
+            # For now, implement typeof as a simple type check
+            # In a full implementation, this would return type info at runtime
+            # For now, we'll return string constants for basic types
+            arg = self.generate(node.argument)
+            
+            # Check if argument is a variable and look up its type
+            if isinstance(node.argument, Identifier):
+                var_name = node.argument.name
+                if var_name in self.variable_types:
+                    var_type = self.variable_types[var_name]
+                    if var_type == self.int_type:
+                        type_string = "int"
+                    elif var_type == self.i8_ptr_type:
+                        type_string = "string" 
+                    elif var_type == self.bool_type:
+                        type_string = "bool"
+                    elif var_type == self.dyn_array_ptr_type:
+                        type_string = "array"
+                    else:
+                        type_string = "unknown"
+                else:
+                    type_string = "unknown"
+            else:
+                # For expressions, default to int for now
+                type_string = "int"
+            
+            return self.create_string_constant(type_string)
+        if isinstance(node, TypeLiteral):
+            # Type literals like "int", "string", etc. used in typeof comparisons
+            # For now, treat them as string constants
+            return self.create_string_constant(node.name)
         if isinstance(node, ForInStatement):
             func = self.builder.block.parent
 

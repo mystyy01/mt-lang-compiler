@@ -1,15 +1,5 @@
 from stdlib.iter use range
 
-int x // default value is 0 for ints
-void hello(arg1, arg2){
-    if (x == 0){
-        set x = 5
-    }
-    else{
-        print(i)
-    }
-
-}
 int sum_int(num1, num2){
     // int type functions have to return an int, otherwise compiler will shout at you
     if (typeof(num1) == int && typeof(num2) == int){
@@ -25,3 +15,6 @@ for (item in test_array){
 for (i12 in range(20)){
     print(i12)
 }
+
+print(sum_int(2, 5))
+
