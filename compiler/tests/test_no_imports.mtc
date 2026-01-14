@@ -1,0 +1,11 @@
+class TestClass {
+    void method() {
+        print("Hello from method!")
+    }
+}
+
+void main() {
+    TestClass obj = new TestClass()
+    obj.method()
+    return 0
+}

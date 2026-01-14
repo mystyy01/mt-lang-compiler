@@ -1,6 +1,6 @@
 from stdlib.iter use range
 
-int sum_int(num1, num2){
+int sum_int(int num1, int num2){
     // int type functions have to return an int, otherwise compiler will shout at you
     if (typeof(num1) == int && typeof(num2) == int){
         return num1 + num2
