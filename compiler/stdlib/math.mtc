@@ -13,3 +13,14 @@ int mul(a, b) {
 int square(n) {
     return n * n
 }
+int max(arr){
+    if (arr.length() == 0){
+        return 1
+    }
+    int lowest = arr[0]
+    for (item in arr){
+        if (item < lowest){
+            set lowest = item
+        }
+    }
+}

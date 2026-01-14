@@ -1,0 +1,6 @@
+from stdlib.math use max
+
+int test() {
+    array arr = [1, 2, 3]
+    return max(arr)
+}

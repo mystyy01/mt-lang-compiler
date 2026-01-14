@@ -100,7 +100,19 @@ class Parser:
                     self.advance()
                 else:
                     raise CompilerError(f"Invalid member property: {self.current_token().value}")
-                base = MemberExpression(base, member_property)  
+                base = MemberExpression(base, member_property)
+                # Check if this is followed by function call parentheses
+                if self.match("SYMBOL", "("):
+                    # This is a method call like arr.length()
+                    self.advance()
+                    args = []
+                    if not self.match("SYMBOL", ")"):
+                        args.append(self.parse_expression())
+                        while self.match("SYMBOL", ","):
+                            self.advance()
+                            args.append(self.parse_expression())
+                    self.expect("SYMBOL", ")")
+                    base = CallExpression(base, args)
         return base   
     def parse_multiplicative(self):
         left = self.parse_call_member()
