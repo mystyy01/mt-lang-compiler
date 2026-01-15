@@ -122,7 +122,31 @@ class Tokenizer:
         start_column = self.column
         self.advance()
         while not self.is_at_end() and self.current_char() not in QUOTES:
-            string += self.current_char()
+            if self.current_char() == '\\' and not self.is_at_end():
+                # Handle escape sequences
+                self.advance()
+                if self.is_at_end():
+                    break
+                escape_char = self.current_char()
+                if escape_char == 'n':
+                    string += '\n'
+                elif escape_char == 't':
+                    string += '\t'
+                elif escape_char == 'r':
+                    string += '\r'
+                elif escape_char == '\\':
+                    string += '\\'
+                elif escape_char == '"':
+                    string += '"'
+                elif escape_char == "'":
+                    string += "'"
+                elif escape_char == '0':
+                    string += '\0'
+                else:
+                    # Unknown escape, keep as-is
+                    string += '\\' + escape_char
+            else:
+                string += self.current_char()
             self.advance()
         self.advance()
         return Token("STRING", string, start_line, start_column)

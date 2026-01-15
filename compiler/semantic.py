@@ -146,10 +146,17 @@ class SemanticAnalyzer:
                 'type': field.type,
                 'is_constructor_arg': field.is_constructor_arg
             })
+        methods_info = {}
+        for method in node.methods:
+            methods_info[method.name] = {
+                'return_type': method.return_type,
+                'params': [(p.name, p.param_type) for p in method.params]
+            }
         self.classes[node.name] = {
             "symbol_type": "class",
             "data_type": node.name,
-            "fields": fields_info
+            "fields": fields_info,
+            "methods": methods_info
         }
         self.current_class = node.name
 
@@ -491,21 +498,36 @@ class SemanticAnalyzer:
             self.analyze(arg)
 
         # For method calls, try to determine return type
-        if isinstance(node.callee, MemberExpression) and isinstance(node.callee.object, Identifier):
-            # This is a method call like obj.method()
-            # Look up the method in the symbol table
-            obj_name = node.callee.object.name
+        if isinstance(node.callee, MemberExpression):
             method_name = node.callee.property
 
-            # Get the object's type from the symbol table
-            obj_symbol = self.symbol_table.lookup(obj_name)
-            if obj_symbol and obj_symbol["symbol_type"] == "variable":
-                obj_type = obj_symbol["data_type"]
-                # For now, assume methods return the declared type
-                # In a full implementation, we'd look up the method in the class
-                if method_name == "read":
-                    return "string"  # File.read() returns string
-                # Add more method return types as needed
+            # Handle string literal method calls: "text".split(",")
+            if isinstance(node.callee.object, StringLiteral):
+                if method_name == "split":
+                    return "array"
+                elif method_name == "length":
+                    return "int"
+
+            # Handle method calls on variables: str.split(",")
+            if isinstance(node.callee.object, Identifier):
+                obj_name = node.callee.object.name
+                obj_symbol = self.symbol_table.lookup(obj_name)
+                if obj_symbol and obj_symbol["symbol_type"] == "variable":
+                    obj_type = obj_symbol["data_type"]
+
+                    # String methods (built into the compiler)
+                    if obj_type == "string":
+                        if method_name == "split":
+                            return "array"
+                        elif method_name == "length":
+                            return "int"
+
+                    # Look up method return type from class definition
+                    if obj_type in self.classes:
+                        class_info = self.classes[obj_type]
+                        methods = class_info.get("methods", {})
+                        if method_name in methods:
+                            return methods[method_name]["return_type"]
 
         return "unknown"  # We don't know the return type
     def analyze_number_literal(self, node):

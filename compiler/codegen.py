@@ -381,6 +381,10 @@ class CodeGenerator:
         self.stdin = llvmlite.ir.GlobalVariable(self.module, self.i8_ptr_type, "stdin")
         self.stdin.linkage = 'external'
 
+        # strstr(const char* haystack, const char* needle) -> char*
+        strstr_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type])
+        self.strstr = llvmlite.ir.Function(self.module, strstr_type, "strstr")
+
     def create_dynamic_array(self, elements, elem_type):
         """Create a new dynamic array with initial elements"""
         initial_capacity = max(len(elements), 4)  # At least 4 elements capacity
@@ -497,6 +501,100 @@ class CodeGenerator:
         elem_ptr = self.builder.gep(typed_ptr, [index], name="elem_ptr")
         return self.builder.load(elem_ptr, name="elem_val")
 
+    def string_split(self, string_ptr, delimiter_ptr):
+        """
+        Split a string by delimiter, returning a dynamic array of strings.
+        """
+        func = self.builder.block.parent
+
+        # Get delimiter length (needed to skip past delimiters)
+        delim_len = self.builder.call(self.strlen, [delimiter_ptr], name="delim_len")
+
+        # Create result array (starts empty, will hold string pointers)
+        result_array, _, _ = self.create_dynamic_array([], self.i8_ptr_type)
+
+        # Allocate loop variables on stack
+        current_pos = self.builder.alloca(self.i8_ptr_type, name="current_pos")
+        self.builder.store(string_ptr, current_pos)
+
+        segment_start = self.builder.alloca(self.i8_ptr_type, name="segment_start")
+        self.builder.store(string_ptr, segment_start)
+
+        # Create basic blocks for loop structure
+        loop_block = func.append_basic_block(name="split_loop")
+        found_block = func.append_basic_block(name="split_found")
+        not_found_block = func.append_basic_block(name="split_not_found")
+        append_final_block = func.append_basic_block(name="split_append_final")
+        exit_block = func.append_basic_block(name="split_exit")
+
+        # Enter loop
+        self.builder.branch(loop_block)
+
+        # === Loop Block: search for next delimiter ===
+        self.builder.position_at_end(loop_block)
+        cur = self.builder.load(current_pos, name="cur")
+        found_ptr = self.builder.call(self.strstr, [cur, delimiter_ptr], name="found")
+
+        # Check if delimiter was found (strstr returns NULL if not found)
+        null_ptr = llvmlite.ir.Constant(self.i8_ptr_type, None)
+        is_null = self.builder.icmp_unsigned("==", found_ptr, null_ptr, name="is_null")
+        self.builder.cbranch(is_null, not_found_block, found_block)
+
+        # === Found Block: extract segment and continue loop ===
+        self.builder.position_at_end(found_block)
+        start = self.builder.load(segment_start, name="seg_start")
+
+        # Calculate segment length: found_ptr - segment_start
+        start_int = self.builder.ptrtoint(start, self.int_type, name="start_int")
+        found_int = self.builder.ptrtoint(found_ptr, self.int_type, name="found_int")
+        seg_len = self.builder.sub(found_int, start_int, name="seg_len")
+
+        # Allocate memory for segment (length + 1 for null terminator)
+        seg_len_plus1 = self.builder.add(seg_len, llvmlite.ir.Constant(self.int_type, 1), name="seg_len_plus1")
+        new_seg = self.builder.call(self.malloc, [seg_len_plus1], name="new_segment")
+
+        # Copy segment bytes
+        self.builder.call(self.memcpy, [new_seg, start, seg_len])
+
+        # Null-terminate the segment
+        null_pos = self.builder.gep(new_seg, [seg_len], name="null_pos")
+        self.builder.store(llvmlite.ir.Constant(llvmlite.ir.IntType(8), 0), null_pos)
+
+        # Append segment to result array
+        self.array_append(result_array, new_seg, self.i8_ptr_type, 8)
+
+        # Move current position past the delimiter
+        next_pos = self.builder.gep(found_ptr, [delim_len], name="next_pos")
+        self.builder.store(next_pos, current_pos)
+        self.builder.store(next_pos, segment_start)
+
+        # Continue loop
+        self.builder.branch(loop_block)
+
+        # === Not Found Block: check if there's a final segment ===
+        self.builder.position_at_end(not_found_block)
+        final_start = self.builder.load(segment_start, name="final_start")
+        final_len = self.builder.call(self.strlen, [final_start], name="final_len")
+
+        # Check if there's content in the final segment (or if we should add empty string)
+        # We always add the final segment to handle cases like "a,b," correctly
+        self.builder.branch(append_final_block)
+
+        # === Append Final Block: add the last segment ===
+        self.builder.position_at_end(append_final_block)
+        final_start2 = self.builder.load(segment_start, name="final_start2")
+        final_len2 = self.builder.call(self.strlen, [final_start2], name="final_len2")
+        final_len_plus1 = self.builder.add(final_len2, llvmlite.ir.Constant(self.int_type, 1), name="final_len_plus1")
+        final_seg = self.builder.call(self.malloc, [final_len_plus1], name="final_segment")
+        self.builder.call(self.strcpy, [final_seg, final_start2])
+        self.array_append(result_array, final_seg, self.i8_ptr_type, 8)
+        self.builder.branch(exit_block)
+
+        # === Exit Block ===
+        self.builder.position_at_end(exit_block)
+
+        return result_array
+
     def create_string_constant(self, string: str, as_constant=False):
         # Use a simple string cache to avoid duplicate constants
         cache_key = f"str_cache_{string}"
@@ -535,7 +633,9 @@ class CodeGenerator:
                 result = self.generate(statement)
             return result  # Return the last statement result
         if isinstance(node, ClassDeclaration):
-            # Classes are just declarations, don't generate code
+            # Generate LLVM functions for class methods
+            for method in node.methods:
+                self.generate_class_method(node.name, method)
             return None
         if isinstance(node, FromImportStatement):
             # Load the module for code generation
@@ -751,13 +851,35 @@ class CodeGenerator:
                 else:
                     # Array assignment from function call or variable
                     array_ptr = self.generate(node.value)
-                    
+
                     # Type check: make sure the value is actually an array pointer
                     if array_ptr.type != self.dyn_array_ptr_type:
                         raise TypeError(f"Cannot assign {array_ptr.type} to array variable '{node.name}': expected {self.dyn_array_ptr_type}")
-                    
+
                     self.variables[node.name] = array_ptr
-                    # For function returns, assume int elements for now (could be improved)
+
+                    # Determine element type from context
+                    if isinstance(node.value, CallExpression):
+                        if isinstance(node.value.callee, MemberExpression):
+                            method_name = node.value.callee.property
+                            # split() is a compiler-implemented string method that returns string array
+                            if method_name == "split":
+                                self.array_lengths[node.name] = (self.i8_ptr_type, 8)
+                                return None
+                            # For class methods returning array, check the class definition
+                            if isinstance(node.value.callee.object, Identifier):
+                                obj_name = node.value.callee.object.name
+                                if obj_name in self.variable_classes:
+                                    class_name = self.variable_classes[obj_name]
+                                    if class_name in self.classes:
+                                        methods = self.classes[class_name].get('methods', {})
+                                        if method_name in methods:
+                                            # Method returns array - default to string elements
+                                            # since most array-returning methods deal with strings
+                                            self.array_lengths[node.name] = (self.i8_ptr_type, 8)
+                                            return None
+
+                    # Default: assume int elements
                     self.array_lengths[node.name] = (self.int_type, 4)
             else:
                 # For non-array types
@@ -928,6 +1050,34 @@ class CodeGenerator:
         if isinstance(node, CallExpression):
             # Handle method calls on objects (like arr.append(value))
             if isinstance(node.callee, MemberExpression):
+                # Handle string literal method calls: "text".split(",")
+                if isinstance(node.callee.object, StringLiteral):
+                    method_name = node.callee.property
+                    if method_name == "split":
+                        if len(node.arguments) != 1:
+                            raise Exception("split() requires exactly 1 argument (delimiter)")
+                        string_ptr = self.generate(node.callee.object)
+                        delimiter = self.generate(node.arguments[0])
+                        return self.string_split(string_ptr, delimiter)
+                    else:
+                        raise Exception(f"Unknown string method: {method_name}")
+
+                # Handle method calls on expressions (like this.data.split())
+                if isinstance(node.callee.object, MemberExpression):
+                    method_name = node.callee.property
+                    if method_name == "split":
+                        if len(node.arguments) != 1:
+                            raise Exception("split() requires exactly 1 argument (delimiter)")
+                        # Evaluate the expression to get the string pointer
+                        string_ptr = self.generate(node.callee.object)
+                        delimiter = self.generate(node.arguments[0])
+                        return self.string_split(string_ptr, delimiter)
+                    # For other methods on expressions, fall through to general handling
+
+                # Handle method calls on identifiers
+                if not isinstance(node.callee.object, Identifier):
+                    raise Exception(f"Unsupported method call object type: {type(node.callee.object)}")
+
                 obj_name = node.callee.object.name
                 method_name = node.callee.property
 
@@ -944,6 +1094,22 @@ class CodeGenerator:
                         return self.array_length(array_ptr)
                     else:
                         raise Exception(f"Unknown array method: {method_name}")
+
+                # Check if it's a string variable method call
+                if obj_name in self.variable_types:
+                    var_type = self.variable_types[obj_name]
+                    if var_type == self.i8_ptr_type and obj_name not in self.array_lengths:
+                        # This is a string variable - check for string methods
+                        if method_name == "split":
+                            if len(node.arguments) != 1:
+                                raise Exception("split() requires exactly 1 argument (delimiter)")
+                            string_ptr = self.builder.load(self.variables[obj_name], name="str_val")
+                            delimiter = self.generate(node.arguments[0])
+                            return self.string_split(string_ptr, delimiter)
+                        elif method_name == "length":
+                            string_ptr = self.builder.load(self.variables[obj_name], name="str_val")
+                            return self.builder.call(self.strlen, [string_ptr], name="str_len")
+                        # If not a known string method, fall through to other handlers
 
                 # Check if it's a method call on a class instance
                 if obj_name in self.variable_classes:
@@ -1454,9 +1620,29 @@ class CodeGenerator:
             else:
                 # Function call or expression - evaluate to get array
                 array_ptr = self.generate(node.iterable)
-                # For function returns, assume int elements for now
+
+                # Determine element type from the call expression
                 elem_type = self.int_type
                 elem_size = 4
+
+                if isinstance(node.iterable, CallExpression):
+                    if isinstance(node.iterable.callee, MemberExpression):
+                        method_name = node.iterable.callee.property
+                        # split() is compiler-implemented and returns string array
+                        if method_name == "split":
+                            elem_type = self.i8_ptr_type
+                            elem_size = 8
+                        # For class methods, check if they return array
+                        elif isinstance(node.iterable.callee.object, Identifier):
+                            obj_name = node.iterable.callee.object.name
+                            if obj_name in self.variable_classes:
+                                class_name = self.variable_classes[obj_name]
+                                if class_name in self.classes:
+                                    methods = self.classes[class_name].get('methods', {})
+                                    if method_name in methods and methods[method_name].get('return_type') == 'array':
+                                        # Class method returns array - default to string elements
+                                        elem_type = self.i8_ptr_type
+                                        elem_size = 8
 
             # Allocate loop index and loop variable
             index_ptr = self.builder.alloca(self.int_type, name="loop_index")

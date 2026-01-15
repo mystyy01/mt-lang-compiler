@@ -1,0 +1,8 @@
+from stdlib.io use File
+
+// Test readlines
+File file1 = new File("test.txt", "r")
+print("Before readlines")
+array lines = file1.readlines()
+print("After readlines")
+print(lines[0])
