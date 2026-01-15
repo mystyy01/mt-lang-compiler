@@ -42,13 +42,15 @@ if __name__ == "__main__":
         gen.classes = analyzer.classes
     gen.create_main_function()
     result = gen.generate(ast)
-    if result is None:
+    # Check if result is None or has void type (void calls return void-typed instruction)
+    if result is None or (hasattr(result, 'type') and result.type == llvmlite.ir.VoidType()):
         result = llvmlite.ir.Constant(gen.int_type, 0)
     gen.builder.ret(result)
 
 
     # Compile to machine code
     llvm_ir = str(gen.module)
+    print(llvm_ir)
     mod = llvm.parse_assembly(llvm_ir)
     mod.verify()
 

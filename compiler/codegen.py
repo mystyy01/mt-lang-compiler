@@ -58,15 +58,34 @@ class CodeGenerator:
         if not class_info:
             raise Exception(f"Class '{class_name}' not properly initialized")
         
-        fields = class_info.get('fields', [])
-        for i, field in enumerate(fields):
-            if field.name == field_name:
+        ordered_fields = class_info.get('ordered_fields', [])
+        for i, field in enumerate(ordered_fields):
+            if field['name'] == field_name:
                 return i
         
         raise Exception(f"Field '{field_name}' not found in class '{class_name}'")
-    
+
+    def create_class_structs(self):
+        """Create LLVM struct types for all classes"""
+        for class_name, class_info in self.classes.items():
+            fields = class_info.get('fields', [])
+            # Sort fields: constructor args first, then regular fields
+            arg_fields = [f for f in fields if f['is_constructor_arg']]
+            regular_fields = [f for f in fields if not f['is_constructor_arg']]
+            ordered_fields = arg_fields + regular_fields
+            field_types = []
+            for field in ordered_fields:
+                llvm_type = self.get_llvm_type(field['type'])
+                field_types.append(llvm_type)
+            struct_type = llvmlite.ir.LiteralStructType(field_types)
+            # Store the struct type and ordered fields
+            self.classes[class_name]['llvm_struct'] = struct_type
+            self.classes[class_name]['ordered_fields'] = ordered_fields
+
     def get_common_type(self, left_type, right_type):
         """Get common type for binary operations with promotion rules"""
+        if left_type == self.i8_ptr_type or right_type == self.i8_ptr_type:
+            raise Exception("Invalid binary operation on strings")
         # Type precedence: float > int > bool
         if left_type == self.float_type or right_type == self.float_type:
             return self.float_type
@@ -203,6 +222,8 @@ class CodeGenerator:
 
     def generate_class_method(self, class_name, method):
         """Generate LLVM function for a class method"""
+        old_current_class = getattr(self, 'current_class', None)
+        self.current_class = class_name
         old_builder = self.builder
         old_variables = self.variables
         old_array_lengths = self.array_lengths
@@ -277,6 +298,7 @@ class CodeGenerator:
         self.array_lengths = old_array_lengths
         self.variable_types = old_variable_types
         self.current_return_type = old_current_return_type
+        self.current_class = old_current_class
 
     def create_main_function(self):
         func_type = llvmlite.ir.FunctionType(self.int_type, [])
@@ -302,6 +324,22 @@ class CodeGenerator:
         free_type = llvmlite.ir.FunctionType(self.void_type, [self.i8_ptr_type])
         self.free = llvmlite.ir.Function(self.module, free_type, "free")
 
+        # String functions
+        strlen_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type])
+        self.strlen = llvmlite.ir.Function(self.module, strlen_type, "strlen")
+
+        strcpy_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type])
+        self.strcpy = llvmlite.ir.Function(self.module, strcpy_type, "strcpy")
+
+        strcat_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type])
+        self.strcat = llvmlite.ir.Function(self.module, strcat_type, "strcat")
+
+        strcmp_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.i8_ptr_type])
+        self.strcmp = llvmlite.ir.Function(self.module, strcmp_type, "strcmp")
+
+        sprintf_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.i8_ptr_type], var_arg=True)
+        self.sprintf = llvmlite.ir.Function(self.module, sprintf_type, "sprintf")
+
         # File I/O functions
         # fopen(const char* filename, const char* mode) -> FILE*
         fopen_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type])
@@ -315,6 +353,14 @@ class CodeGenerator:
         fread_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.int_type, self.int_type, self.i8_ptr_type])
         self.fread = llvmlite.ir.Function(self.module, fread_type, "fread")
 
+        # fwrite(const void* ptr, size_t size, size_t count, FILE* stream) -> size_t
+        fwrite_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.int_type, self.int_type, self.i8_ptr_type])
+        self.fwrite = llvmlite.ir.Function(self.module, fwrite_type, "fwrite")
+
+        # fputs(const char* s, FILE* stream) -> int
+        fputs_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.i8_ptr_type])
+        self.fputs = llvmlite.ir.Function(self.module, fputs_type, "fputs")
+
         # fseek(FILE* stream, long offset, int whence) -> int
         fseek_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.int_type, self.int_type])
         self.fseek = llvmlite.ir.Function(self.module, fseek_type, "fseek")
@@ -327,9 +373,13 @@ class CodeGenerator:
         memcpy_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type, self.int_type])
         self.memcpy = llvmlite.ir.Function(self.module, memcpy_type, "memcpy")
 
-        # strcmp(const char* s1, const char* s2) -> int
-        strcmp_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.i8_ptr_type])
-        self.strcmp = llvmlite.ir.Function(self.module, strcmp_type, "strcmp")
+        # fgets(char* buffer, int size, FILE* stream) -> char*
+        fgets_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.int_type, self.i8_ptr_type])
+        self.fgets = llvmlite.ir.Function(self.module, fgets_type, "fgets")
+
+        # stdin
+        self.stdin = llvmlite.ir.GlobalVariable(self.module, self.i8_ptr_type, "stdin")
+        self.stdin.linkage = 'external'
 
     def create_dynamic_array(self, elements, elem_type):
         """Create a new dynamic array with initial elements"""
@@ -478,10 +528,12 @@ class CodeGenerator:
         return llvmlite.ir.Constant(self.int_type, value)
     def generate(self, node):
         if isinstance(node, Program):
+            # Create LLVM structs for classes
+            self.create_class_structs()
             result = None
             for statement in node.statements:
                 result = self.generate(statement)
-            return result
+            return result  # Return the last statement result
         if isinstance(node, ClassDeclaration):
             # Classes are just declarations, don't generate code
             return None
@@ -538,31 +590,45 @@ class CodeGenerator:
         if isinstance(node, FloatLiteral):
             return llvmlite.ir.Constant(self.float_type, float(node.value))
         if isinstance(node, NewExpression):
-            # Allocate memory for the object
-            size = llvmlite.ir.Constant(self.int_type, 64)  # arbitrary size for object
-            obj_ptr = self.builder.call(self.malloc, [size], name="obj")
+            class_name = node.class_name
+            class_info = self.classes.get(class_name)
+            if not class_info:
+                raise Exception(f"Unknown class '{class_name}'")
+            struct_type = class_info['llvm_struct']
+            ordered_fields = class_info['ordered_fields']
 
-            # Initialize constructor arguments if provided
-            # For File class, store path at byte offset 0 and mode at byte offset 8
-            if len(node.arguments) >= 1:
-                # Store path (argument 0) at byte offset 0
-                path_value = self.generate(node.arguments[0])
-                path_field_ptr = self.builder.gep(obj_ptr, [self.create_int_constant(0)], name="path_field_byte")
-                path_i8_ptr_ptr = self.builder.bitcast(path_field_ptr, llvmlite.ir.PointerType(self.i8_ptr_type), name="path_field")
-                self.builder.store(path_value, path_i8_ptr_ptr)
+            # Allocate memory for the struct
+            obj_ptr = self.builder.alloca(struct_type, name=f"{class_name}_obj")
 
-            if len(node.arguments) >= 2:
-                # Store mode (argument 1) at byte offset 8
-                mode_value = self.generate(node.arguments[1])
-                mode_field_ptr = self.builder.gep(obj_ptr, [self.create_int_constant(8)], name="mode_field_byte")
-                mode_i8_ptr_ptr = self.builder.bitcast(mode_field_ptr, llvmlite.ir.PointerType(self.i8_ptr_type), name="mode_field")
-                self.builder.store(mode_value, mode_i8_ptr_ptr)
+            # Initialize constructor arguments
+            arg_fields = [f for f in ordered_fields if f['is_constructor_arg']]
+            if len(node.arguments) != len(arg_fields):
+                raise Exception(f"Wrong number of arguments for {class_name} constructor: expected {len(arg_fields)}, got {len(node.arguments)}")
+
+            for i, arg in enumerate(node.arguments):
+                value = self.generate(arg)
+                field_ptr = self.builder.gep(obj_ptr, [self.create_int_constant(0), self.create_int_constant(i)], name=f"{arg_fields[i]['name']}_ptr")
+                self.builder.store(value, field_ptr)
+
+            # Initialize regular fields with defaults if any (for now, assume no defaults)
+            # TODO: handle initializers
 
             return obj_ptr
         if isinstance(node, BinaryExpression):
             left = self.generate(node.left)
             right = self.generate(node.right)
-            
+
+            # Handle string concatenation
+            if node.operator.value == "+" and left.type == self.i8_ptr_type and right.type == self.i8_ptr_type:
+                len1 = self.builder.call(self.strlen, [left], name="len1")
+                len2 = self.builder.call(self.strlen, [right], name="len2")
+                total_len = self.builder.add(len1, len2, name="total_len")
+                total_len_plus1 = self.builder.add(total_len, self.create_int_constant(1), name="total_len_plus1")
+                new_str = self.builder.call(self.malloc, [total_len_plus1], name="new_str")
+                _ = self.builder.call(self.strcpy, [new_str, left], name="copy1")
+                _ = self.builder.call(self.strcat, [new_str, right], name="concat")
+                return new_str
+
             # Handle string comparisons specially
             if left.type == self.i8_ptr_type and right.type == self.i8_ptr_type:
                 # Use strcmp for string content comparison
@@ -657,7 +723,11 @@ class CodeGenerator:
             
             # Track the variable's type
             self.variable_types[node.name] = llvm_type
-            
+
+            # Track class variables
+            if node.type in self.classes:
+                self.variable_classes[node.name] = node.type
+
             if node.type == "array":
                 # Arrays are special - we store the pointer directly
                 if isinstance(node.value, ArrayLiteral):
@@ -744,34 +814,18 @@ class CodeGenerator:
             # Handle field access like obj.field or this.field
             obj = self.generate(node.object)
 
-            # Special handling for this.field access in File class
+            # Handle this.field access
             if isinstance(node.object, ThisExpression):
-                # For now, hardcode field access for File class
-                # Assume the current object is stored in a variable named after the class
-                # This is a temporary hack until proper field access is implemented
-                if hasattr(self, 'current_object_ptr'):
-                    obj = self.current_object_ptr
-                else:
-                    # Assume it's the 'file' variable for now
-                    if 'file' in self.variables:
-                        obj = self.builder.load(self.variables['file'], name="obj")
-
-                if node.property == "path":
-                    # Path stored at byte offset 0
-                    path_field_ptr = self.builder.gep(obj, [self.create_int_constant(0)], name="path_field_byte")
-                    path_ptr_ptr = self.builder.bitcast(path_field_ptr, llvmlite.ir.PointerType(self.i8_ptr_type), name="path_ptr")
-                    return self.builder.load(path_ptr_ptr, name="path")
-                elif node.property == "mode":
-                    # Mode stored at byte offset 8
-                    mode_field_ptr = self.builder.gep(obj, [self.create_int_constant(8)], name="mode_field_byte")
-                    mode_ptr_ptr = self.builder.bitcast(mode_field_ptr, llvmlite.ir.PointerType(self.i8_ptr_type), name="mode_ptr")
-                    return self.builder.load(mode_ptr_ptr, name="mode")
-                elif node.property == "opened":
-                    # Opened stored at byte offset 16
-                    opened_field_ptr = self.builder.gep(obj, [self.create_int_constant(16)], name="opened_field_byte")
-                    return self.builder.load(opened_field_ptr, name="opened")
-                else:
-                    raise Exception(f"Unknown field '{node.property}' on this")
+                if 'this' not in self.variables:
+                    raise Exception("Cannot access 'this' outside of a method")
+                if not hasattr(self, 'current_class'):
+                    raise Exception("Current class not set")
+                class_name = self.current_class
+                struct_type = self.classes[class_name]['llvm_struct']
+                obj = self.builder.bitcast(self.variables['this'], struct_type.as_pointer(), name="this_obj")
+                field_idx = self.get_field_index(class_name, node.property)
+                field_ptr = self.builder.gep(obj, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"this_{node.property}_field")
+                return self.builder.load(field_ptr, name=node.property)
             elif isinstance(node.object, Identifier):
                 # Handle field access on class instances: obj.field
                 obj_name = node.object.name
@@ -783,10 +837,8 @@ class CodeGenerator:
                     # Get field index
                     field_idx = self.get_field_index(class_name, node.property)
                     
-                    # Cast to proper class type and access field
-                    class_type = self.classes[class_name]['type']
-                    class_ptr = self.builder.bitcast(obj_ptr, class_type.as_pointer())
-                    field_ptr = self.builder.gep(class_ptr, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"{node.property}_field")
+                    # Access field
+                    field_ptr = self.builder.gep(obj_ptr, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"{node.property}_field")
                     return self.builder.load(field_ptr, name=node.property)
                 else:
                     # Try to handle as array method if it's not a class instance
@@ -845,12 +897,26 @@ class CodeGenerator:
                 self.builder.store(value, storage)
                 return None
             elif isinstance(node.target, MemberExpression):
-                if isinstance(node.target.object, ThisExpression):
-                    # Hardcoded for File.opened
-                    field_index = 2
-                    this_ptr = self.variables['this']
-                    field_ptr = self.builder.gep(this_ptr, [llvmlite.ir.Constant(self.int_type, field_index)])
-                    value = self.generate(node.value)
+                obj = node.target.object
+                property = node.target.property
+                value = self.generate(node.value)
+                if isinstance(obj, Identifier):
+                    obj_name = obj.name
+                    if obj_name in self.variable_classes:
+                        class_name = self.variable_classes[obj_name]
+                        field_idx = self.get_field_index(class_name, property)
+                        obj_ptr = self.variables[obj_name]
+                        field_ptr = self.builder.gep(obj_ptr, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"{property}_ptr")
+                        self.builder.store(value, field_ptr)
+                        return None
+                elif isinstance(obj, ThisExpression):
+                    if not hasattr(self, 'current_class'):
+                        raise Exception("'this' used outside method")
+                    class_name = self.current_class
+                    struct_type = self.classes[class_name]['llvm_struct']
+                    obj_ptr = self.builder.bitcast(self.variables['this'], struct_type.as_pointer(), name="this_obj")
+                    field_idx = self.get_field_index(class_name, property)
+                    field_ptr = self.builder.gep(obj_ptr, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"this_{property}_ptr")
                     self.builder.store(value, field_ptr)
                     return None
                 else:
@@ -880,6 +946,17 @@ class CodeGenerator:
                         raise Exception(f"Unknown array method: {method_name}")
 
                 # Check if it's a method call on a class instance
+                if obj_name in self.variable_classes:
+                    class_name = self.variable_classes[obj_name]
+                    func_name = f"{class_name}_{method_name}"
+                    if func_name not in self.functions:
+                        raise Exception(f"Method '{method_name}' not found in class '{class_name}'")
+                    func = self.functions[func_name]
+                    obj_ptr = self.variables[obj_name]
+                    # Cast to i8* for the first argument
+                    obj_i8_ptr = self.builder.bitcast(obj_ptr, self.i8_ptr_type, name="obj_i8")
+                    args = [obj_i8_ptr] + [self.generate(arg) for arg in node.arguments]
+                    return self.builder.call(func, args)
 
                 if obj_name in self.variables:
                     # Set the current object context for field access
@@ -963,14 +1040,51 @@ class CodeGenerator:
                 value = self.generate(arg)
                 return self.builder.call(self.printf, [format_ptr, value])
             elif isinstance(node.callee, Identifier) and node.callee.name == "read":
-                # read() - read user input as string
-                if len(node.arguments) != 0:
-                    raise Exception("read() takes no arguments")
-                
-                # For now, return a placeholder that prompts for input
-                # In a real implementation, this would read from stdin
-                input_prompt = self.create_string_constant("(input)")
-                return input_prompt
+                # read([prompt]) - read user input as string, optionally with prompt
+                if len(node.arguments) > 1:
+                    raise Exception("read() takes 0 or 1 arguments")
+
+                if len(node.arguments) == 1:
+                    # Print the prompt
+                    prompt_arg = node.arguments[0]
+                    prompt_value = self.generate(prompt_arg)
+                    if prompt_value.type == self.i8_ptr_type:
+                        format_ptr = self.create_string_constant("%s")
+                    elif prompt_value.type == self.int_type:
+                        format_ptr = self.create_string_constant("%d")
+                    elif prompt_value.type == self.float_type:
+                        format_ptr = self.create_string_constant("%f")
+                    else:
+                        format_ptr = self.create_string_constant("%s")
+                    _ = self.builder.call(self.printf, [format_ptr, prompt_value])
+
+                buffer = self.builder.call(self.malloc, [self.create_int_constant(1024)], name="input_buffer")
+                stdin_val = self.builder.load(self.stdin, name="stdin_val")
+                _ = self.builder.call(self.fgets, [buffer, self.create_int_constant(1024), stdin_val], name="fgets_call")
+
+                # Strip trailing newline
+                len_val = self.builder.call(self.strlen, [buffer], name="input_len")
+                len_minus_1 = self.builder.sub(len_val, self.create_int_constant(1), name="len_minus_1")
+                newline_ptr = self.builder.gep(buffer, [len_minus_1], name="newline_ptr")
+                newline_char = self.builder.load(newline_ptr, name="newline_char")
+                newline_const = self.create_int_constant(10)  # '\n'
+                is_newline = self.builder.icmp_signed("==", newline_char, newline_const, name="is_newline")
+                with self.builder.if_then(is_newline):
+                    zero = llvmlite.ir.Constant(self.bool_type, 0)
+                    self.builder.store(zero, newline_ptr)
+
+                return buffer
+            elif isinstance(node.callee, Identifier) and node.callee.name == "str":
+                if len(node.arguments) != 1:
+                    raise Exception("str() takes 1 argument")
+                arg = self.generate(node.arguments[0])
+                if arg.type == self.int_type:
+                    buffer = self.builder.call(self.malloc, [self.create_int_constant(32)], name="str_buffer")
+                    format_str = self.create_string_constant("%d", as_constant=True)
+                    _ = self.builder.call(self.sprintf, [buffer, format_str, arg], name="sprintf_call")
+                    return buffer
+                else:
+                    raise Exception("str() only supports int for now")
             elif isinstance(node.callee, Identifier) and node.callee.name == "fopen":
                 # fopen(const char* filename, const char* mode) -> FILE*
                 if len(node.arguments) != 2:
@@ -1019,6 +1133,13 @@ class CodeGenerator:
                     raise Exception("free requires 1 argument")
                 ptr = self.generate(node.arguments[0])
                 return self.builder.call(self.free, [ptr])
+            elif isinstance(node.callee, Identifier) and node.callee.name == "fputs":
+                # fputs(const char* s, FILE* stream)
+                if len(node.arguments) != 2:
+                    raise Exception("fputs requires 2 arguments")
+                s = self.generate(node.arguments[0])
+                stream = self.generate(node.arguments[1])
+                return self.builder.call(self.fputs, [s, stream])
             else:
                 # First check if function exists directly
                 func = self.functions.get(node.callee.name)
@@ -1409,7 +1530,7 @@ if __name__ == "__main__":
     gen = CodeGenerator()
     gen.create_main_function()
     result = gen.generate(ast)
-    if not result:
+    if result is None:
         result = llvmlite.ir.Constant(gen.int_type, 0)
     gen.builder.ret(result)
 

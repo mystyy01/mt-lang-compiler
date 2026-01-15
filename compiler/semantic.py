@@ -20,16 +20,34 @@ class SymbolTable:
 class SemanticAnalyzer:
     def __init__(self, file_path=None):
         self.symbol_table = SymbolTable()
-        self.symbol_table.declare("print", "builtin", "function")
+        self.classes = {}  # Initialize class registry
+        self.symbol_table.declare("print", "builtin", "void")
         # Declare built-in array methods
-        self.symbol_table.declare("length", "builtin", "method")
-        self.symbol_table.declare("append", "builtin", "method")
+        self.symbol_table.declare("length", "builtin", "int")
+        self.symbol_table.declare("append", "builtin", "void")
         # Declare built-in type conversion functions
-        self.symbol_table.declare("str", "builtin", "function")
-        self.symbol_table.declare("int", "builtin", "function")
-        self.symbol_table.declare("float", "builtin", "function")
+        self.symbol_table.declare("str", "builtin", "string")
+        self.symbol_table.declare("int", "builtin", "int")
+        self.symbol_table.declare("float", "builtin", "float")
         # Declare built-in input function
-        self.symbol_table.declare("read", "builtin", "function")
+        self.symbol_table.declare("read", "builtin", "string")
+        # Declare libc functions
+        self.symbol_table.declare("fopen", "builtin", "string")
+        self.symbol_table.declare("fclose", "builtin", "int")
+        self.symbol_table.declare("fread", "builtin", "int")
+        self.symbol_table.declare("fseek", "builtin", "int")
+        self.symbol_table.declare("ftell", "builtin", "int")
+        self.symbol_table.declare("malloc", "builtin", "string")
+        self.symbol_table.declare("free", "builtin", "void")
+        self.symbol_table.declare("strlen", "builtin", "int")
+        self.symbol_table.declare("strcpy", "builtin", "string")
+        self.symbol_table.declare("strcat", "builtin", "string")
+        self.symbol_table.declare("strcmp", "builtin", "int")
+        self.symbol_table.declare("sprintf", "builtin", "int")
+        self.symbol_table.declare("printf", "builtin", "int")
+        self.symbol_table.declare("fgets", "builtin", "string")
+        self.symbol_table.declare("fwrite", "builtin", "void")
+        self.symbol_table.declare("fputs", "builtin", "int")
         self.errors = []
         self.file_path = file_path or "unknown"
     
@@ -52,6 +70,7 @@ class SemanticAnalyzer:
             full_message = message
         self.errors.append(full_message)
     def analyze(self, node):
+        print(f"DEBUG: Analyzing {node.__class__.__name__}: {node}")
         if isinstance(node, Program):
             return self.analyze_program(node)
         if isinstance(node, ClassDeclaration):
@@ -76,10 +95,16 @@ class SemanticAnalyzer:
             return self.analyze_string_literal(node)
         if isinstance(node, NewExpression):
             return self.analyze_new_expression(node)
+        if isinstance(node, Identifier):
+            return self.analyze_identifier(node)
         if isinstance(node, CallExpression):
             return self.analyze_call_expression(node)
+        if isinstance(node, BinaryExpression):
+            return self.analyze_binary_expression(node)
         if isinstance(node, MemberExpression):
             return self.analyze_member_expression(node)
+        if isinstance(node, ExpressionStatement):
+            return self.analyze_expression_statement(node)
         # cant implement bools yet since they arent an AST class yet (adding soon)
     def analyze_program(self, node: Program):
         for statement in node.statements:
@@ -91,6 +116,10 @@ class SemanticAnalyzer:
         # Enter class scope for analyzing fields and methods
         self.symbol_table.enter_scope()
 
+        # Store current class for method analysis
+        old_current_class = getattr(self, 'current_class', None)
+        self.current_class = node.name
+
         # Analyze fields
         for field in node.fields:
             self.analyze_field_declaration(field)
@@ -98,6 +127,9 @@ class SemanticAnalyzer:
         # Analyze methods
         for method in node.methods:
             self.analyze_method_declaration(method)
+
+        # Restore current_class
+        self.current_class = old_current_class
             
         # Debug: Print class info
         print(f"DEBUG: Analyzing class '{node.name}' with {len(node.fields)} fields and {len(node.methods)} methods")
@@ -107,7 +139,19 @@ class SemanticAnalyzer:
         # Update class registry after analyzing this class
         if not hasattr(self, 'classes'):
             self.classes = {}
-        self.classes[node.name] = {"symbol_type": "class", "data_type": node.name}
+        fields_info = []
+        for field in node.fields:
+            fields_info.append({
+                'name': field.name,
+                'type': field.type,
+                'is_constructor_arg': field.is_constructor_arg
+            })
+        self.classes[node.name] = {
+            "symbol_type": "class",
+            "data_type": node.name,
+            "fields": fields_info
+        }
+        self.current_class = node.name
 
     def analyze_field_declaration(self, node: FieldDeclaration):
         # Fields are just stored in the class scope
@@ -128,13 +172,17 @@ class SemanticAnalyzer:
         # Enter method scope
         self.symbol_table.enter_scope()
 
+        # Declare 'this' parameter
+        self.symbol_table.declare("this", "parameter", self.current_class)
+
         # Declare parameters
         for param in node.params:
             self.symbol_table.declare(param.name, "parameter", param.param_type or "any")
 
         # Analyze method body
-        for statement in node.body.statements:
-            self.analyze(statement)
+        if node.body and hasattr(node.body, 'statements') and node.body.statements:
+            for statement in node.body.statements:
+                self.analyze(statement)
 
         self.symbol_table.exit_scope()
 
@@ -157,8 +205,23 @@ class SemanticAnalyzer:
     def analyze_member_expression(self, node: MemberExpression):
         # Analyze the object
         object_type = self.analyze(node.object)
-        # For now, return unknown - we'll need to look up fields/methods
-        return "unknown"
+        
+        # If this is a 'this' expression, look up the field in current class
+        if hasattr(node.object, '__class__') and node.object.__class__.__name__ == 'ThisExpression':
+            if hasattr(self, 'current_class') and self.current_class:
+                class_info = self.classes.get(self.current_class, {})
+                fields = class_info.get('fields', [])
+                for field in fields:
+                    if field['name'] == node.property:
+                        return field['type']
+                # Check if it's a method
+                # For now, return any for methods
+                return "any"
+        
+        # For module.function calls, return "any" since we don't track module function types
+        if object_type == "module":
+            return "any"
+        return object_type
 
     def analyze_variable_declaration(self, node: VariableDeclaration):
         # Check if the declared type is valid (built-in or user-defined class)
@@ -170,10 +233,12 @@ class SemanticAnalyzer:
         if node.value:
             type_of_node = self.analyze(node.value)
             # "any" is a wildcard that matches any type
-            if type_of_node != node.type and type_of_node != "any" and type_of_node != node.type:
+            if type_of_node != node.type and type_of_node != "any":
                 # Allow assignment if both are user-defined classes or if value is a new expression of the right type
                 if not (isinstance(node.value, NewExpression) and node.value.class_name == node.type):
                     pos_info = self.get_position_info(node)
+                    print(f"DEBUG: Assignment type mismatch: {type_of_node} to {node.type}")
+                    print(f"DEBUG: Assignment node: {node}")
                     self.add_error(f"Type mismatch{pos_info}. Cannot assign type {type_of_node} to {node.type}")
         self.symbol_table.declare(node.name, "variable", node.type)
     def analyze_function_declaration(self, node: FunctionDeclaration):
@@ -220,12 +285,15 @@ class SemanticAnalyzer:
     def analyze_binary_expression(self, node: BinaryExpression):
         left_type = self.analyze(node.left)
         right_type = self.analyze(node.right)
+        print(f"DEBUG: Binary op {node.operator.value}: {left_type} + {right_type}")
+        print(f"DEBUG: Left node: {node.left}")
+        print(f"DEBUG: Right node: {node.right}")
         
         # Comparison operators always return bool
         if node.operator.value in ["==", "!=", ">", "<", ">=", "<="]:
             return "bool"
         
-        # Logical operators always return bool
+        # Logical operators always return bool (handle before arithmetic promotion)
         elif node.operator.value in ["&&", "||"]:
             return "bool"
         
@@ -252,12 +320,7 @@ class SemanticAnalyzer:
             for statement in node.else_body.statements:
                 self.analyze(statement)
             self.symbol_table.exit_scope()
-    def analyze_member_expression(self, node: MemberExpression):
-        obj_type = self.analyze(node.object)
-        # For module.function calls, return "any" since we don't track module function types
-        if obj_type == "module":
-            return "any"
-        return obj_type
+
     def analyze_for_statement(self, node: ForInStatement):
         self.analyze(node.iterable)
         self.symbol_table.enter_scope()
@@ -333,11 +396,10 @@ class SemanticAnalyzer:
                     # Also add to a separate class registry for codegen
                     if not hasattr(self, 'classes'):
                         self.classes = {}
-                    self.classes[symbol] = {"symbol_type": "class", "data_type": symbol}
-                    
-                    # Debug: Print class info
-                    print(f"DEBUG: Registered class '{symbol}' with fields: {[field.name for field in node.fields]}")
-                    print(f"DEBUG: Registered class '{symbol}'")
+                    # Copy class information from module
+                    module_class_info = module_analyzer.classes.get(symbol, {})
+                    self.classes[symbol] = module_class_info
+                    print(f"DEBUG: Registered class '{symbol}' with fields: {module_class_info.get('fields', [])}")
                 else:
                     # Assume it's a function
                     self.symbol_table.declare(symbol, "function", "any")
@@ -349,8 +411,10 @@ class SemanticAnalyzer:
                 self.symbol_table.declare(symbol, "function", "any")
 
     def analyze_call_expression(self, node: CallExpression):
+        func_name = None
         if isinstance(node.callee, Identifier):
             func_name = node.callee.name
+            print(f"DEBUG: Analyzing call to {func_name}")
             # Check for built-in libc functions
             libc_functions = {
                 "fopen": ("i8*", ["i8*", "i8*"]),  # FILE*
@@ -362,18 +426,23 @@ class SemanticAnalyzer:
                 "free": ("void", ["i8*"]),        # void
             }
 
-            if func_name in libc_functions:
-                # Validate argument count
-                expected_args = libc_functions[func_name][1]
-                if len(node.arguments) != len(expected_args):
-                    pos_info = self.get_position_info(node)
-                    self.add_error(f"{func_name} expects {len(expected_args)} arguments, got {len(node.arguments)}{pos_info}")
+            # Check if function exists in symbol table
+            func_symbol = self.symbol_table.lookup(func_name)
+            if not func_symbol:
+                pos_info = self.get_position_info(node)
+                self.add_error(f"Unknown function '{func_name}'{pos_info}")
+                return "unknown"
+            
+            # For built-in functions, return their declared type
+            if func_symbol.get("symbol_type") == "builtin":
+                result = func_symbol.get("data_type", "unknown")
+                print(f"DEBUG: Builtin {func_name} returns {result}")
+                return result
             else:
-                # Check if function exists in symbol table
-                func_symbol = self.symbol_table.lookup(func_name)
-                if not func_symbol:
-                    pos_info = self.get_position_info(node)
-                    self.add_error(f"Unknown function '{func_name}'{pos_info}")
+                # For user-defined functions, we'd need more sophisticated tracking
+                result = func_symbol.get("data_type", "unknown")
+                print(f"DEBUG: User function {func_name} returns {result}")
+                return result
                 
                 # Handle built-in function return types
                 if func_name == "read":
@@ -384,6 +453,38 @@ class SemanticAnalyzer:
                     return "int"
                 elif func_name == "float":
                     return "float"
+                elif func_name == "fopen":
+                    return "string"
+                elif func_name == "fclose":
+                    return "int"
+                elif func_name == "fread":
+                    return "int"
+                elif func_name == "fseek":
+                    return "int"
+                elif func_name == "ftell":
+                    return "int"
+                elif func_name == "malloc":
+                    return "string"
+                elif func_name == "free":
+                    return "void"
+                elif func_name == "strlen":
+                    return "int"
+                elif func_name == "strcpy":
+                    return "string"
+                elif func_name == "strcat":
+                    return "string"
+                elif func_name == "strcmp":
+                    return "int"
+                elif func_name == "sprintf":
+                    return "int"
+                elif func_name == "printf":
+                    return "int"
+                elif func_name == "fgets":
+                    return "string"
+                elif func_name == "fwrite":
+                    return "void"
+                elif func_name == "fputs":
+                    return "int"
 
         # Analyze arguments
         for arg in node.arguments:

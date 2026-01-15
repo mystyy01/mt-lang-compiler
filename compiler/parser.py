@@ -186,6 +186,7 @@ class Parser:
     
     def parse_function_call(self, callee):
         """Parse a function call with the given callee"""
+        print(f"DEBUG: Parsing function call to {callee.name}")
         self.advance()  # consume '('
         args = []
         if not self.match("SYMBOL", ")"):
@@ -194,6 +195,7 @@ class Parser:
                 self.advance()
                 args.append(self.parse_expression())
         self.expect("SYMBOL", ")")
+        print(f"DEBUG: Created CallExpression with {len(args)} args for {callee.name}")
         return CallExpression(callee, args)
     
     def parse_multiplicative(self):

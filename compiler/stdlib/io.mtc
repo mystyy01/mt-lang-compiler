@@ -15,20 +15,24 @@ class File{
         fclose(file)
         return buffer
     }
-//    array readlines(){
-//        if (this.mode != "r"){
-//            return "Cannot read files without read permissions"
-//        }
-//        string file = fopen(this.path, "r")
-//        fseek(file, 0, 2)
-//        int fileSize = ftell(file)
-//        fseek(file, 0, 0)
-//        int bufferSize = fileSize + 1
-//        string buffer = malloc(bufferSize)
-//        fread(buffer, 1, fileSize, file)
-//        fclose(file)
-//        return buffer
-//    }
-// need to implement splitting strings into arrays
-// like string.split("\n") for example (basically steal it from python)
+    
+    void write(string content){
+        if (this.mode != "w"){
+            print("Cannot write to files without write permissions")
+            return
+        }
+        string file = fopen(this.path, "w")
+        fputs(content, file)
+        fclose(file)
+    }
+    
+    void append(string content){
+        if (this.mode != "a"){
+            print("Cannot append to files without append permissions")
+            return
+        }
+        string file = fopen(this.path, "a")
+        fputs(content, file)
+        fclose(file)
+    }
 }

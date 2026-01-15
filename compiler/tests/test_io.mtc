@@ -7,7 +7,5 @@ print("Read mode result:")
 print(contents1)
 
 // Test with write mode
-File file2 = new File("io_test.txt", "w")
-string contents2 = file2.read()
-print("Write mode result:")
-print(contents2)
+File file2 = new File("io.txt", "w")
+file2.write("Hello from write method!")

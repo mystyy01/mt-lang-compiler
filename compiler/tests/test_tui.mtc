@@ -15,7 +15,7 @@ class User{
 
 
 string divider = "======================================"
-string user_name = read()
+string user_name = read("What is your name? ")
 User user = new User(user_name, "supersecretpassword")
 
 print(divider)
