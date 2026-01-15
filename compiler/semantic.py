@@ -98,8 +98,16 @@ class SemanticAnalyzer:
         # Analyze methods
         for method in node.methods:
             self.analyze_method_declaration(method)
+            
+        # Debug: Print class info
+        print(f"DEBUG: Analyzing class '{node.name}' with {len(node.fields)} fields and {len(node.methods)} methods")
 
         self.symbol_table.exit_scope()
+        
+        # Update class registry after analyzing this class
+        if not hasattr(self, 'classes'):
+            self.classes = {}
+        self.classes[node.name] = {"symbol_type": "class", "data_type": node.name}
 
     def analyze_field_declaration(self, node: FieldDeclaration):
         # Fields are just stored in the class scope
@@ -302,6 +310,10 @@ class SemanticAnalyzer:
             # Analyze the module to find classes
             module_analyzer = SemanticAnalyzer(stdlib_path)
             module_analyzer.analyze(module_ast)
+            
+            # Update our class registry with the findings
+            if hasattr(module_analyzer, 'classes'):
+                self.classes = module_analyzer.classes
 
             # Debug: Print all symbols found in module
             print(f"DEBUG: Module symbol table contains:")
@@ -322,6 +334,9 @@ class SemanticAnalyzer:
                     if not hasattr(self, 'classes'):
                         self.classes = {}
                     self.classes[symbol] = {"symbol_type": "class", "data_type": symbol}
+                    
+                    # Debug: Print class info
+                    print(f"DEBUG: Registered class '{symbol}' with fields: {[field.name for field in node.fields]}")
                     print(f"DEBUG: Registered class '{symbol}'")
                 else:
                     # Assume it's a function

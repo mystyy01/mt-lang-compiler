@@ -53,7 +53,12 @@ class CodeGenerator:
         if class_name not in self.classes:
             raise Exception(f"Unknown class '{class_name}'")
         
-        fields = self.classes[class_name]['fields']
+        # Safely get fields with fallback
+        class_info = self.classes.get(class_name, {})
+        if not class_info:
+            raise Exception(f"Class '{class_name}' not properly initialized")
+        
+        fields = class_info.get('fields', [])
         for i, field in enumerate(fields):
             if field.name == field_name:
                 return i
