@@ -10,6 +10,7 @@ class CodeGenerator:
         self.array_lengths = {}
         self.modules = {}  # alias -> {func_name: llvm_func}
         self.variable_classes = {}  # var_name -> class_name
+        self.classes = {}  # class_name -> class_info
         self.module = llvmlite.ir.Module(name="mt_lang")
         self.int_type = llvmlite.ir.IntType(32)
         self.float_type = llvmlite.ir.DoubleType()  # 64-bit double as requested

@@ -37,7 +37,7 @@ if __name__ == "__main__":
         exit(1)
     gen = CodeGenerator(source_dir=source_dir)
     
-    # Pass class information to code generator
+    # Pass semantic analyzer to code generator for class info
     if hasattr(analyzer, 'classes'):
         gen.classes = analyzer.classes
     gen.create_main_function()
