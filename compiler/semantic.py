@@ -41,9 +41,10 @@ class SemanticAnalyzer:
         """Add an error with file information"""
         if include_file:
             file_info = f" in {self.file_path}" if self.file_path and self.file_path != "unknown" else ""
-            self.errors.append(f"{message}{file_info}")
+            full_message = f"{message}{file_info}"
         else:
-            self.errors.append(message)
+            full_message = message
+        self.errors.append(full_message)
     def analyze(self, node):
         if isinstance(node, Program):
             return self.analyze_program(node)
@@ -200,18 +201,7 @@ class SemanticAnalyzer:
     def analyze_expression_statement(self, node: ExpressionStatement):
         self.analyze(node.expression)
     def analyze_set_statement(self, node: SetStatement):
-        if not self.symbol_table.lookup(node.name):
-            pos_info = self.get_position_info(node)
-            self.add_error(f"Undeclared variable '{node.name}' in assignment{pos_info}")
-            return None
-        var_info = self.symbol_table.lookup(node.name)
-        if not var_info:
-            return None
-        original_type = var_info["data_type"]
-        type_assigned = self.analyze(node.value)
-        if original_type != type_assigned:
-                self.add_error(f"Type mismatch. Cannot assign type {type_assigned} to {original_type}")
-                return None
+        # Analyze the value
         self.analyze(node.value)
     def analyze_binary_expression(self, node: BinaryExpression):
         left_type = self.analyze(node.left)
@@ -285,6 +275,7 @@ class SemanticAnalyzer:
             # Handle more complex module paths if needed
             return
 
+        print(f"module_name = {module_name}")
         # Try to load the module
         try:
             # Check stdlib first

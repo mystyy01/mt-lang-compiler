@@ -11,7 +11,7 @@ from stdlib.io use File, stdin, stdout, stderr
 
 File f = File.open("input.txt", "r")
 string content = f.read()
-stdout.writeLine(content)
+print(content)
 f.close()
 
 // --------------------

@@ -138,6 +138,10 @@ class Parser:
         elif self.match("KEYWORD", "false"):
             self.advance()
             return BoolLiteral(False)
+        else:
+            current = self.current_token()
+            pos_info = self.get_position_info(current)
+            raise CompilerError(f"Unexpected token {current.type} '{current.value}'{pos_info}", "ERROR", self.file_path)
     def parse_call_member(self):
         base = self.parse_primary()
         while self.match("SYMBOL", "(") or self.match("SYMBOL", "."):
@@ -257,13 +261,11 @@ class Parser:
         expression = self.parse_expression()
         return ExpressionStatement(expression)
     def parse_set_statement(self):
-        self.advance()
-        var_token = self.current_token()
-        var_name = var_token.value
-        self.expect("NAME")
+        self.expect("KEYWORD", "set")
+        target = self.parse_call_member()
         self.expect("SYMBOL", "=")
         value = self.parse_expression()
-        return SetStatement(var_name, value, var_token.line, var_token.column)
+        return SetStatement(target, value)
     def parse_return_statement(self):
         self.advance()
         if self.match("SYMBOL", "}") or self.is_at_end():

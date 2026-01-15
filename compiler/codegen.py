@@ -15,7 +15,7 @@ class CodeGenerator:
         self.float_type = llvmlite.ir.DoubleType()  # 64-bit double as requested
         self.void_type = llvmlite.ir.VoidType()
         self.i8_ptr_type = llvmlite.ir.IntType(8).as_pointer()
-        self.bool_type = llvmlite.ir.IntType(1)
+        self.bool_type = llvmlite.ir.IntType(8)
         self.string_counter = 0
         self.source_dir = source_dir if source_dir else os.getcwd()
         self.stdlib_path = os.path.join(os.path.dirname(__file__), "stdlib")
@@ -748,6 +748,10 @@ class CodeGenerator:
                     mode_field_ptr = self.builder.gep(obj, [self.create_int_constant(8)], name="mode_field_byte")
                     mode_ptr_ptr = self.builder.bitcast(mode_field_ptr, llvmlite.ir.PointerType(self.i8_ptr_type), name="mode_ptr")
                     return self.builder.load(mode_ptr_ptr, name="mode")
+                elif node.property == "opened":
+                    # Opened stored at byte offset 16
+                    opened_field_ptr = self.builder.gep(obj, [self.create_int_constant(16)], name="opened_field_byte")
+                    return self.builder.load(opened_field_ptr, name="opened")
                 else:
                     raise Exception(f"Unknown field '{node.property}' on this")
             else:
@@ -762,32 +766,48 @@ class CodeGenerator:
                 # Fallback - should not happen in normal usage
                 raise Exception("'this' used but no object context available")
         if isinstance(node, SetStatement):
-            if node.name not in self.variables:
-                raise Exception(f"Variable '{node.name}' not declared")
-            
-            # Get the variable's storage and expected type
-            storage = self.variables[node.name]
-            expected_type = self.variable_types[node.name]
-            
-            # Generate the value
-            value = self.generate(node.value)
-            
-            # Special handling for arrays
-            if expected_type == self.dyn_array_ptr_type:
-                # For arrays, we store the pointer directly
-                if value.type != self.dyn_array_ptr_type:
-                    raise TypeError(f"Cannot assign {value.type} to array variable '{node.name}': expected {self.dyn_array_ptr_type}")
+            # For now, only handle Identifier targets
+            if isinstance(node.target, Identifier):
+                name = node.target.name
+                if name not in self.variables:
+                    raise Exception(f"Variable '{name}' not declared")
                 
-                # For arrays, replace the pointer in variables dict
-                self.variables[node.name] = value
-                return None  # No store operation needed for arrays
-            else:
-                # For non-array types, store into the allocated space
-                if value.type != expected_type:
-                    raise TypeError(f"Cannot assign {value.type} to variable '{node.name}' of type {expected_type}: type mismatch")
+                # Get the variable's storage and expected type
+                storage = self.variables[name]
+                expected_type = self.variable_types[name]
+                
+                # Generate the value
+                value = self.generate(node.value)
+                
+                # Special handling for arrays
+                if expected_type == self.dyn_array_ptr_type:
+                    # For arrays, we store the pointer directly
+                    if value.type != self.dyn_array_ptr_type:
+                        raise TypeError(f"Cannot assign {value.type} to array variable '{name}': expected {self.dyn_array_ptr_type}")
+                    
+                    # For arrays, replace the pointer in variables dict
+                    self.variables[name] = value
+                    return None  # No store operation needed for arrays
+                else:
+                    # For non-array types, store into the allocated space
+                    if value.type != expected_type:
+                        raise TypeError(f"Cannot assign {value.type} to variable '{name}' of type {expected_type}: type mismatch")
 
                 self.builder.store(value, storage)
                 return None
+            elif isinstance(node.target, MemberExpression):
+                if isinstance(node.target.object, ThisExpression):
+                    # Hardcoded for File.opened
+                    field_index = 2
+                    this_ptr = self.variables['this']
+                    field_ptr = self.builder.gep(this_ptr, [llvmlite.ir.Constant(self.int_type, field_index)])
+                    value = self.generate(node.value)
+                    self.builder.store(value, field_ptr)
+                    return None
+                else:
+                    raise Exception(f"Unsupported member assignment: {node.target}")
+            else:
+                raise Exception(f"Unsupported assignment target: {node.target}")
         if isinstance(node, ExpressionStatement):
             return self.generate(node.expression)
         if isinstance(node, CallExpression):
@@ -1211,7 +1231,7 @@ class CodeGenerator:
 
             self.builder.position_at_end(exit_block)
         if isinstance(node, BoolLiteral):
-            return llvmlite.ir.Constant(llvmlite.ir.IntType(1), 1 if node.value else 0)
+            return llvmlite.ir.Constant(llvmlite.ir.IntType(8), 1 if node.value else 0)
         if isinstance(node, TypeofExpression):
             # For now, implement typeof as a simple type check
             # In a full implementation, this would return type info at runtime

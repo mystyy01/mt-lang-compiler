@@ -1,8 +1,14 @@
 class File{
     arg string path
     arg string mode
-
+    bool opened = false
+    void open(){
+        set this.opened = true
+    }
     string read(){
+        if (this.opened != true){
+            return "File is not opened"
+        }
         if (this.mode != "r"){
             return "Cannot read files without read permissions"
         }
@@ -16,8 +22,4 @@ class File{
         fclose(file)
         return buffer
     }
-    // implement writing
-    // implement appending
-    // implement write bytes
-    // implement read bytes
 }

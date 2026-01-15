@@ -48,13 +48,13 @@ class VariableDeclaration:
     def __repr__(self):
         return f"VariableDeclaration({self.type}, {self.name}, {self.value})"
 class SetStatement:
-    def __init__(self, name, value, line=None, column=None):
-        self.name = name
+    def __init__(self, target, value, line=None, column=None):
+        self.target = target
         self.value = value
         self.line = line
         self.column = column
     def __repr__(self):
-        return f"SetStatement({self.name}, {self.value})"
+        return f"SetStatement({self.target}, {self.value})"
 class ReturnStatement:
     def __init__(self, value = None):
         self.value = value
