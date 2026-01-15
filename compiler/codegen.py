@@ -46,7 +46,19 @@ class CodeGenerator:
         else:
             # For user-defined types (classes), use pointer to byte
             return self.i8_ptr_type
-
+    
+    def get_field_index(self, class_name, field_name):
+        """Get the field index for a given class and field name"""
+        if class_name not in self.classes:
+            raise Exception(f"Unknown class '{class_name}'")
+        
+        fields = self.classes[class_name]['fields']
+        for i, field in enumerate(fields):
+            if field.name == field_name:
+                return i
+        
+        raise Exception(f"Field '{field_name}' not found in class '{class_name}'")
+    
     def get_common_type(self, left_type, right_type):
         """Get common type for binary operations with promotion rules"""
         # Type precedence: float > int > bool
@@ -754,6 +766,37 @@ class CodeGenerator:
                     return self.builder.load(opened_field_ptr, name="opened")
                 else:
                     raise Exception(f"Unknown field '{node.property}' on this")
+            elif isinstance(node.object, Identifier):
+                # Handle field access on class instances: obj.field
+                obj_name = node.object.name
+                if obj_name in self.variables and obj_name in self.variable_classes:
+                    # Get the object pointer
+                    obj_ptr = self.variables[obj_name]
+                    class_name = self.variable_classes[obj_name]
+                    
+                    # Get field index
+                    field_idx = self.get_field_index(class_name, node.property)
+                    
+                    # Cast to proper class type and access field
+                    class_type = self.classes[class_name]['type']
+                    class_ptr = self.builder.bitcast(obj_ptr, class_type.as_pointer())
+                    field_ptr = self.builder.gep(class_ptr, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"{node.property}_field")
+                    return self.builder.load(field_ptr, name=node.property)
+                else:
+                    # Try to handle as array method if it's not a class instance
+                    var_type = self.variable_types.get(obj_name)
+                    if var_type == self.dyn_array_ptr_type:
+                        # Handle array methods (length, append)
+                        if node.property == "length":
+                            array_ptr = self.variables[obj_name]
+                            return self.array_length(array_ptr)
+                        elif node.property == "append":
+                            # This should be called as method, not field access
+                            raise Exception(f"Array append should be called as method: {obj_name}.append(value)")
+                        else:
+                            raise Exception(f"Unknown array property: {node.property}")
+                    else:
+                        raise Exception(f"Unknown field '{node.property}' on variable '{obj_name}'")
             else:
                 # For other member access, assume it's method call (handled elsewhere)
                 raise Exception(f"Field access not implemented for {type(node.object)}.{node.property}")
@@ -913,6 +956,15 @@ class CodeGenerator:
                 # Generate the value for non-expression arguments
                 value = self.generate(arg)
                 return self.builder.call(self.printf, [format_ptr, value])
+            elif isinstance(node.callee, Identifier) and node.callee.name == "read":
+                # read() - read user input as string
+                if len(node.arguments) != 0:
+                    raise Exception("read() takes no arguments")
+                
+                # For now, return a placeholder that prompts for input
+                # In a real implementation, this would read from stdin
+                input_prompt = self.create_string_constant("(input)")
+                return input_prompt
             elif isinstance(node.callee, Identifier) and node.callee.name == "fopen":
                 # fopen(const char* filename, const char* mode) -> FILE*
                 if len(node.arguments) != 2:

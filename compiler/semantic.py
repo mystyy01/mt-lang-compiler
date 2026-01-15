@@ -24,6 +24,12 @@ class SemanticAnalyzer:
         # Declare built-in array methods
         self.symbol_table.declare("length", "builtin", "method")
         self.symbol_table.declare("append", "builtin", "method")
+        # Declare built-in type conversion functions
+        self.symbol_table.declare("str", "builtin", "function")
+        self.symbol_table.declare("int", "builtin", "function")
+        self.symbol_table.declare("float", "builtin", "function")
+        # Declare built-in input function
+        self.symbol_table.declare("read", "builtin", "function")
         self.errors = []
         self.file_path = file_path or "unknown"
     
@@ -297,16 +303,30 @@ class SemanticAnalyzer:
             module_analyzer = SemanticAnalyzer(stdlib_path)
             module_analyzer.analyze(module_ast)
 
+            # Debug: Print all symbols found in module
+            print(f"DEBUG: Module symbol table contains:")
+            for scope in module_analyzer.symbol_table.scopes:
+                for name, info in scope.items():
+                    print(f"  {name}: {info}")
+            
             # Register imported symbols
             for symbol in node.symbols:
+                print(f"DEBUG: Looking for symbol '{symbol}'")
                 # Check if it's a class in the module
                 class_symbol = module_analyzer.symbol_table.lookup(symbol)
+                print(f"DEBUG: Found symbol: {class_symbol}")
                 if class_symbol and class_symbol["symbol_type"] == "class":
                     # Register the class in our symbol table
                     self.symbol_table.declare(symbol, "class", symbol)
+                    # Also add to a separate class registry for codegen
+                    if not hasattr(self, 'classes'):
+                        self.classes = {}
+                    self.classes[symbol] = {"symbol_type": "class", "data_type": symbol}
+                    print(f"DEBUG: Registered class '{symbol}'")
                 else:
                     # Assume it's a function
                     self.symbol_table.declare(symbol, "function", "any")
+                    print(f"DEBUG: Registered function '{symbol}'")
 
         except Exception as e:
             # If we can't load the module, just declare as function for now
@@ -339,6 +359,16 @@ class SemanticAnalyzer:
                 if not func_symbol:
                     pos_info = self.get_position_info(node)
                     self.add_error(f"Unknown function '{func_name}'{pos_info}")
+                
+                # Handle built-in function return types
+                if func_name == "read":
+                    return "string"
+                elif func_name == "str":
+                    return "string"
+                elif func_name == "int":
+                    return "int"
+                elif func_name == "float":
+                    return "float"
 
         # Analyze arguments
         for arg in node.arguments:

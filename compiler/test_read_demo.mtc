@@ -1,0 +1,9 @@
+print("What is your name?")
+string name = read()
+
+print("How old are you?")
+string age_str = read()
+int age = int(age_str)
+
+print("Hello " + name + "! You are " + age + " years old.")
+print("In 10 years, you will be " + str(age + 10) + " years old.")

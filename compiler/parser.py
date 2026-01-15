@@ -75,11 +75,16 @@ class Parser:
             literal = StringLiteral(token.value, token.line, token.column)
             self.advance()
             return literal
-        elif self.current_token().type == "NAME" or (self.current_token().type == "KEYWORD" and self.current_token().value in ["fopen", "fclose", "fread", "fwrite", "fseek", "ftell", "malloc", "free"]):
+        elif self.current_token().type == "NAME" or (self.current_token().type == "KEYWORD" and self.current_token().value in ["fopen", "fclose", "fread", "fwrite", "fseek", "ftell", "malloc", "free", "int", "str", "float", "read"]):
             token = self.current_token()
             literal = Identifier(token.value, token.line, token.column)
             self.advance()
 
+            # Check for function call: identifier(expression)
+            if self.current_token().type == "SYMBOL" and self.current_token().value == "(":
+                # This is a function call, delegate to call parsing
+                return self.parse_function_call(literal)
+            
             # Check for array indexing: identifier[expression]
             if self.current_token().type == "SYMBOL" and self.current_token().value == "[":
                 self.advance()  # consume '['
@@ -177,7 +182,20 @@ class Parser:
                             args.append(self.parse_expression())
                     self.expect("SYMBOL", ")")
                     base = CallExpression(base, args)
-        return base   
+        return base
+    
+    def parse_function_call(self, callee):
+        """Parse a function call with the given callee"""
+        self.advance()  # consume '('
+        args = []
+        if not self.match("SYMBOL", ")"):
+            args.append(self.parse_expression())
+            while self.match("SYMBOL", ","):
+                self.advance()
+                args.append(self.parse_expression())
+        self.expect("SYMBOL", ")")
+        return CallExpression(callee, args)
+    
     def parse_multiplicative(self):
         left = self.parse_call_member()
         while self.current_token().value == "*" or self.current_token().value == "/":

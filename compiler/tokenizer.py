@@ -128,7 +128,16 @@ class Tokenizer:
         return Token("STRING", string, start_line, start_column)
     def read_symbol(self):
         if not self.is_at_end():
-            if self.peek_next() and (self.current_char() + self.peek_next()) in DOUBLE_CHAR_SYMBOLS:
+            # Check for // comment start first
+            if self.current_char() == "/" and self.peek_next() == "/":
+                # Skip the entire comment
+                self.advance()  # consume first /
+                self.advance()  # consume second /
+                while not self.is_at_end() and self.current_char() != "\n":
+                    self.advance()
+                # Return None to indicate no token was produced (comment skipped)
+                return None
+            elif self.peek_next() and (self.current_char() + self.peek_next()) in DOUBLE_CHAR_SYMBOLS:
                 token =  Token("SYMBOL", (self.current_char() + self.peek_next()), self.line, self.column)
                 self.advance(2)
                 return token
@@ -170,8 +179,10 @@ class Tokenizer:
                 else:
                     # This is a binary minus operator
                     tokens.append(self.read_symbol())
-            elif self.current_char() in SINGLE_CHAR_SYMBOLS or (self.peek_next() and (self.current_char() + self.peek_next()) in DOUBLE_CHAR_SYMBOLS):
-                tokens.append(self.read_symbol())
+            elif self.current_char() in SINGLE_CHAR_SYMBOLS or (self.peek_next() and (self.current_char() + self.peek_next()) in DOUBLE_CHAR_SYMBOLS) or (self.current_char() == "/" and self.peek_next() == "/"):
+                symbol_token = self.read_symbol()
+                if symbol_token is not None:  # Skip None tokens (comments)
+                    tokens.append(symbol_token)
             elif self.current_char().isalpha() or self.current_char() == "_":
                 tokens.append(self.read_word())
             elif self.current_char().isdigit():

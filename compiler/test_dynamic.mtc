@@ -1,0 +1,9 @@
+class Test {
+    void test() {
+        string this.new_var = "hello world"
+        print(this.new_var)
+    }
+}
+
+Test t = new Test()
+t.test()
