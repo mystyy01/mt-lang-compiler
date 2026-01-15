@@ -46,7 +46,10 @@ class File{
         int bufferSize = fileSize + 1
         string buffer = malloc(bufferSize)
         fread(buffer, 1, fileSize, file)
+        // set buffer[bufferSize] = "\0" doesnt work but we need to add a null byte as a delimiter as we handle it as a string
+
         fclose(file)
-        return buffer.split("\n")
+        array lines = buffer.split("\n")
+        return lines
     }
 }

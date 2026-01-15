@@ -1,16 +1,19 @@
 from stdlib.io use File
+from stdlib.iter use range
 
 // Test with read mode
 File file1 = new File("test.txt", "r")
 string contents1 = file1.read()
 print("Read mode result:")
-print(contents1)
-print(file1.readlines())
-for (line in file1.readlines()){
-    print("Line: " + line)
+array lines = file1.readlines()
+// print(typeof(lines)) this stops the program here for some reason (no errors?)
+// print(lines.length()) // displays 3 so it should iterate properly? also this stops the for loop from running at all (maybe the return type of it affects the array in some sort?)
+for (i in range(lines.length())){
+    print(lines[i])
 }
 
 // Test with write mode
 File file2 = new File("io.txt", "w")
 file2.write("Hello from write method!")
+print("done")
 

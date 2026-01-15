@@ -383,7 +383,10 @@ class SemanticAnalyzer:
             
             # Update our class registry with the findings
             if hasattr(module_analyzer, 'classes'):
-                self.classes = module_analyzer.classes
+                if not hasattr(self, 'classes'):
+                    self.classes = {}
+                # Merge module classes into our registry
+                self.classes.update(module_analyzer.classes)
 
             # Debug: Print all symbols found in module
             print(f"DEBUG: Module symbol table contains:")
@@ -408,9 +411,12 @@ class SemanticAnalyzer:
                     self.classes[symbol] = module_class_info
                     print(f"DEBUG: Registered class '{symbol}' with fields: {module_class_info.get('fields', [])}")
                 else:
-                    # Assume it's a function
-                    self.symbol_table.declare(symbol, "function", "any")
-                    print(f"DEBUG: Registered function '{symbol}'")
+                    # It's a function - use its actual return type from the module analysis
+                    if class_symbol:
+                        self.symbol_table.declare(symbol, "function", class_symbol["data_type"])
+                    else:
+                        # Fallback for unknown symbols
+                        self.symbol_table.declare(symbol, "function", "any")
 
         except Exception as e:
             # If we can't load the module, just declare as function for now
