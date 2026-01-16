@@ -141,6 +141,11 @@ class SimpleImportStatement:
         self.alias = alias
     def __repr__(self):
         return f"SimpleImportStatement({self.module_name}, {self.alias})"
+class LibcImportStatement:
+    def __init__(self, symbols):
+        self.symbols = symbols  # List of libc function names to import
+    def __repr__(self):
+        return f"LibcImportStatement({self.symbols})"
 class Program:
     def __init__(self, statements: list):
         self.statements = statements

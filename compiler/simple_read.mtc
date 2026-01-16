@@ -1,2 +1,0 @@
-string test_input = read()
-print("Input was: " + test_input)

@@ -1,4 +1,0 @@
-Hello from a different file!
-This is test file content.
-It has multiple lines.
-End of file.

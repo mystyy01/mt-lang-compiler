@@ -2,6 +2,7 @@ class File{
     arg string path
     arg string mode
     string read(){
+        // need to check if files exists other wise we get seg fault
         if (this.mode != "r"){
             return "Cannot read files without read permissions"
         }
@@ -36,6 +37,7 @@ class File{
         fclose(file)
     }
     array readlines(){
+        // need to check if files exists other wise we get seg fault
         if (this.mode != "r"){
             return "Cannot read files without read permissions"
         }

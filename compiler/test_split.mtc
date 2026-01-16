@@ -1,6 +1,0 @@
-string text = "a,b,c"
-array parts = text.split(",")
-print(parts[0])  // Should print: a
-print(parts[1])  // Should print: b
-print(parts[2])  // Should print: c
-print(parts.length())  // Should print: 3

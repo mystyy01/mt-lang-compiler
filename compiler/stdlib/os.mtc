@@ -1,0 +1,6 @@
+bool access(string filepath){
+    if (lib c stuff (filepath)){
+        return true
+    }
+    return false
+}

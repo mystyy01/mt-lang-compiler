@@ -7,3 +7,4 @@ array range(int integer){
     }
     return arr
 }
+// implement enumerate
