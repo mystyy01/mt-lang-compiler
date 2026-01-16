@@ -2,6 +2,72 @@ import llvmlite.ir
 import os
 from ast_nodes import *
 
+# Registry of libc functions available for import
+# Format: "name": {"ret": return_type, "args": [arg_types], "var_arg": bool}
+# Types: "int", "ptr", "void", "float"
+LIBC_FUNCTIONS = {
+    # Memory management
+    "malloc": {"ret": "ptr", "args": ["int"]},
+    "calloc": {"ret": "ptr", "args": ["int", "int"]},
+    "realloc": {"ret": "ptr", "args": ["ptr", "int"]},
+    "free": {"ret": "void", "args": ["ptr"]},
+    "memcpy": {"ret": "ptr", "args": ["ptr", "ptr", "int"]},
+    "memset": {"ret": "ptr", "args": ["ptr", "int", "int"]},
+
+    # String functions
+    "strlen": {"ret": "int", "args": ["ptr"]},
+    "strcpy": {"ret": "ptr", "args": ["ptr", "ptr"]},
+    "strncpy": {"ret": "ptr", "args": ["ptr", "ptr", "int"]},
+    "strcat": {"ret": "ptr", "args": ["ptr", "ptr"]},
+    "strcmp": {"ret": "int", "args": ["ptr", "ptr"]},
+    "strncmp": {"ret": "int", "args": ["ptr", "ptr", "int"]},
+    "strstr": {"ret": "ptr", "args": ["ptr", "ptr"]},
+    "strchr": {"ret": "ptr", "args": ["ptr", "int"]},
+    "sprintf": {"ret": "int", "args": ["ptr", "ptr"], "var_arg": True},
+    "snprintf": {"ret": "int", "args": ["ptr", "int", "ptr"], "var_arg": True},
+
+    # File I/O
+    "fopen": {"ret": "ptr", "args": ["ptr", "ptr"]},
+    "fclose": {"ret": "int", "args": ["ptr"]},
+    "fread": {"ret": "int", "args": ["ptr", "int", "int", "ptr"]},
+    "fwrite": {"ret": "int", "args": ["ptr", "int", "int", "ptr"]},
+    "fgets": {"ret": "ptr", "args": ["ptr", "int", "ptr"]},
+    "fputs": {"ret": "int", "args": ["ptr", "ptr"]},
+    "fseek": {"ret": "int", "args": ["ptr", "int", "int"]},
+    "ftell": {"ret": "int", "args": ["ptr"]},
+    "fflush": {"ret": "int", "args": ["ptr"]},
+    "feof": {"ret": "int", "args": ["ptr"]},
+    "ferror": {"ret": "int", "args": ["ptr"]},
+
+    # File system
+    "access": {"ret": "int", "args": ["ptr", "int"]},
+    "remove": {"ret": "int", "args": ["ptr"]},
+    "rename": {"ret": "int", "args": ["ptr", "ptr"]},
+    "stat": {"ret": "int", "args": ["ptr", "ptr"]},
+
+    # Standard I/O
+    "printf": {"ret": "int", "args": ["ptr"], "var_arg": True},
+    "scanf": {"ret": "int", "args": ["ptr"], "var_arg": True},
+    "puts": {"ret": "int", "args": ["ptr"]},
+    "getchar": {"ret": "int", "args": []},
+    "putchar": {"ret": "int", "args": ["int"]},
+
+    # Process/system
+    "exit": {"ret": "void", "args": ["int"]},
+    "abort": {"ret": "void", "args": []},
+    "system": {"ret": "int", "args": ["ptr"]},
+    "getenv": {"ret": "ptr", "args": ["ptr"]},
+
+    # Math (from math.h, but commonly linked)
+    "abs": {"ret": "int", "args": ["int"]},
+    "atoi": {"ret": "int", "args": ["ptr"]},
+    "atof": {"ret": "float", "args": ["ptr"]},
+
+    # Time
+    "time": {"ret": "int", "args": ["ptr"]},
+    "sleep": {"ret": "int", "args": ["int"]},
+}
+
 class CodeGenerator:
     def __init__(self, source_dir=None):
         self.variables = {}
@@ -21,6 +87,7 @@ class CodeGenerator:
         self.source_dir = source_dir if source_dir else os.getcwd()
         self.stdlib_path = os.path.join(os.path.dirname(__file__), "stdlib")
         self.imported_modules = set()  # Track which modules we've already imported
+        self.libc_functions = {}  # Track imported libc functions: name -> llvm_function
 
         # Dynamic array struct: { i32 length, i32 capacity, i8* data }
         self.dyn_array_type = llvmlite.ir.LiteralStructType([
@@ -194,9 +261,12 @@ class CodeGenerator:
         # Track functions before and after to know what was added
         before_funcs = set(self.functions.keys())
         
-        # Generate code for all function declarations and class methods in module
+        # Generate code for all statements in module
         for statement in ast.statements:
-            if isinstance(statement, (FunctionDeclaration, DynamicFunctionDeclaration)):
+            if isinstance(statement, LibcImportStatement):
+                # Process libc imports first to declare functions
+                self.generate(statement)
+            elif isinstance(statement, (FunctionDeclaration, DynamicFunctionDeclaration)):
                 self.generate(statement)
             elif isinstance(statement, ClassDeclaration):
                 # Generate LLVM functions for class methods
@@ -385,8 +455,119 @@ class CodeGenerator:
         strstr_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type])
         self.strstr = llvmlite.ir.Function(self.module, strstr_type, "strstr")
 
-    def create_dynamic_array(self, elements, elem_type):
-        """Create a new dynamic array with initial elements"""
+    def get_libc_llvm_type(self, type_str):
+        """Convert libc registry type string to LLVM type"""
+        if type_str == "int":
+            return self.int_type
+        elif type_str == "ptr":
+            return self.i8_ptr_type
+        elif type_str == "void":
+            return self.void_type
+        elif type_str == "float":
+            return self.float_type
+        else:
+            raise Exception(f"Unknown libc type: {type_str}")
+
+    def declare_libc_function(self, func_name):
+        """Declare a single libc function from the registry"""
+        if func_name in self.libc_functions:
+            return self.libc_functions[func_name]  # Already declared
+
+        if func_name not in LIBC_FUNCTIONS:
+            raise Exception(f"Unknown libc function: {func_name}. Available functions: {', '.join(sorted(LIBC_FUNCTIONS.keys()))}")
+
+        func_info = LIBC_FUNCTIONS[func_name]
+        ret_type = self.get_libc_llvm_type(func_info["ret"])
+        arg_types = [self.get_libc_llvm_type(t) for t in func_info["args"]]
+        var_arg = func_info.get("var_arg", False)
+
+        func_type = llvmlite.ir.FunctionType(ret_type, arg_types, var_arg=var_arg)
+        llvm_func = llvmlite.ir.Function(self.module, func_type, func_name)
+
+        self.libc_functions[func_name] = llvm_func
+        return llvm_func
+
+    def generate_array_to_string(self, array_ptr):
+        """Convert an array to string format: ["item1", "item2", ...]"""
+        # Get array length
+        length_ptr = self.builder.gep(array_ptr,
+            [llvmlite.ir.Constant(self.int_type, 0), llvmlite.ir.Constant(self.int_type, 0)],
+            name="arr_len_ptr")
+        length = self.builder.load(length_ptr, name="arr_length")
+
+        # Get data pointer
+        data_ptr_ptr = self.builder.gep(array_ptr,
+            [llvmlite.ir.Constant(self.int_type, 0), llvmlite.ir.Constant(self.int_type, 2)],
+            name="arr_data_ptr_ptr")
+        data_ptr = self.builder.load(data_ptr_ptr, name="arr_data_ptr")
+
+        # Allocate result buffer (estimate: 64 bytes per element should be enough)
+        buffer_size = self.builder.mul(length, self.create_int_constant(64), name="buf_size_est")
+        buffer_size = self.builder.add(buffer_size, self.create_int_constant(64), name="buf_size")  # Extra for brackets
+        result_buffer = self.builder.call(self.malloc, [buffer_size], name="str_result")
+
+        # Start with "["
+        open_bracket = self.create_string_constant("[", as_constant=True)
+        self.builder.call(self.strcpy, [result_buffer, open_bracket])
+
+        # Create loop blocks
+        func = self.builder.block.parent
+        loop_block = func.append_basic_block(name="arr_str_loop")
+        body_block = func.append_basic_block(name="arr_str_body")
+        done_block = func.append_basic_block(name="arr_str_done")
+
+        # Initialize loop counter
+        counter_ptr = self.builder.alloca(self.int_type, name="arr_str_i")
+        self.builder.store(self.create_int_constant(0), counter_ptr)
+        self.builder.branch(loop_block)
+
+        # Loop condition
+        self.builder.position_at_end(loop_block)
+        counter = self.builder.load(counter_ptr, name="i")
+        cond = self.builder.icmp_signed("<", counter, length, name="arr_str_cond")
+        self.builder.cbranch(cond, body_block, done_block)
+
+        # Loop body
+        self.builder.position_at_end(body_block)
+        current_i = self.builder.load(counter_ptr, name="curr_i")
+
+        # Add comma and space if not first element
+        is_first = self.builder.icmp_signed("==", current_i, self.create_int_constant(0), name="is_first")
+        with self.builder.if_then(self.builder.not_(is_first)):
+            comma_space = self.create_string_constant(", ", as_constant=True)
+            self.builder.call(self.strcat, [result_buffer, comma_space])
+
+        # Get element (assume string array for now - cast data to i8**)
+        str_array_ptr = self.builder.bitcast(data_ptr, self.i8_ptr_type.as_pointer(), name="str_arr_ptr")
+        elem_ptr = self.builder.gep(str_array_ptr, [current_i], name="elem_ptr")
+        elem = self.builder.load(elem_ptr, name="elem")
+
+        # Add quote, element, quote
+        quote = self.create_string_constant("\"", as_constant=True)
+        self.builder.call(self.strcat, [result_buffer, quote])
+        self.builder.call(self.strcat, [result_buffer, elem])
+        self.builder.call(self.strcat, [result_buffer, quote])
+
+        # Increment counter
+        next_i = self.builder.add(current_i, self.create_int_constant(1), name="next_i")
+        self.builder.store(next_i, counter_ptr)
+        self.builder.branch(loop_block)
+
+        # Done - add closing bracket
+        self.builder.position_at_end(done_block)
+        close_bracket = self.create_string_constant("]", as_constant=True)
+        self.builder.call(self.strcat, [result_buffer, close_bracket])
+
+        return result_buffer
+
+    def create_dynamic_array(self, elements, elem_type, on_heap=False):
+        """Create a new dynamic array with initial elements.
+
+        Args:
+            elements: Initial elements to store
+            elem_type: LLVM type of elements
+            on_heap: If True, allocate struct on heap (needed when returning from functions)
+        """
         initial_capacity = max(len(elements), 4)  # At least 4 elements capacity
 
         # Calculate element size
@@ -395,8 +576,14 @@ class CodeGenerator:
         else:
             elem_size = 4  # int size
 
-        # Allocate the array struct on stack
-        array_ptr = self.builder.alloca(self.dyn_array_type, name="dyn_array")
+        # Allocate the array struct (on heap if returning, stack otherwise)
+        if on_heap:
+            # Allocate struct on heap - sizeof({i32, i32, i8*}) = 16 bytes on 64-bit
+            struct_size = self.create_int_constant(24)  # 4 + 4 + 8 + padding
+            array_mem = self.builder.call(self.malloc, [struct_size], name="dyn_array_mem")
+            array_ptr = self.builder.bitcast(array_mem, self.dyn_array_ptr_type, name="dyn_array")
+        else:
+            array_ptr = self.builder.alloca(self.dyn_array_type, name="dyn_array")
 
         # Set length
         length_ptr = self.builder.gep(array_ptr, [llvmlite.ir.Constant(self.int_type, 0), llvmlite.ir.Constant(self.int_type, 0)], name="length_ptr")
@@ -510,8 +697,8 @@ class CodeGenerator:
         # Get delimiter length (needed to skip past delimiters)
         delim_len = self.builder.call(self.strlen, [delimiter_ptr], name="delim_len")
 
-        # Create result array (starts empty, will hold string pointers)
-        result_array, _, _ = self.create_dynamic_array([], self.i8_ptr_type)
+        # Create result array on heap (since it may be returned from a function)
+        result_array, _, _ = self.create_dynamic_array([], self.i8_ptr_type, on_heap=True)
 
         # Allocate loop variables on stack
         current_pos = self.builder.alloca(self.i8_ptr_type, name="current_pos")
@@ -640,6 +827,11 @@ class CodeGenerator:
         if isinstance(node, FromImportStatement):
             # Load the module for code generation
             module_name = self.load_module(node.module_path)
+            return None
+        if isinstance(node, LibcImportStatement):
+            # Declare requested libc functions
+            for func_name in node.symbols:
+                self.declare_libc_function(func_name)
             return None
         if isinstance(node, SimpleImportStatement):
             # For "use math" - load module and register under module name for math.add() style
@@ -1249,8 +1441,19 @@ class CodeGenerator:
                     format_str = self.create_string_constant("%d", as_constant=True)
                     _ = self.builder.call(self.sprintf, [buffer, format_str, arg], name="sprintf_call")
                     return buffer
+                elif arg.type == self.float_type:
+                    buffer = self.builder.call(self.malloc, [self.create_int_constant(64)], name="str_buffer")
+                    format_str = self.create_string_constant("%g", as_constant=True)
+                    _ = self.builder.call(self.sprintf, [buffer, format_str, arg], name="sprintf_call")
+                    return buffer
+                elif arg.type == self.i8_ptr_type:
+                    # String - just return it as-is
+                    return arg
+                elif arg.type == self.dyn_array_ptr_type:
+                    # Array to string: ["item1", "item2", ...]
+                    return self.generate_array_to_string(arg)
                 else:
-                    raise Exception("str() only supports int for now")
+                    raise Exception(f"str() doesn't support type {arg.type}")
             elif isinstance(node.callee, Identifier) and node.callee.name == "fopen":
                 # fopen(const char* filename, const char* mode) -> FILE*
                 if len(node.arguments) != 2:
@@ -1309,14 +1512,18 @@ class CodeGenerator:
             else:
                 # First check if function exists directly
                 func = self.functions.get(node.callee.name)
-                
+
                 # If not found directly, check imported modules
                 if func is None:
                     for module_name, module_funcs in self.modules.items():
                         if node.callee.name in module_funcs:
                             func = module_funcs[node.callee.name]
                             break
-                
+
+                # Check if it's an imported libc function
+                if func is None and node.callee.name in self.libc_functions:
+                    func = self.libc_functions[node.callee.name]
+
                 if func is None:
                     raise Exception(f"Unknown function: {node.callee.name}")
                 

@@ -1,19 +1,25 @@
+from stdlib.io use file_exists
 from stdlib.io use File
-from stdlib.iter use range
 
-// Test with read mode
-File file1 = new File("test.txt", "r")
-string contents1 = file1.read()
-print("Read mode result:")
-array lines = file1.readlines()
-// print(typeof(lines)) this stops the program here for some reason (no errors?)
-// print(lines.length()) // displays 3 so it should iterate properly? also this stops the for loop from running at all (maybe the return type of it affects the array in some sort?)
-for (i in range(lines.length())){
-    print(lines[i])
+// Test file_exists function
+print("=== Testing file_exists ===")
+
+if (file_exists("test.txt")){
+    print("test.txt exists!")
+    File f = new File("test.txt", "r")
+    array contents = f.readlines()
+    print(str(contents))
+    for (line in contents){
+        print(line)
+    }
+} else {
+    print("test.txt does not exist")
 }
 
-// Test with write mode
-File file2 = new File("io.txt", "w")
-file2.write("Hello from write method!")
-print("done")
+if (file_exists("nonexistent_file.xyz")){
+    print("nonexistent_file.xyz exists")
+} else {
+    print("nonexistent_file.xyz does not exist (expected)")
+}
 
+print("=== Done ===")

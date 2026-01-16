@@ -1,4 +1,5 @@
 from ast_nodes import *
+from codegen import LIBC_FUNCTIONS
 import os
 
 class SymbolTable:
@@ -83,6 +84,8 @@ class SemanticAnalyzer:
             return self.analyze_dynamic_function_declaration(node)
         if isinstance(node, FromImportStatement):
             return self.analyze_from_import(node)
+        if isinstance(node, LibcImportStatement):
+            return self.analyze_libc_import(node)
         if isinstance(node, SimpleImportStatement):
             return self.analyze_simple_import(node)
         if isinstance(node, NumberLiteral):
@@ -340,6 +343,23 @@ class SemanticAnalyzer:
             self.symbol_table.declare(node.alias, "import", "module")
         else:
             self.symbol_table.declare(node.module_name, "import", "module")
+    def analyze_libc_import(self, node: LibcImportStatement):
+        """Register imported libc functions as builtins in the symbol table"""
+        # Map libc types to semantic types
+        type_map = {
+            "int": "int",
+            "ptr": "string",  # pointers are treated as strings
+            "void": "void",
+            "float": "float"
+        }
+        for func_name in node.symbols:
+            if func_name in LIBC_FUNCTIONS:
+                func_info = LIBC_FUNCTIONS[func_name]
+                ret_type = type_map.get(func_info["ret"], "unknown")
+                self.symbol_table.declare(func_name, "builtin", ret_type)
+            else:
+                pos_info = self.get_position_info(node)
+                self.add_error(f"Unknown libc function '{func_name}'{pos_info}")
     def analyze_from_import(self, node: FromImportStatement):
         # Load the module and analyze it to find classes and functions
         module_path = node.module_path

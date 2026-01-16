@@ -412,6 +412,9 @@ class Parser:
                 symbol_name = self.current_token().value
                 self.expect("NAME")
                 symbols.append(symbol_name)
+            # Check if this is a libc import
+            if isinstance(module_path, Identifier) and module_path.name == "libc":
+                return LibcImportStatement(symbols)
             return FromImportStatement(module_path, symbols)
         elif self.match("KEYWORD", "use"):
             self.advance()
