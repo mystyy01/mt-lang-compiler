@@ -1,5 +1,10 @@
+from libc use strlen, strcmp, strncmp, strcpy, malloc, strcat, strstr
+
 array range(int integer){
     array arr = []
+    if (integer <= 0){
+        return arr
+    }
     int rnge = 0
     while (rnge < integer){
         arr.append(rnge)
@@ -7,4 +12,18 @@ array range(int integer){
     }
     return arr
 }
-// implement enumerate
+bool str_contains(string text, string substr) {
+    string result = strstr(text, substr)
+    if (result != null) {
+        return true
+    }
+    return false
+}
+bool array_contains(string contain_str, array arr){
+    for (item in arr){
+        if (str_contains(str(item), contain_str)){
+            return true
+        }
+    }
+    return false
+}

@@ -71,9 +71,11 @@ class ExpressionStatement:
     def __repr__(self):
         return f"ExpressionStatement({self.expression})"
 class CallExpression:
-    def __init__(self, callee, arguments: list):
+    def __init__(self, callee, arguments: list, line=None, column=None):
         self.callee = callee
         self.arguments = arguments
+        self.line = line
+        self.column = column
     def __repr__(self):
         return f"CallExpression({self.callee}, {self.arguments})"
 class MemberExpression:
@@ -157,17 +159,25 @@ class TypeLiteral:
     def __repr__(self):
         return f"TypeLiteral({self.name})"
 class Parameter:
-    def __init__(self, name, param_type=None):
+    def __init__(self, name, param_type=None, default_value=None):
         self.name = name
         self.param_type = param_type  # Type annotation like "array", "int", etc.
+        self.default_value = default_value
     def __repr__(self):
         type_info = f": {self.param_type}" if self.param_type else ""
-        return f"Parameter({self.name}{type_info})"
+        default_info = f" = {self.default_value}" if self.default_value else ""
+        return f"Parameter({self.name}{type_info}{default_info})"
 class BoolLiteral:
     def __init__(self, value: bool):
         self.value = value
     def __repr__(self):
         return f"BoolLiteral({self.value})"
+
+class NullLiteral:
+    def __init__(self):
+        pass
+    def __repr__(self):
+        return "NullLiteral()"
 
 class ClassDeclaration:
     def __init__(self, name, fields=None, methods=None, line=None, column=None):

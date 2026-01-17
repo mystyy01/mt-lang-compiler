@@ -1,0 +1,5 @@
+// Test array str conversion
+array empty = []
+array nums = [1, 2, 3]
+print(str(empty))
+print(str(nums))

@@ -108,7 +108,8 @@ class CodeGenerator:
         self.void_type = llvmlite.ir.VoidType()
         self.i8_type = llvmlite.ir.IntType(8)
         self.i8_ptr_type = self.i8_type.as_pointer()
-        self.bool_type = self.i8_type
+        self.i1_type = llvmlite.ir.IntType(1)
+        self.bool_type = self.i1_type  # Use i1 for bool (proper 1-bit type)
         self.string_counter = 0
         self.source_dir = source_dir if source_dir else os.getcwd()
         self.stdlib_path = os.path.join(os.path.dirname(__file__), "stdlib")
@@ -330,8 +331,9 @@ class CodeGenerator:
         self.variables = dict(old_variables)
         self.variable_types = dict(old_variable_types)
 
-        # Method parameters: object pointer + declared parameters
-        param_types = [self.i8_ptr_type]  # First param is object pointer (this)
+        # Get the struct type for this class - use struct pointer as first param to match method calls
+        struct_type = self.classes[class_name]['llvm_struct']
+        param_types = [struct_type.as_pointer()]  # First param is struct pointer (this)
         for param in method.params:
             if param.param_type:
                 param_types.append(self.get_llvm_type(param.param_type))
@@ -352,8 +354,8 @@ class CodeGenerator:
 
         # Set up parameters: first is 'this', rest are method parameters
         this_param = func.args[0]
-        self.variables['this'] = this_param  # Store object pointer
-        self.variable_types['this'] = self.i8_ptr_type
+        self.variables['this'] = this_param  # Store struct pointer
+        self.variable_types['this'] = struct_type.as_pointer()
 
         for i, param in enumerate(method.params, 1):
             param_name = param.name
@@ -518,76 +520,119 @@ class CodeGenerator:
         self.libc_functions[func_name] = llvm_func
         return llvm_func
 
-    def generate_array_to_string(self, array_ptr):
-        """Convert an array to string format: ["item1", "item2", ...]"""
-        # Get array length
+    def generate_array_to_string(self, array_ptr, elem_type=None):
+        """Convert an array to string format: [elem1, elem2, ...]
+
+        Args:
+            array_ptr: Pointer to the dynamic array
+            elem_type: LLVM type of elements (defaults to int)
+
+        Safety guarantees:
+        - Never reads past array.length
+        - Properly handles empty arrays
+        """
+        if elem_type is None:
+            elem_type = self.int_type
+
+        is_string_array = (elem_type == self.i8_ptr_type)
+
         length_ptr = self.builder.gep(array_ptr,
             [llvmlite.ir.Constant(self.int_type, 0), llvmlite.ir.Constant(self.int_type, 0)],
             name="arr_len_ptr")
         length = self.builder.load(length_ptr, name="arr_length")
 
-        # Get data pointer
         data_ptr_ptr = self.builder.gep(array_ptr,
             [llvmlite.ir.Constant(self.int_type, 0), llvmlite.ir.Constant(self.int_type, 2)],
             name="arr_data_ptr_ptr")
         data_ptr = self.builder.load(data_ptr_ptr, name="arr_data_ptr")
 
-        # Allocate result buffer (estimate: 64 bytes per element should be enough)
-        buffer_size = self.builder.mul(length, self.create_int_constant(64), name="buf_size_est")
-        buffer_size = self.builder.add(buffer_size, self.create_int_constant(64), name="buf_size")  # Extra for brackets
-        result_buffer = self.builder.call(self.malloc, [buffer_size], name="str_result")
-
-        # Start with "["
-        open_bracket = self.create_string_constant("[", as_constant=True)
-        self.builder.call(self.strcpy, [result_buffer, open_bracket])
-
-        # Create loop blocks
         func = self.builder.block.parent
+
+        if is_string_array:
+            alloc_size = self.builder.mul(length, self.create_int_constant(128), name="est_size")
+            alloc_size = self.builder.add(alloc_size, self.create_int_constant(16), name="alloc_size")
+        else:
+            alloc_size = self.builder.mul(length, self.create_int_constant(64), name="est_size")
+            alloc_size = self.builder.add(alloc_size, self.create_int_constant(16), name="alloc_size")
+        result_buffer = self.builder.call(self.malloc, [alloc_size], name="str_result")
+
+        self.builder.store(self.i8_type(ord('[')), self.builder.gep(result_buffer, [self.create_int_constant(0)], name="p0"))
+
+        result_len = self.builder.alloca(self.int_type, name="result_len")
+        self.builder.store(self.create_int_constant(1), result_len)
+
         loop_block = func.append_basic_block(name="arr_str_loop")
         body_block = func.append_basic_block(name="arr_str_body")
         done_block = func.append_basic_block(name="arr_str_done")
 
-        # Initialize loop counter
         counter_ptr = self.builder.alloca(self.int_type, name="arr_str_i")
         self.builder.store(self.create_int_constant(0), counter_ptr)
         self.builder.branch(loop_block)
 
-        # Loop condition
         self.builder.position_at_end(loop_block)
         counter = self.builder.load(counter_ptr, name="i")
         cond = self.builder.icmp_signed("<", counter, length, name="arr_str_cond")
         self.builder.cbranch(cond, body_block, done_block)
 
-        # Loop body
         self.builder.position_at_end(body_block)
         current_i = self.builder.load(counter_ptr, name="curr_i")
 
-        # Add comma and space if not first element
-        is_first = self.builder.icmp_signed("==", current_i, self.create_int_constant(0), name="is_first")
-        with self.builder.if_then(self.builder.not_(is_first)):
-            comma_space = self.create_string_constant(", ", as_constant=True)
-            self.builder.call(self.strcat, [result_buffer, comma_space])
+        is_not_first = self.builder.icmp_signed(">", current_i, self.create_int_constant(0), name="is_not_first")
+        with self.builder.if_then(is_not_first):
+            len1 = self.builder.load(result_len, name="len1")
+            p1 = self.builder.gep(result_buffer, [len1], name="p_comma")
+            self.builder.store(self.i8_type(ord(',')), p1)
+            len2 = self.builder.add(len1, self.create_int_constant(1), name="len2")
+            p2 = self.builder.gep(result_buffer, [len2], name="p_space")
+            self.builder.store(self.i8_type(ord(' ')), p2)
+            self.builder.store(self.builder.add(len2, self.create_int_constant(1), name="len3"), result_len)
 
-        # Get element (assume string array for now - cast data to i8**)
-        str_array_ptr = self.builder.bitcast(data_ptr, self.i8_ptr_type.as_pointer(), name="str_arr_ptr")
-        elem_ptr = self.builder.gep(str_array_ptr, [current_i], name="elem_ptr")
-        elem = self.builder.load(elem_ptr, name="elem")
+        current_len = self.builder.load(result_len, name="cur_len")
 
-        # Add quote, element, quote
-        quote = self.create_string_constant("\"", as_constant=True)
-        self.builder.call(self.strcat, [result_buffer, quote])
-        self.builder.call(self.strcat, [result_buffer, elem])
-        self.builder.call(self.strcat, [result_buffer, quote])
+        if is_string_array:
+            self.builder.store(self.i8_type(ord('"')), self.builder.gep(result_buffer, [current_len], name="p_quote_open"))
+            new_len = self.builder.add(current_len, self.create_int_constant(1), name="new_len_quote")
+            self.builder.store(new_len, result_len)
 
-        # Increment counter
-        next_i = self.builder.add(current_i, self.create_int_constant(1), name="next_i")
+            str_data_ptr = self.builder.bitcast(data_ptr, self.i8_ptr_type.as_pointer(), name="str_data")
+            elem_ptr = self.builder.gep(str_data_ptr, [current_i], name="elem_ptr")
+            elem_val = self.builder.load(elem_ptr, name="elem")
+
+            null_ptr = llvmlite.ir.Constant(self.i8_ptr_type, None)
+            with self.builder.if_then(self.builder.icmp_signed("!=", elem_val, null_ptr)):
+                str_buf_ptr = self.builder.gep(result_buffer, [new_len], name="str_buf")
+                str_buf_ptr_ptr = self.builder.bitcast(str_buf_ptr, self.i8_type.as_pointer(), name="str_buf_ptr")
+                self.builder.call(self.strcpy, [str_buf_ptr_ptr, elem_val])
+
+                elem_str_len = self.builder.call(self.strlen, [str_buf_ptr], name="elem_str_len")
+                final_elem_len = self.builder.add(new_len, elem_str_len, name="final_elem_len")
+                self.builder.store(final_elem_len, result_len)
+
+            self.builder.store(self.i8_type(ord('"')), self.builder.gep(result_buffer, [self.builder.load(result_len, name="after_str")], name="p_quote_close"))
+            self.builder.store(self.builder.add(self.builder.load(result_len, name="qclose_len"), self.create_int_constant(1), name="final_len"), result_len)
+        else:
+            int_data_ptr = self.builder.bitcast(data_ptr, self.int_type.as_pointer(), name="int_data")
+            elem_ptr = self.builder.gep(int_data_ptr, [current_i], name="elem_ptr")
+            elem_val = self.builder.load(elem_ptr, name="elem")
+
+            int_buf_ptr = self.builder.gep(result_buffer, [current_len], name="int_buf")
+            int_buf_ptr_ptr = self.builder.bitcast(int_buf_ptr, self.i8_type.as_pointer(), name="int_buf_ptr")
+            format_ptr = self.create_string_constant("%d", as_constant=True)
+            self.builder.call(self.sprintf, [int_buf_ptr_ptr, format_ptr, elem_val])
+
+            new_str_len = self.builder.call(self.strlen, [int_buf_ptr], name="new_str_len")
+            self.builder.store(self.builder.add(current_len, new_str_len, name="updated_len"), result_len)
+
+        next_i = self.builder.add(counter, self.create_int_constant(1), name="next_i")
         self.builder.store(next_i, counter_ptr)
         self.builder.branch(loop_block)
 
-        # Done - add closing bracket
         self.builder.position_at_end(done_block)
-        close_bracket = self.create_string_constant("]", as_constant=True)
-        self.builder.call(self.strcat, [result_buffer, close_bracket])
+        final_len = self.builder.load(result_len, name="final_len")
+        close_ptr = self.builder.gep(result_buffer, [final_len], name="close_ptr")
+        self.builder.store(self.i8_type(ord(']')), close_ptr)
+        null_ptr = self.builder.gep(result_buffer, [self.builder.add(final_len, self.create_int_constant(1))], name="null_ptr")
+        self.builder.store(self.i8_type(0), null_ptr)
 
         return result_buffer
 
@@ -975,6 +1020,22 @@ class CodeGenerator:
                 _ = self.builder.call(self.strcat, [new_str, right], name="concat")
                 return new_str
 
+            # Handle pointer vs null comparison (e.g., strstr result != null)
+            # Check if left is i8* and right is a null constant
+            if left.type == self.i8_ptr_type:
+                null_ptr = llvmlite.ir.Constant(self.i8_ptr_type, None)
+                if node.operator.value == "==":
+                    return self.builder.icmp_signed("==", left, null_ptr, name="is_null")
+                elif node.operator.value == "!=":
+                    return self.builder.icmp_signed("!=", left, null_ptr, name="is_not_null")
+            # Check if right is i8* and left is a null constant
+            if right.type == self.i8_ptr_type:
+                null_ptr = llvmlite.ir.Constant(self.i8_ptr_type, None)
+                if node.operator.value == "==":
+                    return self.builder.icmp_signed("==", right, null_ptr, name="is_null")
+                elif node.operator.value == "!=":
+                    return self.builder.icmp_signed("!=", right, null_ptr, name="is_not_null")
+
             # Handle string comparisons specially
             if left.type == self.i8_ptr_type and right.type == self.i8_ptr_type:
                 # Use strcmp for string content comparison
@@ -1078,21 +1139,31 @@ class CodeGenerator:
                 # Arrays are special - we store the pointer directly
                 if isinstance(node.value, ArrayLiteral):
                     elements = node.value.elements
+                    # Determine element type from first element
                     if len(elements) > 0 and isinstance(elements[0], StringLiteral):
                         elem_type = self.i8_ptr_type
                         elem_size = 8
                     else:
                         elem_type = self.int_type
                         elem_size = 4
-                    
+
                     # Generate values for all elements
                     elem_values = []
                     for element in elements:
                         elem_values.append(self.generate(element))
-                    
+
                     # Create dynamic array - returns pointer to struct
-                    array_ptr, _, _ = self.create_dynamic_array(elem_values, elem_type)
+                    # Always use on_heap=True to ensure array survives function returns
+                    array_ptr, _, _ = self.create_dynamic_array(elem_values, elem_type, on_heap=True)
                     self.variables[node.name] = array_ptr  # Store pointer directly
+                    self.array_lengths[node.name] = (elem_type, elem_size)
+                elif node.value is None:
+                    # Initialize empty array - default to int elements
+                    # Always use on_heap=True to ensure array survives function returns
+                    elem_type = self.int_type
+                    elem_size = 4
+                    array_ptr, _, _ = self.create_dynamic_array([], elem_type, on_heap=True)
+                    self.variables[node.name] = array_ptr
                     self.array_lengths[node.name] = (elem_type, elem_size)
                 else:
                     # Array assignment from function call or variable
@@ -1129,20 +1200,33 @@ class CodeGenerator:
                     self.array_lengths[node.name] = (self.int_type, 4)
             else:
                 # For non-array types
-                if node.type in ('int', 'float', 'string', 'bool', 'void'):
+                if node.type in ('int', 'float', 'string', 'bool'):
                     # For primitive types, allocate space on stack
                     pointer = self.builder.alloca(llvm_type, name=node.name)
                     self.variables[node.name] = pointer
-                    
+
                     if node.value:
                         value = self.generate(node.value)
+                    else:
+                        # Initialize with default values
+                        if node.type == 'int':
+                            value = llvmlite.ir.Constant(self.int_type, 0)
+                        elif node.type == 'float':
+                            value = llvmlite.ir.Constant(self.float_type, 0.0)
+                        elif node.type == 'string':
+                            value = self.create_string_constant("", as_constant=True)
+                        elif node.type == 'bool':
+                            value = llvmlite.ir.Constant(self.bool_type, 0)  # false
 
-                        # Type check before storing
-                        if value.type != llvm_type:
-                            raise TypeError(f"Cannot assign {value.type} to variable '{node.name}' of type {llvm_type}: type mismatch")
+                    # Type check before storing
+                    if value.type != llvm_type:
+                        raise TypeError(f"Cannot assign {value.type} to variable '{node.name}' of type {llvm_type}: type mismatch")
 
-                        self.builder.store(value, pointer)
-                        return None
+                    self.builder.store(value, pointer)
+                    return None
+                elif node.type == 'void':
+                    # Void variables are not allowed
+                    raise TypeError(f"Cannot declare variable of type 'void'")
                 else:
                     # For class types, store the object pointer directly (like arrays)
                     if node.value:
@@ -1337,6 +1421,44 @@ class CodeGenerator:
                     # Fall through for other method handling on expressions
                     raise Exception(f"Unsupported method '{method_name}' on expression")
 
+                # Handle method calls on 'this' (this.method_name())
+                if isinstance(node.callee.object, ThisExpression):
+                    method_name = node.callee.property
+                    
+                    # Get the current class name
+                    if not hasattr(self, 'current_class') or not self.current_class:
+                        raise Exception(f"Cannot call method '{method_name}' outside of a class")
+                    
+                    class_name = self.current_class
+                    
+                    # Look up the method function
+                    func_name = f"{class_name}_{method_name}"
+                    if func_name not in self.functions:
+                        raise Exception(f"Method '{method_name}' not found in class '{class_name}'")
+                    
+                    # Get the method function
+                    func = self.functions[func_name]
+                    
+                    # Get 'this' pointer (should already be stored in self.variables['this'])
+                    if 'this' not in self.variables:
+                        raise Exception(f"'this' is not available in method context")
+                    this_ptr = self.variables['this']
+
+                    # Generate arguments, with 'this' as first argument
+                    args = [this_ptr]
+                    for arg in node.arguments:
+                        args.append(self.generate(arg))
+
+                    # Get position info for better error messages
+                    line = getattr(node, 'line', None)
+                    column = getattr(node, 'column', None)
+                    pos_info = f" at line {line}, column {column}" if line is not None else ""
+
+                    try:
+                        return self.builder.call(func, args, name=f"this_{method_name}")
+                    except TypeError as e:
+                        raise TypeError(f"Type mismatch in call to '{class_name}.{method_name}'{pos_info}: {e}")
+
                 # Handle method calls on identifiers
                 if not isinstance(node.callee.object, Identifier):
                     raise Exception(f"Unsupported method call object type: {type(node.callee.object)}")
@@ -1376,10 +1498,19 @@ class CodeGenerator:
                         raise Exception(f"Method '{method_name}' not found in class '{class_name}'")
                     func = self.functions[func_name]
                     obj_ptr = self.variables[obj_name]
-                    # Cast to i8* for the first argument
-                    obj_i8_ptr = self.builder.bitcast(obj_ptr, self.i8_ptr_type, name="obj_i8")
-                    args = [obj_i8_ptr] + [self.generate(arg) for arg in node.arguments]
-                    return self.builder.call(func, args)
+                    # Get the struct type for this class
+                    struct_type = self.classes[class_name]['llvm_struct']
+                    # Cast to struct pointer type for the first argument
+                    obj_struct_ptr = self.builder.bitcast(obj_ptr, struct_type.as_pointer(), name="obj_struct")
+                    args = [obj_struct_ptr] + [self.generate(arg) for arg in node.arguments]
+                    # Get position info for better error messages
+                    line = getattr(node, 'line', None)
+                    column = getattr(node, 'column', None)
+                    pos_info = f" at line {line}, column {column}" if line is not None else ""
+                    try:
+                        return self.builder.call(func, args)
+                    except TypeError as e:
+                        raise TypeError(f"Type mismatch in call to '{class_name}.{method_name}'{pos_info}: {e}")
 
                 if obj_name in self.variables:
                     # Set the current object context for field access
@@ -1409,7 +1540,14 @@ class CodeGenerator:
                             args = [self.current_object_ptr]
                             for arg in node.arguments:
                                 args.append(self.generate(arg))
-                            return self.builder.call(func, args)
+                            # Get position info for better error messages
+                            line = getattr(node, 'line', None)
+                            column = getattr(node, 'column', None)
+                            pos_info = f" at line {line}, column {column}" if line is not None else ""
+                            try:
+                                return self.builder.call(func, args)
+                            except TypeError as e:
+                                raise TypeError(f"Type mismatch in call to '{class_name}.{method_name}'{pos_info}: {e}")
                         else:
                             print(f"DEBUG: Method {method_func_name} not found")
                             # Unknown method - just evaluate arguments
@@ -1429,7 +1567,14 @@ class CodeGenerator:
                 args = []
                 for arg in node.arguments:
                     args.append(self.generate(arg))
-                return self.builder.call(func, args)
+                # Get position info for better error messages
+                line = getattr(node, 'line', None)
+                column = getattr(node, 'column', None)
+                pos_info = f" at line {line}, column {column}" if line is not None else ""
+                try:
+                    return self.builder.call(func, args)
+                except TypeError as e:
+                    raise TypeError(f"Type mismatch in call to '{module_name}.{func_name}'{pos_info}: {e}")
             elif isinstance(node.callee, Identifier) and node.callee.name == "print":
                 arg = node.arguments[0]
 
@@ -1514,9 +1659,19 @@ class CodeGenerator:
                 elif arg.type == self.i8_ptr_type:
                     # String - just return it as-is
                     return arg
+                elif arg.type == self.bool_type:
+                    # Bool - return "true" or "false"
+                    true_str = self.create_string_constant("true")
+                    false_str = self.create_string_constant("false")
+                    # Create a select: if arg is true, return true_str, else return false_str
+                    return self.builder.select(arg, true_str, false_str, name="bool_to_str")
                 elif arg.type == self.dyn_array_ptr_type:
-                    # Array to string: ["item1", "item2", ...]
-                    return self.generate_array_to_string(arg)
+                    elem_type = None
+                    if isinstance(node.arguments[0], Identifier):
+                        var_name = node.arguments[0].name
+                        if var_name in self.array_lengths:
+                            elem_type, _ = self.array_lengths[var_name]
+                    return self.generate_array_to_string(arg, elem_type)
                 else:
                     raise Exception(f"str() doesn't support type {arg.type}")
             elif isinstance(node.callee, Identifier) and node.callee.name == "int":
@@ -1622,7 +1777,18 @@ class CodeGenerator:
                 args = []
                 for arg in node.arguments:
                     args.append(self.generate(arg))
-                call_result = self.builder.call(func, args)
+                
+                # Get position info for better error messages
+                line = getattr(node, 'line', None)
+                column = getattr(node, 'column', None)
+                pos_info = f" at line {line}, column {column}" if line is not None else ""
+                
+                try:
+                    call_result = self.builder.call(func, args)
+                except TypeError as e:
+                    # Enhance the error message with position info
+                    func_name = getattr(node.callee, 'name', str(node.callee))
+                    raise TypeError(f"Type mismatch in call to '{func_name}'{pos_info}: {e}")
                 
                 # Check if this is a dynamic function (returns struct with type tag)
                 if hasattr(func.function_type.return_type, 'elements'):
@@ -1637,6 +1803,29 @@ class CodeGenerator:
                     if func.function_type.return_type == self.void_type:
                         return None
                     return call_result
+        if isinstance(node, NullLiteral):
+            return llvmlite.ir.Constant(self.i8_ptr_type, None)
+        if isinstance(node, TypeofExpression):
+            # typeof returns a string literal representing the type of the expression
+            # First generate the argument to get its LLVM type
+            arg_value = self.generate(node.argument)
+            # Map LLVM type to type string
+            if arg_value.type == self.int_type:
+                type_str = "int"
+            elif arg_value.type == self.float_type:
+                type_str = "float"
+            elif arg_value.type == self.i8_ptr_type:
+                type_str = "string"
+            elif arg_value.type == self.bool_type:
+                type_str = "bool"
+            elif arg_value.type == self.dyn_array_ptr_type:
+                type_str = "array"
+            elif hasattr(arg_value.type, 'elements'):
+                # Struct type - likely a class instance
+                type_str = "object"
+            else:
+                type_str = "unknown"
+            return self.create_string_constant(type_str)
         if isinstance(node, StringLiteral):
             return self.create_string_constant(node.value)
         if isinstance(node, FunctionDeclaration):
@@ -1675,9 +1864,10 @@ class CodeGenerator:
                 
                 if param.param_type == "array":
                     # For array parameters, store the pointer directly without allocation
+                    # Use None as element type marker - will be resolved at call site or use int_type
                     self.variables[param.name] = arg
                     self.variable_types[param.name] = llvm_type
-                    self.array_lengths[param.name] = (self.int_type, 4)  # Default to int elements
+                    self.array_lengths[param.name] = (None, 4)  # Unknown element type, use None marker
                 else:
                     # For non-array types, allocate space and store the value
                     pointer = self.builder.alloca(llvm_type, name=param.name)
@@ -1825,33 +2015,50 @@ class CodeGenerator:
             func = self.builder.block.parent
             condition = self.generate(node.condition)
             if condition.type != llvmlite.ir.IntType(1):
-                zero = llvmlite.ir.Constant(condition.type, 0)
-                condition = self.builder.icmp_signed("!=", condition, zero, name="tobool")
+                # For pointer types (like i8*), compare to null pointer
+                if isinstance(condition.type, llvmlite.ir.PointerType):
+                    null_ptr = llvmlite.ir.Constant(condition.type, None)
+                    condition = self.builder.icmp_signed("!=", condition, null_ptr, name="tobool")
+                else:
+                    zero = llvmlite.ir.Constant(condition.type, 0)
+                    condition = self.builder.icmp_signed("!=", condition, zero, name="tobool")
             then_block = func.append_basic_block(name="then")
-            else_block = func.append_basic_block(name="else")
             merge_block = func.append_basic_block(name="merge")
-            self.builder.cbranch(condition, then_block, else_block)
+            
+            # Only create else block if there's an else body
+            if node.else_body:
+                else_block = func.append_basic_block(name="else")
+                self.builder.cbranch(condition, then_block, else_block)
+            else:
+                self.builder.cbranch(condition, then_block, merge_block)
+            
             self.builder.position_at_end(then_block)
             for statement in node.then_body.statements:
                 self.generate(statement)
             if not self.builder.block.is_terminated:
                 self.builder.branch(merge_block)
 
-            self.builder.position_at_end(else_block)
+            # Only process else block if it exists
             if node.else_body:
+                self.builder.position_at_end(else_block)
                 for statement in node.else_body.statements:
                     self.generate(statement)
-            if not self.builder.block.is_terminated:
-                self.builder.branch(merge_block)
+                if not self.builder.block.is_terminated:
+                    self.builder.branch(merge_block)
             
             # Position at merge block - only add unreachable if both branches terminated
             self.builder.position_at_end(merge_block)
-            then_terminated = not then_block.is_terminated
-            else_terminated = not else_block.is_terminated if node.else_body else True
-            
-            # If both branches are terminated (e.g., both have return), add unreachable
-            if then_terminated and else_terminated:
-                self.builder.unreachable()
+            if node.else_body:
+                then_terminated = not then_block.is_terminated
+                else_terminated = not else_block.is_terminated
+                # If both branches are terminated (e.g., both have return), add unreachable
+                if then_terminated and else_terminated:
+                    self.builder.unreachable()
+            else:
+                # No else branch - only check then branch
+                then_terminated = not then_block.is_terminated
+                if then_terminated:
+                    self.builder.unreachable()
         if isinstance(node, WhileStatement):
             func = self.builder.block.parent
 
@@ -1875,7 +2082,7 @@ class CodeGenerator:
 
             self.builder.position_at_end(exit_block)
         if isinstance(node, BoolLiteral):
-            return llvmlite.ir.Constant(llvmlite.ir.IntType(8), 1 if node.value else 0)
+            return llvmlite.ir.Constant(llvmlite.ir.IntType(1), 1 if node.value else 0)
         if isinstance(node, TypeofExpression):
             # For now, implement typeof as a simple type check
             # In a full implementation, this would return type info at runtime
@@ -1916,6 +2123,17 @@ class CodeGenerator:
                 # Variable reference - use Identifier generation to get proper value
                 array_ptr = self.generate(node.iterable)
                 elem_type, elem_size = self.array_lengths[node.iterable.name]
+                # Handle unknown element type (None marker for array parameters)
+                if elem_type is None:
+                    # For array parameters, try to infer from variable type or default to int
+                    var_type = self.variable_types.get(node.iterable.name)
+                    if var_type == self.dyn_array_ptr_type:
+                        # For dynamic arrays, we can't know element type at compile time
+                        # Try to infer from how the array is used in the loop body
+                        # For now, default to int_type but this is a limitation
+                        elem_type = self.int_type
+                    else:
+                        elem_type = self.int_type
             else:
                 # Function call or expression - evaluate to get array
                 array_ptr = self.generate(node.iterable)

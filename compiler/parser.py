@@ -86,6 +86,9 @@ class Parser:
                 return self.parse_function_call(literal)
 
             return literal
+        elif self.current_token().type == "KEYWORD" and self.current_token().value == "null":
+            self.advance()
+            return NullLiteral()
         elif self.current_token().type == "KEYWORD" and self.current_token().value == "typeof":
             self.advance()
             # expect opening paren
@@ -152,7 +155,10 @@ class Parser:
                         self.advance()
                         args.append(self.parse_expression())
                 self.expect("SYMBOL", ")")
-                base = CallExpression(base, args)
+                # Get position from base (the callee)
+                line = getattr(base, 'line', None)
+                column = getattr(base, 'column', None)
+                base = CallExpression(base, args, line=line, column=column)
             elif self.match("SYMBOL", "."):
                 self.advance()
                 if self.current_token().type == "NAME" or self.current_token().type == "KEYWORD":
@@ -174,7 +180,10 @@ class Parser:
                             self.advance()
                             args.append(self.parse_expression())
                     self.expect("SYMBOL", ")")
-                    base = CallExpression(base, args)
+                    # Get position from base (MemberExpression)
+                    line = getattr(base, 'line', None)
+                    column = getattr(base, 'column', None)
+                    base = CallExpression(base, args, line=line, column=column)
             elif self.match("SYMBOL", "["):
                 self.advance()
                 index = self.parse_expression()
@@ -194,7 +203,10 @@ class Parser:
                 args.append(self.parse_expression())
         self.expect("SYMBOL", ")")
         print(f"DEBUG: Created CallExpression with {len(args)} args for {callee.name}")
-        return CallExpression(callee, args)
+        # Get position from callee
+        line = getattr(callee, 'line', None)
+        column = getattr(callee, 'column', None)
+        return CallExpression(callee, args, line=line, column=column)
     
     def parse_multiplicative(self):
         left = self.parse_call_member()
@@ -376,7 +388,11 @@ class Parser:
         self.expect("KEYWORD")
         param_name = self.current_token().value
         self.expect("NAME")
-        return Parameter(param_name, param_type)
+        default_value = None
+        if self.match("SYMBOL", "="):
+            self.advance()
+            default_value = self.parse_expression()
+        return Parameter(param_name, param_type, default_value)
     def parse_variable_declaration(self):
         var_type = self.current_token().value
         self.advance()

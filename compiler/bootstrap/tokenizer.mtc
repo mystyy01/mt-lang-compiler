@@ -1,4 +1,4 @@
-from stdlib.iter use range
+from stdlib.iter use range, array_contains
 
 array KEYWORDS = ["from", "use", "as", "int", "float", "void", "array", "string", "bool", "if", "else", "for", "in", "set", "return", "typeof", "while", "bool", "true", "false", "func", "class", "new", "this", "static", "virtual", "arg"]
 array SINGLE_CHAR_SYMBOLS = ["(", ")", "[", "]", "{", "}", ",", ".", ":", "!", "+", "-", "*", "/", "=", ">", "<"]
@@ -31,7 +31,8 @@ class Tokenizer{
     string current_char(){
         return this.source[this.position]
     }
-    void advance(int offset){
+    void advance(int offset = 1){
+        print("OFFSET: " + str(offset))
         for (i in range(offset)){
             print("POSITION:" + str(this.position))
             print("LENGTH: " + str(this.source.length()))
@@ -52,13 +53,33 @@ class Tokenizer{
         }
         return false
     }
+    func peek_next(){
+        if (this.position + 1 < this.source.length()){
+            return this.source[this.position+1]
+        }
+        return null
+    }
+    void skip_whitespace(){
+        // doenst work gives LLVM IR parsing error uncomment to reproduce bug
+        // while (this.is_at_end() != true && array_contains(this.current_char(), WHITESPACE)){} 
+    }
 }
-
 string test = "1a3abc"
 Tokenizer tokenizer = new Tokenizer(test, "")
 string char = tokenizer.current_char()
-print(char)
-tokenizer.advance(1)
-print(tokenizer.current_char())
-print(tokenizer.is_at_end())
-print(test.length())
+print("CHAR: " + char)
+tokenizer.advance()
+print("CURRENT CHAR:" + tokenizer.current_char())
+print("IS AT END: " + str(tokenizer.is_at_end()))
+print("LENGTH:" + str(test.length()))
+print("PEEK NEXT: " + tokenizer.peek_next())
+if (tokenizer.peek_next()){
+    print("more chars")
+}
+else{
+    print("no more chars")
+}
+
+tokenizer.skip_whitespace()
+print("CURRENT CHAR: " + tokenizer.current_char())
+print("DONE")

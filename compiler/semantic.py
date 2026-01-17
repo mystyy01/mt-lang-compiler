@@ -10,9 +10,9 @@ class SymbolTable:
         self.scopes.append({})
     def exit_scope(self):
         self.scopes.pop()
-    def declare(self, name, symbol_type, data_type):
+    def declare(self, name, symbol_type, data_type, parameters=None):
         current_scope = self.scopes[-1]
-        current_scope[name] = {"symbol_type": symbol_type, "data_type": data_type}
+        current_scope[name] = {"symbol_type": symbol_type, "data_type": data_type, "parameters": parameters}
     def lookup(self, name):
         for scope in reversed(self.scopes):
             if name in scope:
@@ -96,6 +96,8 @@ class SemanticAnalyzer:
             return self.analyze_array_literal(node)
         if isinstance(node, StringLiteral):
             return self.analyze_string_literal(node)
+        if isinstance(node, NullLiteral):
+            return self.analyze_null_literal(node)
         if isinstance(node, NewExpression):
             return self.analyze_new_expression(node)
         if isinstance(node, Identifier):
@@ -155,7 +157,7 @@ class SemanticAnalyzer:
         for method in node.methods:
             methods_info[method.name] = {
                 'return_type': method.return_type,
-                'params': [(p.name, p.param_type) for p in method.params]
+                'params': method.params  # Store full Parameter objects
             }
         self.classes[node.name] = {
             "symbol_type": "class",
@@ -272,14 +274,17 @@ class SemanticAnalyzer:
             # "any" is a wildcard that matches any type
             if type_of_node != node.type and type_of_node != "any":
                 # Allow assignment if both are user-defined classes or if value is a new expression of the right type
+                # Also allow null to be assigned to string (null pointer is compatible with string*)
                 if not (isinstance(node.value, NewExpression) and node.value.class_name == node.type):
-                    pos_info = self.get_position_info(node)
-                    print(f"DEBUG: Assignment type mismatch: {type_of_node} to {node.type}")
-                    print(f"DEBUG: Assignment node: {node}")
-                    self.add_error(f"Type mismatch{pos_info}. Cannot assign type {type_of_node} to {node.type}")
+                    # null can be assigned to string (i8*)
+                    if not (type_of_node == "null" and node.type == "string"):
+                        pos_info = self.get_position_info(node)
+                        print(f"DEBUG: Assignment type mismatch: {type_of_node} to {node.type}")
+                        print(f"DEBUG: Assignment node: {node}")
+                        self.add_error(f"Type mismatch{pos_info}. Cannot assign type {type_of_node} to {node.type}")
         self.symbol_table.declare(node.name, "variable", node.type)
     def analyze_function_declaration(self, node: FunctionDeclaration):
-        self.symbol_table.declare(node.name, "function", node.return_type)
+        self.symbol_table.declare(node.name, "function", node.return_type, node.parameters)
         self.symbol_table.enter_scope()
         for param in node.parameters:
             self.symbol_table.declare(param.name, "parameter", "any")
@@ -289,7 +294,7 @@ class SemanticAnalyzer:
     
     def analyze_dynamic_function_declaration(self, node: DynamicFunctionDeclaration):
         # Dynamic function with statically typed parameters and dynamic return
-        self.symbol_table.declare(node.name, "function", "any")
+        self.symbol_table.declare(node.name, "function", "any", node.parameters)
         self.symbol_table.enter_scope()
         
         # Validate and declare parameters with their static types
@@ -460,7 +465,7 @@ class SemanticAnalyzer:
                 else:
                     # It's a function - use its actual return type from the module analysis
                     if class_symbol:
-                        self.symbol_table.declare(symbol, "function", class_symbol["data_type"])
+                        self.symbol_table.declare(symbol, "function", class_symbol["data_type"], class_symbol.get("parameters"))
                     else:
                         # Fallback for unknown symbols
                         self.symbol_table.declare(symbol, "function", "any")
@@ -499,7 +504,31 @@ class SemanticAnalyzer:
                 print(f"DEBUG: Builtin {func_name} returns {result}")
                 return result
             else:
-                # For user-defined functions, we'd need more sophisticated tracking
+                # For user-defined functions, check parameters
+                parameters = func_symbol.get("parameters") or []
+                num_args = len(node.arguments)
+                num_params = len(parameters)
+                
+                # Expand arguments with defaults if needed
+                while len(node.arguments) < num_params and parameters[len(node.arguments)].default_value is not None:
+                    node.arguments.append(parameters[len(node.arguments)].default_value)
+                
+                num_args = len(node.arguments)
+                min_args = sum(1 for p in parameters if p.default_value is None)
+                if num_args < min_args or num_args > num_params:
+                    pos_info = self.get_position_info(node)
+                    self.add_error(f"Function '{func_name}' expects {min_args} to {num_params} arguments, got {num_args}{pos_info}")
+                
+                # Analyze provided arguments
+                for i, arg in enumerate(node.arguments):
+                    if i < num_params:
+                        expected_type = parameters[i].param_type
+                        if expected_type:
+                            arg_type = self.analyze(arg)
+                            if arg_type != expected_type and arg_type != "any":
+                                pos_info = self.get_position_info(arg)
+                                self.add_error(f"Argument {i+1} of '{func_name}' expects {expected_type}, got {arg_type}{pos_info}")
+                
                 result = func_symbol.get("data_type", "unknown")
                 print(f"DEBUG: User function {func_name} returns {result}")
                 return result
@@ -576,7 +605,31 @@ class SemanticAnalyzer:
                         class_info = self.classes[obj_type]
                         methods = class_info.get("methods", {})
                         if method_name in methods:
-                            return methods[method_name]["return_type"]
+                            method_info = methods[method_name]
+                            parameters = method_info["params"]
+                            
+                            # Expand arguments with defaults if needed
+                            while len(node.arguments) < len(parameters) and parameters[len(node.arguments)].default_value is not None:
+                                node.arguments.append(parameters[len(node.arguments)].default_value)
+                            
+                            num_args = len(node.arguments)
+                            num_params = len(parameters)
+                            min_args = sum(1 for p in parameters if p.default_value is None)
+                            if num_args < min_args or num_args > num_params:
+                                pos_info = self.get_position_info(node)
+                                self.add_error(f"Method '{method_name}' expects {min_args} to {num_params} arguments, got {num_args}{pos_info}")
+                            
+                            # Analyze provided arguments
+                            for i, arg in enumerate(node.arguments):
+                                if i < num_params:
+                                    expected_type = parameters[i].param_type
+                                    if expected_type:
+                                        arg_type = self.analyze(arg)
+                                        if arg_type != expected_type and arg_type != "any":
+                                            pos_info = self.get_position_info(arg)
+                                            self.add_error(f"Argument {i+1} of method '{method_name}' expects {expected_type}, got {arg_type}{pos_info}")
+                            
+                            return method_info["return_type"]
 
         return "unknown"  # We don't know the return type
     def analyze_number_literal(self, node):
@@ -598,3 +651,6 @@ class SemanticAnalyzer:
         return "array"
     def analyze_bool_literal(self, node):
         return "bool"
+
+    def analyze_null_literal(self, node):
+        return "null"

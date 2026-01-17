@@ -67,7 +67,7 @@ dynamic_function_declaration ::= "func" identifier "(" parameters? ")" block
 
 parameters ::= parameter ("," parameter)*
 
-parameter ::= type identifier
+parameter ::= type identifier ("=" expression)?
 
 class_declaration ::= "class" identifier "{" (field_declaration | method_declaration)* "}"
 
@@ -132,13 +132,19 @@ identifier ::= [a-zA-Z_][a-zA-Z0-9_]*
 
 **Variables and Types:**
 ```mt-lang
-int x = 5
-float pi = 3.14
-string greeting = "hello"
+int x = 5          // explicit initialization
+int y              // auto-initialized to 0
+float pi = 3.14    // explicit
+float f            // auto-initialized to 0.0
+string greeting = "hello"  // explicit
+string empty       // auto-initialized to ""
+bool flag = true   // explicit
+bool b             // auto-initialized to false
+array numbers = [1, 2, 3]  // explicit
+array arr          // auto-initialized to []
+
 string first_char = greeting[0]  // "h"
-bool flag = true
-array numbers = [1, 2, 3]
-int first_num = numbers[0]  // 1
+string maybe_null = null         // null pointer (falsy in conditions)
 
 class Person {
     string name = "Alice"
@@ -146,12 +152,23 @@ class Person {
 
 Person p = new Person()
 string first_letter = p.name[0]  // "A"
+
+// Null checking
+if (maybe_null) {
+    // This won't run
+} else {
+    print("null is falsy")  // This runs
+}
 ```
 
 **Functions:**
 ```mt-lang
 int add(int a, int b) {
     return a + b
+}
+
+void test(int num = 1) {
+    print(num)
 }
 
 func dynamic_func(string name) {

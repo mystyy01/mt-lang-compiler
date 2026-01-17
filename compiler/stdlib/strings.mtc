@@ -1,4 +1,4 @@
-from libc use strlen, strcmp, strncmp, strcpy, malloc, strcat
+from libc use strlen, strcmp, strncmp, strcpy, malloc, strcat, strstr
 
 // Split a string by delimiter, returning an array of strings
 // Note: This is a compiler builtin - the implementation is in codegen.py
@@ -42,6 +42,16 @@ int compare(string a, string b) {
 bool equals(string a, string b) {
     int cmp = strcmp(a, b)
     if (cmp == 0) {
+        return true
+    }
+    return false
+}
+
+// Check if string 'text' contains substring 'substr'
+// Returns true if found, false otherwise
+bool contains(string text, string substr) {
+    string result = strstr(text, substr)
+    if (result != null) {
         return true
     }
     return false
