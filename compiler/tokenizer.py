@@ -118,10 +118,11 @@ class Tokenizer:
         # double check the current char is a quote
         if not self.current_char() in QUOTES:
             return None
+        quote_char = self.current_char()  # Remember which quote started the string
         start_line = self.line
         start_column = self.column
         self.advance()
-        while not self.is_at_end() and self.current_char() not in QUOTES:
+        while not self.is_at_end() and self.current_char() != quote_char:
             if self.current_char() == '\\' and not self.is_at_end():
                 # Handle escape sequences
                 self.advance()
@@ -148,7 +149,9 @@ class Tokenizer:
             else:
                 string += self.current_char()
             self.advance()
-        self.advance()
+        if self.is_at_end():
+            raise CompilerError(f"Unterminated string literal starting at line {start_line}, column {start_column}", "ERROR", self.file_path)
+        self.advance()  # consume the closing quote
         return Token("STRING", string, start_line, start_column)
     def read_symbol(self):
         if not self.is_at_end():

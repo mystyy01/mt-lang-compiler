@@ -1,0 +1,37 @@
+array KEYWORDS = ["from", "use", "as", "int", "float", "void", "array", "string", "bool", "if", "else", "for", "in", "set", "return", "typeof", "while", "bool", "true", "false", "func", "class", "new", "this", "static", "virtual", "arg"]
+array SINGLE_CHAR_SYMBOLS = ["(", ")", "[", "]", "{", "}", ",", ".", ":", "!", "+", "-", "*", "/", "=", ">", "<"]
+array DOUBLE_CHAR_SYMBOLS = ["==", "!=", "+=", ">=", "<=", "&&", "||"]
+array QUOTES = ['"', "'"]
+array WHITESPACE = [" ", "\t", "\n"] 
+
+class Token{
+    arg string type = ""
+    arg string value = ""
+    arg string line = ""
+    arg string column = ""
+}
+class CompilerError{
+    arg string message = ""
+    arg string severity = ""
+    arg string file_path = ""
+}
+class Tokenizer{
+    arg string source = ""
+    arg string file_path = ""
+    int position = 0
+    int line = 1
+    int column = 1
+    void check_file_path(){
+        if (this.file_path == ""){
+            set this.file_path = "unknown"
+        }
+    }
+    string current_char(){
+        return this.source[this.position]
+    }
+}
+
+string test = "123abc"
+Tokenizer tokenizer = new Tokenizer(test, "")
+string char = tokenizer.current_char()
+print(char)
