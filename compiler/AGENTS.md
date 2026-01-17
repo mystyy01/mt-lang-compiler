@@ -135,8 +135,17 @@ identifier ::= [a-zA-Z_][a-zA-Z0-9_]*
 int x = 5
 float pi = 3.14
 string greeting = "hello"
+string first_char = greeting[0]  // "h"
 bool flag = true
 array numbers = [1, 2, 3]
+int first_num = numbers[0]  // 1
+
+class Person {
+    string name = "Alice"
+}
+
+Person p = new Person()
+string first_letter = p.name[0]  // "A"
 ```
 
 **Functions:**

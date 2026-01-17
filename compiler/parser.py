@@ -84,13 +84,6 @@ class Parser:
             if self.current_token().type == "SYMBOL" and self.current_token().value == "(":
                 # This is a function call, delegate to call parsing
                 return self.parse_function_call(literal)
-            
-            # Check for array indexing: identifier[expression]
-            if self.current_token().type == "SYMBOL" and self.current_token().value == "[":
-                self.advance()  # consume '['
-                index = self.parse_expression()
-                self.expect("SYMBOL", "]")
-                return IndexExpression(literal, index)
 
             return literal
         elif self.current_token().type == "KEYWORD" and self.current_token().value == "typeof":
@@ -149,7 +142,7 @@ class Parser:
             raise CompilerError(f"Unexpected token {current.type} '{current.value}'{pos_info}", "ERROR", self.file_path)
     def parse_call_member(self):
         base = self.parse_primary()
-        while self.match("SYMBOL", "(") or self.match("SYMBOL", "."):
+        while self.match("SYMBOL", "(") or self.match("SYMBOL", ".") or self.match("SYMBOL", "["):
             if self.match("SYMBOL", "("):
                 self.advance()
                 args = []
@@ -182,6 +175,11 @@ class Parser:
                             args.append(self.parse_expression())
                     self.expect("SYMBOL", ")")
                     base = CallExpression(base, args)
+            elif self.match("SYMBOL", "["):
+                self.advance()
+                index = self.parse_expression()
+                self.expect("SYMBOL", "]")
+                base = IndexExpression(base, index)
         return base
     
     def parse_function_call(self, callee):

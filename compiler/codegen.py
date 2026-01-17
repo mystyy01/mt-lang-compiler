@@ -106,8 +106,9 @@ class CodeGenerator:
         self.int_type = llvmlite.ir.IntType(32)
         self.float_type = llvmlite.ir.DoubleType()  # 64-bit double as requested
         self.void_type = llvmlite.ir.VoidType()
-        self.i8_ptr_type = llvmlite.ir.IntType(8).as_pointer()
-        self.bool_type = llvmlite.ir.IntType(8)
+        self.i8_type = llvmlite.ir.IntType(8)
+        self.i8_ptr_type = self.i8_type.as_pointer()
+        self.bool_type = self.i8_type
         self.string_counter = 0
         self.source_dir = source_dir if source_dir else os.getcwd()
         self.stdlib_path = os.path.join(os.path.dirname(__file__), "stdlib")
@@ -702,6 +703,29 @@ class CodeGenerator:
         length_ptr = self.builder.gep(array_ptr, [zero, zero], name="len_ptr")
         return self.builder.load(length_ptr, name="arr_length")
 
+    def string_index(self, string_ptr, index):
+        """Get character at index from string, return as single-character string"""
+        # Get the character at string_ptr + index
+        char_ptr = self.builder.gep(string_ptr, [index], name="char_ptr")
+        char = self.builder.load(char_ptr, name="char")
+        
+        # Allocate memory for a 2-byte string (char + null)
+        two = llvmlite.ir.Constant(self.int_type, 2)
+        new_str = self.builder.call(self.malloc, [two], name="new_str")
+        
+        # Store the character
+        zero = llvmlite.ir.Constant(self.int_type, 0)
+        char_store_ptr = self.builder.gep(new_str, [zero], name="char_store_ptr")
+        self.builder.store(char, char_store_ptr)
+        
+        # Store null terminator
+        one = llvmlite.ir.Constant(self.int_type, 1)
+        null_ptr = self.builder.gep(new_str, [one], name="null_ptr")
+        null_char = llvmlite.ir.Constant(self.i8_type, 0)
+        self.builder.store(null_char, null_ptr)
+        
+        return new_str
+
     def array_get(self, array_ptr, index, elem_type):
         """Get element at index from dynamic array"""
         zero = llvmlite.ir.Constant(self.int_type, 0)
@@ -1128,19 +1152,29 @@ class CodeGenerator:
                         self.variable_classes[node.name] = node.type  # Store class name
                     return None
         if isinstance(node, IndexExpression):
-            # Handle array indexing: arr[index]
-            array = self.generate(node.object)
+            # Handle array/string indexing
+            obj = self.generate(node.object)
             index = self.generate(node.index)
-            
+
+            # Check if the object is a string (i8*)
+            if obj.type == self.i8_ptr_type:
+                # String indexing: return single character as string
+                return self.string_index(obj, index)
+
+            # Handle array indexing: arr[index]
             # Determine the element type based on the array
             if isinstance(node.object, Identifier):
-                elem_type, elem_size = self.array_lengths[node.object.name]
+                if node.object.name in self.array_lengths:
+                    elem_type, elem_size = self.array_lengths[node.object.name]
+                else:
+                    # Not an array, error
+                    raise Exception(f"Cannot index into non-array/string type for {node.object.name}")
             else:
                 # For more complex expressions, assume int elements for now
                 elem_type = self.int_type
                 elem_size = 4
-            
-            return self.array_get(array, index, elem_type)
+
+            return self.array_get(obj, index, elem_type)
         if isinstance(node, Identifier):
             if node.name not in self.variables:
                 raise Exception(f"Variable '{node.name}' not declared")

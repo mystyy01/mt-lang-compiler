@@ -1,3 +1,5 @@
+from stdlib.iter use range
+
 array KEYWORDS = ["from", "use", "as", "int", "float", "void", "array", "string", "bool", "if", "else", "for", "in", "set", "return", "typeof", "while", "bool", "true", "false", "func", "class", "new", "this", "static", "virtual", "arg"]
 array SINGLE_CHAR_SYMBOLS = ["(", ")", "[", "]", "{", "}", ",", ".", ":", "!", "+", "-", "*", "/", "=", ">", "<"]
 array DOUBLE_CHAR_SYMBOLS = ["==", "!=", "+=", ">=", "<=", "&&", "||"]
@@ -29,9 +31,34 @@ class Tokenizer{
     string current_char(){
         return this.source[this.position]
     }
+    void advance(int offset){
+        for (i in range(offset)){
+            print("POSITION:" + str(this.position))
+            print("LENGTH: " + str(this.source.length()))
+            if (this.position < this.source.length()){
+                if (this.source[this.position] == "\n"){
+                    set this.line = this.line + 1
+                    set this.column = 1
+                } else{
+                    set this.column = this.column + 1
+                }
+            }
+            set this.position = this.position + 1
+        }
+    }
+    bool is_at_end(){
+        if (this.position >= this.source.length()){
+            return true
+        }
+        return false
+    }
 }
 
-string test = "123abc"
+string test = "1a3abc"
 Tokenizer tokenizer = new Tokenizer(test, "")
 string char = tokenizer.current_char()
 print(char)
+tokenizer.advance(1)
+print(tokenizer.current_char())
+print(tokenizer.is_at_end())
+print(test.length())

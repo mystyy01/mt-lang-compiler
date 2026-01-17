@@ -104,6 +104,8 @@ class SemanticAnalyzer:
             return self.analyze_call_expression(node)
         if isinstance(node, BinaryExpression):
             return self.analyze_binary_expression(node)
+        if isinstance(node, IndexExpression):
+            return self.analyze_index_expression(node)
         if isinstance(node, MemberExpression):
             return self.analyze_member_expression(node)
         if isinstance(node, ExpressionStatement):
@@ -211,6 +213,31 @@ class SemanticAnalyzer:
         return node.class_name  # Return the class name as the type
 
 
+
+    def analyze_index_expression(self, node: IndexExpression):
+        # Analyze the object being indexed
+        obj_type = self.analyze(node.object)
+        if not obj_type:
+            return None
+        
+        # Analyze the index - should be int
+        index_type = self.analyze(node.index)
+        if index_type != "int":
+            pos_info = self.get_position_info(node)
+            self.add_error(f"Array/string index must be an integer{pos_info}")
+            return None
+        
+        # Determine return type based on object type
+        if obj_type == "string":
+            return "string"  # Single character as string
+        elif obj_type == "array":
+            # For arrays, we need to know the element type
+            # For now, assume int elements (can be extended later)
+            return "int"
+        else:
+            pos_info = self.get_position_info(node)
+            self.add_error(f"Cannot index into type '{obj_type}'{pos_info}")
+            return None
 
     def analyze_member_expression(self, node: MemberExpression):
         # Analyze the object
