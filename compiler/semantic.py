@@ -527,14 +527,12 @@ class SemanticAnalyzer:
         if isinstance(node.callee, MemberExpression):
             method_name = node.callee.property
 
-            # Handle string literal method calls: "text".split(",")
+            # Handle string literal method calls: "text".length()
             if isinstance(node.callee.object, StringLiteral):
-                if method_name == "split":
-                    return "array"
-                elif method_name == "length":
+                if method_name == "length":
                     return "int"
 
-            # Handle method calls on variables: str.split(",")
+            # Handle method calls on variables: str.length()
             if isinstance(node.callee.object, Identifier):
                 obj_name = node.callee.object.name
                 obj_symbol = self.symbol_table.lookup(obj_name)
@@ -543,9 +541,7 @@ class SemanticAnalyzer:
 
                     # String methods (built into the compiler)
                     if obj_type == "string":
-                        if method_name == "split":
-                            return "array"
-                        elif method_name == "length":
+                        if method_name == "length":
                             return "int"
 
                     # Look up method return type from class definition

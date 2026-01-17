@@ -1,0 +1,39 @@
+from stdlib.os use run, env, exists, makedir, removedir, cwd, cd
+
+print("=== Testing os module ===")
+
+// Test cwd
+print("Current directory:")
+print(cwd())
+
+// Test env
+print("HOME env var:")
+print(env("HOME"))
+
+// Test exists
+print("exists compiler.py:")
+print(exists("compiler.py"))
+
+// Test run
+print("Running echo:")
+int code = run("echo Hello from shell")
+print("Exit code:")
+print(code)
+
+// Test makedir and removedir
+print("Creating test_dir...")
+bool created = makedir("test_dir")
+print(created)
+
+print("Removing test_dir...")
+bool removed = removedir("test_dir")
+print(removed)
+
+// Test cd
+print("Changing to /tmp...")
+bool changed = cd("/tmp")
+print(changed)
+print("New cwd:")
+print(cwd())
+
+print("=== Done ===")

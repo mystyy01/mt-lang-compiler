@@ -1,0 +1,86 @@
+from stdlib.strings use split, length, contains, starts_with, concat, compare, equals
+
+// Test split
+print("=== Testing split ===")
+string csv = "apple,banana,cherry"
+array fruits = split(csv, ",")
+print("Split by comma:")
+for (fruit in fruits) {
+    print(fruit)
+}
+
+string sentence = "hello world foo bar"
+array words = split(sentence, " ")
+print("Split by space:")
+for (word in words) {
+    print(word)
+}
+
+// Test length
+print("")
+print("=== Testing length ===")
+string text = "hello"
+int len = length(text)
+print("Length of hello:")
+print(len)
+
+// Test contains
+print("")
+print("=== Testing contains ===")
+string haystack = "hello world"
+bool has_world = contains(haystack, "world")
+print("hello world contains world:")
+print(has_world)
+
+bool has_foo = contains(haystack, "foo")
+print("hello world contains foo:")
+print(has_foo)
+
+// Test starts_with
+print("")
+print("=== Testing starts_with ===")
+bool starts_hello = starts_with(haystack, "hello")
+print("hello world starts with hello:")
+print(starts_hello)
+
+bool starts_world = starts_with(haystack, "world")
+print("hello world starts with world:")
+print(starts_world)
+
+// Test concat
+print("")
+print("=== Testing concat ===")
+string a = "hello"
+string b = " world"
+string combined = concat(a, b)
+print("concat hello and world:")
+print(combined)
+
+// Test compare
+print("")
+print("=== Testing compare ===")
+int cmp1 = compare("apple", "banana")
+print("compare apple banana:")
+print(cmp1)
+
+int cmp2 = compare("banana", "apple")
+print("compare banana apple:")
+print(cmp2)
+
+int cmp3 = compare("apple", "apple")
+print("compare apple apple:")
+print(cmp3)
+
+// Test equals
+print("")
+print("=== Testing equals ===")
+bool eq1 = equals("hello", "hello")
+print("equals hello hello:")
+print(eq1)
+
+bool eq2 = equals("hello", "world")
+print("equals hello world:")
+print(eq2)
+
+print("")
+print("=== All tests completed ===")

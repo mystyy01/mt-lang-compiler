@@ -11,7 +11,7 @@ from pathlib import Path
 
 # Path to the tokenizer relative to this script
 SCRIPT_DIR = Path(__file__).parent
-TOKENIZER_PATH = SCRIPT_DIR.parent / "tokenizer.py"
+TOKENIZER_PATH = SCRIPT_DIR.parent / "compiler" / "tokenizer.py"
 OUTPUT_PATH = SCRIPT_DIR / "syntaxes" / "mtc.tmLanguage.json"
 
 # Categorize keywords for better semantic highlighting

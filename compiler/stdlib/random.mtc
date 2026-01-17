@@ -1,4 +1,35 @@
-// needs to be able to import c libs 
-// from c use rand
-// rand() can be used to have randint, choice, rand, etc.
-// or we can generate a hard coded seed but thats not efficent for true randomness
+from libc use rand, srand, floor
+
+// Seed with a specific value
+// Use this to initialize the random number generator
+func seed(int value){
+    srand(value)
+}
+
+// Get a random float between 0.0 and 1.0
+float random(){
+    int r = rand()
+    float rf = float(r)
+    float max = 2147483647.0
+    return rf / max
+}
+
+// Get a random integer between min and max (inclusive)
+int random_int(int minval, int maxval){
+    float r = random()
+    int range = maxval - minval + 1
+    float rangef = float(range)
+    float scaled = r * rangef
+    float floored = floor(scaled)
+    int offset = int(floored)
+    return minval + offset
+}
+
+// Get a random boolean (true or false)
+bool random_bool(){
+    int r = random_int(0, 1)
+    if (r == 1){
+        return true
+    }
+    return false
+}

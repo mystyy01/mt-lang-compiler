@@ -44,6 +44,11 @@ LIBC_FUNCTIONS = {
     "remove": {"ret": "int", "args": ["ptr"]},
     "rename": {"ret": "int", "args": ["ptr", "ptr"]},
     "stat": {"ret": "int", "args": ["ptr", "ptr"]},
+    "mkdir": {"ret": "int", "args": ["ptr", "int"]},
+    "rmdir": {"ret": "int", "args": ["ptr"]},
+    "getcwd": {"ret": "ptr", "args": ["ptr", "int"]},
+    "chdir": {"ret": "int", "args": ["ptr"]},
+    "unlink": {"ret": "int", "args": ["ptr"]},
 
     # Standard I/O
     "printf": {"ret": "int", "args": ["ptr"], "var_arg": True},
@@ -62,6 +67,26 @@ LIBC_FUNCTIONS = {
     "abs": {"ret": "int", "args": ["int"]},
     "atoi": {"ret": "int", "args": ["ptr"]},
     "atof": {"ret": "float", "args": ["ptr"]},
+    "floor": {"ret": "float", "args": ["float"]},
+    "ceil": {"ret": "float", "args": ["float"]},
+    "round": {"ret": "float", "args": ["float"]},
+    "sqrt": {"ret": "float", "args": ["float"]},
+    "pow": {"ret": "float", "args": ["float", "float"]},
+    "fabs": {"ret": "float", "args": ["float"]},
+    "fmod": {"ret": "float", "args": ["float", "float"]},
+    "log": {"ret": "float", "args": ["float"]},
+    "log10": {"ret": "float", "args": ["float"]},
+    "exp": {"ret": "float", "args": ["float"]},
+    "sin": {"ret": "float", "args": ["float"]},
+    "cos": {"ret": "float", "args": ["float"]},
+    "tan": {"ret": "float", "args": ["float"]},
+    "asin": {"ret": "float", "args": ["float"]},
+    "acos": {"ret": "float", "args": ["float"]},
+    "atan": {"ret": "float", "args": ["float"]},
+
+    # Random
+    "rand": {"ret": "int", "args": []},
+    "srand": {"ret": "void", "args": ["int"]},
 
     # Time
     "time": {"ret": "int", "args": ["ptr"]},
@@ -472,6 +497,11 @@ class CodeGenerator:
         """Declare a single libc function from the registry"""
         if func_name in self.libc_functions:
             return self.libc_functions[func_name]  # Already declared
+
+        # Check if already declared in module globals (e.g., malloc, free, etc.)
+        if func_name in self.module.globals:
+            self.libc_functions[func_name] = self.module.globals[func_name]
+            return self.libc_functions[func_name]
 
         if func_name not in LIBC_FUNCTIONS:
             raise Exception(f"Unknown libc function: {func_name}. Available functions: {', '.join(sorted(LIBC_FUNCTIONS.keys()))}")
@@ -1052,12 +1082,12 @@ class CodeGenerator:
 
                     # Determine element type from context
                     if isinstance(node.value, CallExpression):
+                        # Handle split() function call (from stdlib.strings)
+                        if isinstance(node.value.callee, Identifier) and node.value.callee.name == "split":
+                            self.array_lengths[node.name] = (self.i8_ptr_type, 8)
+                            return None
                         if isinstance(node.value.callee, MemberExpression):
                             method_name = node.value.callee.property
-                            # split() is a compiler-implemented string method that returns string array
-                            if method_name == "split":
-                                self.array_lengths[node.name] = (self.i8_ptr_type, 8)
-                                return None
                             # For class methods returning array, check the class definition
                             if isinstance(node.value.callee.object, Identifier):
                                 obj_name = node.value.callee.object.name
@@ -1240,31 +1270,38 @@ class CodeGenerator:
         if isinstance(node, ExpressionStatement):
             return self.generate(node.expression)
         if isinstance(node, CallExpression):
+            # Handle split() function call (from stdlib.strings)
+            if isinstance(node.callee, Identifier) and node.callee.name == "split":
+                if len(node.arguments) != 2:
+                    raise Exception("split() requires exactly 2 arguments (string, delimiter)")
+                string_ptr = self.generate(node.arguments[0])
+                delimiter = self.generate(node.arguments[1])
+                return self.string_split(string_ptr, delimiter)
+
             # Handle method calls on objects (like arr.append(value))
             if isinstance(node.callee, MemberExpression):
-                # Handle string literal method calls: "text".split(",")
+                # Handle string literal method calls: "text".length()
                 if isinstance(node.callee.object, StringLiteral):
                     method_name = node.callee.property
-                    if method_name == "split":
-                        if len(node.arguments) != 1:
-                            raise Exception("split() requires exactly 1 argument (delimiter)")
+                    if method_name == "length":
                         string_ptr = self.generate(node.callee.object)
-                        delimiter = self.generate(node.arguments[0])
-                        return self.string_split(string_ptr, delimiter)
+                        return self.builder.call(self.strlen, [string_ptr], name="str_len")
                     else:
                         raise Exception(f"Unknown string method: {method_name}")
 
-                # Handle method calls on expressions (like this.data.split())
+                # Handle method calls on MemberExpressions (like this.data.length())
                 if isinstance(node.callee.object, MemberExpression):
                     method_name = node.callee.property
-                    if method_name == "split":
-                        if len(node.arguments) != 1:
-                            raise Exception("split() requires exactly 1 argument (delimiter)")
-                        # Evaluate the expression to get the string pointer
-                        string_ptr = self.generate(node.callee.object)
-                        delimiter = self.generate(node.arguments[0])
-                        return self.string_split(string_ptr, delimiter)
-                    # For other methods on expressions, fall through to general handling
+                    # Evaluate the expression to get the value
+                    obj_value = self.generate(node.callee.object)
+                    if method_name == "length":
+                        # Could be string or array - check type
+                        if obj_value.type == self.i8_ptr_type:
+                            return self.builder.call(self.strlen, [obj_value], name="str_len")
+                        elif obj_value.type == self.dyn_array_ptr_type:
+                            return self.array_length(obj_value)
+                    # Fall through for other method handling on expressions
+                    raise Exception(f"Unsupported method '{method_name}' on expression")
 
                 # Handle method calls on identifiers
                 if not isinstance(node.callee.object, Identifier):
@@ -1292,13 +1329,7 @@ class CodeGenerator:
                     var_type = self.variable_types[obj_name]
                     if var_type == self.i8_ptr_type and obj_name not in self.array_lengths:
                         # This is a string variable - check for string methods
-                        if method_name == "split":
-                            if len(node.arguments) != 1:
-                                raise Exception("split() requires exactly 1 argument (delimiter)")
-                            string_ptr = self.builder.load(self.variables[obj_name], name="str_val")
-                            delimiter = self.generate(node.arguments[0])
-                            return self.string_split(string_ptr, delimiter)
-                        elif method_name == "length":
+                        if method_name == "length":
                             string_ptr = self.builder.load(self.variables[obj_name], name="str_val")
                             return self.builder.call(self.strlen, [string_ptr], name="str_len")
                         # If not a known string method, fall through to other handlers
@@ -1454,6 +1485,33 @@ class CodeGenerator:
                     return self.generate_array_to_string(arg)
                 else:
                     raise Exception(f"str() doesn't support type {arg.type}")
+            elif isinstance(node.callee, Identifier) and node.callee.name == "int":
+                # int() - convert to integer
+                if len(node.arguments) != 1:
+                    raise Exception("int() takes 1 argument")
+                arg = self.generate(node.arguments[0])
+                if arg.type == self.int_type:
+                    return arg
+                elif arg.type == self.float_type:
+                    return self.builder.fptosi(arg, self.int_type, name="float_to_int")
+                elif arg.type == self.bool_type:
+                    return self.builder.zext(arg, self.int_type, name="bool_to_int")
+                else:
+                    raise Exception(f"int() doesn't support type {arg.type}")
+            elif isinstance(node.callee, Identifier) and node.callee.name == "float":
+                # float() - convert to float
+                if len(node.arguments) != 1:
+                    raise Exception("float() takes 1 argument")
+                arg = self.generate(node.arguments[0])
+                if arg.type == self.float_type:
+                    return arg
+                elif arg.type == self.int_type:
+                    return self.builder.sitofp(arg, self.float_type, name="int_to_float")
+                elif arg.type == self.bool_type:
+                    int_val = self.builder.zext(arg, self.int_type, name="bool_to_int")
+                    return self.builder.sitofp(int_val, self.float_type, name="int_to_float")
+                else:
+                    raise Exception(f"float() doesn't support type {arg.type}")
             elif isinstance(node.callee, Identifier) and node.callee.name == "fopen":
                 # fopen(const char* filename, const char* mode) -> FILE*
                 if len(node.arguments) != 2:
@@ -1833,14 +1891,14 @@ class CodeGenerator:
                 elem_size = 4
 
                 if isinstance(node.iterable, CallExpression):
-                    if isinstance(node.iterable.callee, MemberExpression):
+                    # Handle split() function call (from stdlib.strings)
+                    if isinstance(node.iterable.callee, Identifier) and node.iterable.callee.name == "split":
+                        elem_type = self.i8_ptr_type
+                        elem_size = 8
+                    elif isinstance(node.iterable.callee, MemberExpression):
                         method_name = node.iterable.callee.property
-                        # split() is compiler-implemented and returns string array
-                        if method_name == "split":
-                            elem_type = self.i8_ptr_type
-                            elem_size = 8
                         # For class methods, check if they return array
-                        elif isinstance(node.iterable.callee.object, Identifier):
+                        if isinstance(node.iterable.callee.object, Identifier):
                             obj_name = node.iterable.callee.object.name
                             if obj_name in self.variable_classes:
                                 class_name = self.variable_classes[obj_name]

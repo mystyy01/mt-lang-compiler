@@ -1,0 +1,33 @@
+from stdlib.random use seed, random, random_int, random_bool
+
+// Seed with a fixed value for reproducible output
+print("=== Testing random ===")
+seed(42)
+
+// Test random float
+print("random():")
+print(random())
+print(random())
+print(random())
+
+// Test random_int
+print("random_int(1, 10):")
+print(random_int(1, 10))
+print(random_int(1, 10))
+print(random_int(1, 10))
+print(random_int(1, 10))
+print(random_int(1, 10))
+
+// Test random_int with different range
+print("random_int(100, 200):")
+print(random_int(100, 200))
+print(random_int(100, 200))
+
+// Test random_bool
+print("random_bool():")
+print(random_bool())
+print(random_bool())
+print(random_bool())
+print(random_bool())
+
+print("=== Done ===")

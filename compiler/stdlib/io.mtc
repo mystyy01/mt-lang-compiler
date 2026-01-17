@@ -1,4 +1,5 @@
 from libc use access
+from stdlib.strings use split
 
 class File{
     arg string path
@@ -53,7 +54,7 @@ class File{
         // set buffer[bufferSize] = "\0" doesnt work but we need to add a null byte as a delimiter as we handle it as a string
 
         fclose(file)
-        array lines = buffer.split("\n")
+        array lines = split(buffer, "\n")
         return lines
     }
 }

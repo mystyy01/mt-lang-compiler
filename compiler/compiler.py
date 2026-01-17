@@ -65,7 +65,7 @@ if __name__ == "__main__":
     print(f"\n=== Compiled to {out}.o ===")
     print("\n=== Compiling to binary ===")
     import os
-    os.system(f"clang {out}.o -o {out}")
+    os.system(f"clang {out}.o -o {out} -lm")
     os.system(f"rm {out}.o")
     print(f"\n=== Compiled to {out} ===")
     print("\n=== Running now ===")

@@ -1,0 +1,145 @@
+from stdlib.math use min, max, sum, avgmean
+from stdlib.math use round_int, floor_int, ceil_int
+from stdlib.math use abs_int, abs_float, square_root, power
+from stdlib.math use clamp, clamp_float, sign
+from stdlib.math use is_even, is_odd
+
+// Test min function
+print("=== Testing min ===")
+array nums1 = [5, 2, 8, 1, 9]
+print("min([5, 2, 8, 1, 9]) = ")
+print(min(nums1))
+
+array nums2 = [10, 20, 30]
+print("min([10, 20, 30]) = ")
+print(min(nums2))
+
+// Test max function
+print("=== Testing max ===")
+print("max([5, 2, 8, 1, 9]) = ")
+print(max(nums1))
+
+print("max([10, 20, 30]) = ")
+print(max(nums2))
+
+// Test sum function
+print("=== Testing sum ===")
+print("sum([5, 2, 8, 1, 9]) = ")
+print(sum(nums1))
+
+array nums3 = [1, 2, 3, 4, 5]
+print("sum([1, 2, 3, 4, 5]) = ")
+print(sum(nums3))
+
+// Test avgmean function
+print("=== Testing avgmean ===")
+print("avgmean([1, 2, 3, 4, 5]) = ")
+print(avgmean(nums3))
+
+// Test round_int function
+print("=== Testing round_int ===")
+print("round_int(3.7) = ")
+print(round_int(3.7))
+
+print("round_int(3.2) = ")
+print(round_int(3.2))
+
+print("round_int(3.5) = ")
+print(round_int(3.5))
+
+print("round_int(-2.7) = ")
+print(round_int(-2.7))
+
+// Test floor_int function
+print("=== Testing floor_int ===")
+print("floor_int(3.7) = ")
+print(floor_int(3.7))
+
+print("floor_int(3.2) = ")
+print(floor_int(3.2))
+
+print("floor_int(-2.3) = ")
+print(floor_int(-2.3))
+
+// Test ceil_int function
+print("=== Testing ceil_int ===")
+print("ceil_int(3.2) = ")
+print(ceil_int(3.2))
+
+print("ceil_int(3.9) = ")
+print(ceil_int(3.9))
+
+print("ceil_int(-2.3) = ")
+print(ceil_int(-2.3))
+
+// Test abs_int function
+print("=== Testing abs_int ===")
+print("abs_int(-5) = ")
+print(abs_int(-5))
+
+print("abs_int(5) = ")
+print(abs_int(5))
+
+// Test abs_float function
+print("=== Testing abs_float ===")
+print("abs_float(-3.14) = ")
+print(abs_float(-3.14))
+
+print("abs_float(3.14) = ")
+print(abs_float(3.14))
+
+// Test square_root function
+print("=== Testing square_root ===")
+print("square_root(16.0) = ")
+print(square_root(16.0))
+
+print("square_root(2.0) = ")
+print(square_root(2.0))
+
+// Test power function
+print("=== Testing power ===")
+print("power(2.0, 3.0) = ")
+print(power(2.0, 3.0))
+
+print("power(10.0, 2.0) = ")
+print(power(10.0, 2.0))
+
+// Test clamp function
+print("=== Testing clamp ===")
+print("clamp(5, 0, 10) = ")
+print(clamp(5, 0, 10))
+
+print("clamp(-5, 0, 10) = ")
+print(clamp(-5, 0, 10))
+
+print("clamp(15, 0, 10) = ")
+print(clamp(15, 0, 10))
+
+// Test sign function
+print("=== Testing sign ===")
+print("sign(-42) = ")
+print(sign(-42))
+
+print("sign(0) = ")
+print(sign(0))
+
+print("sign(42) = ")
+print(sign(42))
+
+// Test is_even function
+print("=== Testing is_even ===")
+print("is_even(4) = ")
+print(is_even(4))
+
+print("is_even(7) = ")
+print(is_even(7))
+
+// Test is_odd function
+print("=== Testing is_odd ===")
+print("is_odd(4) = ")
+print(is_odd(4))
+
+print("is_odd(7) = ")
+print(is_odd(7))
+
+print("=== Done ===")

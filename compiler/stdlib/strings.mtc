@@ -1,0 +1,48 @@
+from libc use strlen, strcmp, strncmp, strcpy, malloc, strcat
+
+// Split a string by delimiter, returning an array of strings
+// Note: This is a compiler builtin - the implementation is in codegen.py
+// This declaration exists for type checking purposes
+array split(string text, string delimiter) {
+    return []
+}
+
+// Get the length of a string
+int length(string text) {
+    return strlen(text)
+}
+
+// Check if a string starts with a prefix
+bool starts_with(string text, string prefix) {
+    int prefix_len = strlen(prefix)
+    int cmp = strncmp(text, prefix, prefix_len)
+    if (cmp == 0) {
+        return true
+    }
+    return false
+}
+
+// Concatenate two strings
+string concat(string a, string b) {
+    int len_a = strlen(a)
+    int len_b = strlen(b)
+    int total_len = len_a + len_b + 1
+    string result = malloc(total_len)
+    strcpy(result, a)
+    strcat(result, b)
+    return result
+}
+
+// Compare two strings (returns 0 if equal, negative if a < b, positive if a > b)
+int compare(string a, string b) {
+    return strcmp(a, b)
+}
+
+// Check if two strings are equal
+bool equals(string a, string b) {
+    int cmp = strcmp(a, b)
+    if (cmp == 0) {
+        return true
+    }
+    return false
+}
