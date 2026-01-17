@@ -60,8 +60,7 @@ class Tokenizer{
         return null
     }
     void skip_whitespace(){
-        // doenst work gives LLVM IR parsing error uncomment to reproduce bug
-        // while (this.is_at_end() != true && array_contains(this.current_char(), WHITESPACE)){} 
+        while (this.is_at_end() != true && array_contains(this.current_char(), WHITESPACE)){} // add logic to skip whitespace 
     }
 }
 string test = "1a3abc"

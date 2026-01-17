@@ -1,0 +1,6 @@
+#!/bin/bash
+
+COMPILER_DIR="/mnt/ssd/Coding/mt-lang/compiler"
+
+source "$COMPILER_DIR/venv/bin/activate"
+python "$COMPILER_DIR/compiler.py" "$@"

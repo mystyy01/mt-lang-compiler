@@ -124,6 +124,10 @@ class CodeGenerator:
         ])
         self.dyn_array_ptr_type = self.dyn_array_type.as_pointer()
 
+        # Track global arrays: name -> LLVM GlobalVariable (pointer to dyn_array_ptr)
+        self.global_arrays = {}
+        self.in_main_function = False  # Track whether we're generating main function code
+
     def get_llvm_type(self, type_str: str):
         """Map AST type strings to LLVM types"""
         if type_str == "int":
@@ -326,10 +330,17 @@ class CodeGenerator:
         old_array_lengths = self.array_lengths
         old_variable_types = self.variable_types
         old_current_return_type = getattr(self, 'current_return_type', None)
+        old_in_main_function = self.in_main_function
 
+        self.in_main_function = False
         self.array_lengths = dict(old_array_lengths)
         self.variables = dict(old_variables)
         self.variable_types = dict(old_variable_types)
+
+        # Remove global arrays from local variables - they'll be accessed via global_arrays
+        for name in list(self.global_arrays.keys()):
+            if name in self.variables:
+                del self.variables[name]
 
         # Get the struct type for this class - use struct pointer as first param to match method calls
         struct_type = self.classes[class_name]['llvm_struct']
@@ -397,12 +408,14 @@ class CodeGenerator:
         self.variable_types = old_variable_types
         self.current_return_type = old_current_return_type
         self.current_class = old_current_class
+        self.in_main_function = old_in_main_function
 
     def create_main_function(self):
         func_type = llvmlite.ir.FunctionType(self.int_type, [])
         func = llvmlite.ir.Function(self.module, func_type, name="main")
         block = func.append_basic_block(name="entry")
         self.builder = llvmlite.ir.IRBuilder(block)
+        self.in_main_function = True
         self.create_printf_function()
         self.create_libc_functions()
     def create_printf_function(self):
@@ -1155,6 +1168,15 @@ class CodeGenerator:
                     # Create dynamic array - returns pointer to struct
                     # Always use on_heap=True to ensure array survives function returns
                     array_ptr, _, _ = self.create_dynamic_array(elem_values, elem_type, on_heap=True)
+
+                    # If in main function, create a global variable to store the pointer
+                    # so it can be accessed from methods
+                    if self.in_main_function:
+                        global_var = llvmlite.ir.GlobalVariable(self.module, self.dyn_array_ptr_type, name=f"global_{node.name}")
+                        global_var.initializer = llvmlite.ir.Constant(self.dyn_array_ptr_type, None)
+                        self.builder.store(array_ptr, global_var)
+                        self.global_arrays[node.name] = global_var
+
                     self.variables[node.name] = array_ptr  # Store pointer directly
                     self.array_lengths[node.name] = (elem_type, elem_size)
                 elif node.value is None:
@@ -1163,6 +1185,14 @@ class CodeGenerator:
                     elem_type = self.int_type
                     elem_size = 4
                     array_ptr, _, _ = self.create_dynamic_array([], elem_type, on_heap=True)
+
+                    # If in main function, create a global variable
+                    if self.in_main_function:
+                        global_var = llvmlite.ir.GlobalVariable(self.module, self.dyn_array_ptr_type, name=f"global_{node.name}")
+                        global_var.initializer = llvmlite.ir.Constant(self.dyn_array_ptr_type, None)
+                        self.builder.store(array_ptr, global_var)
+                        self.global_arrays[node.name] = global_var
+
                     self.variables[node.name] = array_ptr
                     self.array_lengths[node.name] = (elem_type, elem_size)
                 else:
@@ -1172,6 +1202,13 @@ class CodeGenerator:
                     # Type check: make sure the value is actually an array pointer
                     if array_ptr.type != self.dyn_array_ptr_type:
                         raise TypeError(f"Cannot assign {array_ptr.type} to array variable '{node.name}': expected {self.dyn_array_ptr_type}")
+
+                    # If in main function, create a global variable
+                    if self.in_main_function:
+                        global_var = llvmlite.ir.GlobalVariable(self.module, self.dyn_array_ptr_type, name=f"global_{node.name}")
+                        global_var.initializer = llvmlite.ir.Constant(self.dyn_array_ptr_type, None)
+                        self.builder.store(array_ptr, global_var)
+                        self.global_arrays[node.name] = global_var
 
                     self.variables[node.name] = array_ptr
 
@@ -1260,9 +1297,15 @@ class CodeGenerator:
 
             return self.array_get(obj, index, elem_type)
         if isinstance(node, Identifier):
+            # Check if it's a global array (accessed from a method)
+            if node.name in self.global_arrays and node.name not in self.variables:
+                # Load the array pointer from the global variable
+                global_var = self.global_arrays[node.name]
+                return self.builder.load(global_var, name=f"global_{node.name}")
+
             if node.name not in self.variables:
                 raise Exception(f"Variable '{node.name}' not declared")
-            
+
             storage = self.variables[node.name]
             var_type = self.variable_types[node.name]
 
