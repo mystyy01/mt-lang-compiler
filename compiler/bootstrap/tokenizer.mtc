@@ -1,4 +1,5 @@
 from stdlib.iter use range, array_contains
+from stdlib.strings use isdigit, isalnum, lower
 
 array KEYWORDS = ["from", "use", "as", "int", "float", "void", "array", "string", "bool", "if", "else", "for", "in", "set", "return", "typeof", "while", "bool", "true", "false", "func", "class", "new", "this", "static", "virtual", "arg"]
 array SINGLE_CHAR_SYMBOLS = ["(", ")", "[", "]", "{", "}", ",", ".", ":", "!", "+", "-", "*", "/", "=", ">", "<"]
@@ -9,14 +10,17 @@ array WHITESPACE = [" ", "\t", "\n"]
 class Token{
     arg string type = ""
     arg string value = ""
-    arg string line = ""
-    arg string column = ""
+    arg int line = 0
+    arg int column = 0
 }
 class CompilerError{
     arg string message = ""
     arg string severity = ""
     arg string file_path = ""
-}
+    void raise(){
+        print("MESSAGE:\n" + this.message + "\nSEVERITY:\n" + this.severity + "\nAT:\n" + this.file_path)
+
+    }}
 class Tokenizer{
     arg string source = ""
     arg string file_path = ""
@@ -60,25 +64,120 @@ class Tokenizer{
         return null
     }
     void skip_whitespace(){
-        while (this.is_at_end() != true && array_contains(this.current_char(), WHITESPACE)){} // add logic to skip whitespace 
+        while (this.is_at_end() != true && array_contains(this.current_char(), WHITESPACE)){
+            this.advance()
+        }
+    }
+    void skip_comment(){
+        if (this.is_at_end() != true && this.current_char() == "/" &&  this.peek_next() == "/"){
+            this.advance()
+            this.advance()
+            while (this.is_at_end() != true && this.current_char() != "\n"){
+                this.advance()
+            }
+        }
+    }
+    Token read_word(){
+        string word = ""
+        int start_line = this.line
+        int start_column = this.column
+        while (this.is_at_end() != true && (isalnum(this.current_char()) || this.current_char() == "_")){
+            return new Token("KEYWORD", word, start_line, start_column)
+        }
+    }
+    Token read_number(){
+        string number = ""
+        bool has_decimal = false
+        bool has_exponent = false
+        int start_line = this.line
+        int start_column = this.column
+
+        while (this.is_at_end() != false && isdigit(this.current_char())){
+            string char = this.current_char()
+            set number =  number + this.current_char()
+            this.advance()
+        }
+        if (this.is_at_end() == false && this.current_char() == "."){
+            set has_decimal = true
+            set number = number + "."
+            this.advance()
+            if (this.is_at_end() == false && isdigit(this.current_char())){
+                while (this.is_at_end() == false && isdigit(this.current_char())){
+                    set number = number + this.current_char()
+                    this.advance()
+                }
+            }else{
+                CompilerError error = new CompilerError("Invalid float literal at line " + str(start_line) + ": expected digits after decimal point", "ERROR", this.file_path)
+                error.raise()
+            }
+        }
+        if (this.is_at_end() == false && lower(this.current_char()) == "e"){
+            set has_exponent = true
+            set number = number + "e"
+            this.advance()
+            array exponents = ["+", "-"]
+            if (this.is_at_end() == false && array_contains(this.current_char(), exponents)){
+                set number = number + this.current_char()
+                this.advance()
+            }
+            if (this.is_at_end() == false && isdigit(this.current_char())){
+                while (this.is_at_end() == false && isdigit(this.current_char())){
+                    set number = number + this.current_char()
+                    this.advance()
+                }
+            }
+            else{
+                CompilerError error = new CompilerError("Invalid float literal at line " + str(start_line) + ": expected digits in exponent", "ERROR", this.file_path)
+                error.raise()
+            }
+        }
+        bool is_float = has_decimal || has_exponent
+        string token_type = ""
+        if (is_float){
+            set token_type = "FLOAT_LITERAL"
+        }
+        else{
+            set token_type = "INTEGER LITERAL"
+        }
+        return new Token(token_type, number, start_line, start_column)
     }
 }
-string test = "1a3abc"
-Tokenizer tokenizer = new Tokenizer(test, "")
-string char = tokenizer.current_char()
-print("CHAR: " + char)
+// test all features of tokenizer (inline due to method call bug in functions)
+print("=== Testing Tokenizer ===")
+string test_source = "12345567658568"
+Tokenizer tokenizer = new Tokenizer(test_source, "test.mtc")
+
+// test current_char
+print("current_char: " + tokenizer.current_char())
+
+// test is_at_end
+print("is_at_end: " + str(tokenizer.is_at_end()))
+
+// test advance
 tokenizer.advance()
-print("CURRENT CHAR:" + tokenizer.current_char())
-print("IS AT END: " + str(tokenizer.is_at_end()))
-print("LENGTH:" + str(test.length()))
-print("PEEK NEXT: " + tokenizer.peek_next())
+print("after advance(1): " + tokenizer.current_char())
+
+// test advance with offset
+tokenizer.advance(2)
+print("after advance(2): " + tokenizer.current_char())
+
+// test peek_next
 if (tokenizer.peek_next()){
-    print("more chars")
-}
-else{
-    print("no more chars")
+    print("peek_next: " + tokenizer.peek_next())
+} else {
+    print("peek_next: null")
 }
 
+// test line and column tracking
+print("line: " + str(tokenizer.line))
+print("column: " + str(tokenizer.column))
+
+// test skip_whitespace
+print("position before skip_whitespace: " + str(tokenizer.position))
 tokenizer.skip_whitespace()
-print("CURRENT CHAR: " + tokenizer.current_char())
-print("DONE")
+print("position after skip_whitespace: " + str(tokenizer.position))
+print("char after skip_whitespace: " + tokenizer.current_char())
+
+print("=== Reading number ===")
+tokenizer.read_number()
+print("=== All tests complete ===")

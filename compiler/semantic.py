@@ -112,6 +112,20 @@ class SemanticAnalyzer:
             return self.analyze_member_expression(node)
         if isinstance(node, ExpressionStatement):
             return self.analyze_expression_statement(node)
+        if isinstance(node, WhileStatement):
+            return self.analyze_while_statement(node)
+        if isinstance(node, IfStatement):
+            return self.analyze_if_statement(node)
+        if isinstance(node, ForInStatement):
+            return self.analyze_for_in_statement(node)
+        if isinstance(node, SetStatement):
+            return self.analyze_set_statement(node)
+        if isinstance(node, ReturnStatement):
+            return self.analyze_return_statement(node)
+        if isinstance(node, Block):
+            return self.analyze_block(node)
+        if isinstance(node, BoolLiteral):
+            return "bool"
         # cant implement bools yet since they arent an AST class yet (adding soon)
     def analyze_program(self, node: Program):
         for statement in node.statements:
@@ -120,30 +134,12 @@ class SemanticAnalyzer:
         # Declare the class in the symbol table
         self.symbol_table.declare(node.name, "class", node.name)
 
-        # Enter class scope for analyzing fields and methods
-        self.symbol_table.enter_scope()
-
         # Store current class for method analysis
         old_current_class = getattr(self, 'current_class', None)
         self.current_class = node.name
 
-        # Analyze fields
-        for field in node.fields:
-            self.analyze_field_declaration(field)
-
-        # Analyze methods
-        for method in node.methods:
-            self.analyze_method_declaration(method)
-
-        # Restore current_class
-        self.current_class = old_current_class
-            
-        # Debug: Print class info
-        print(f"DEBUG: Analyzing class '{node.name}' with {len(node.fields)} fields and {len(node.methods)} methods")
-
-        self.symbol_table.exit_scope()
-        
-        # Update class registry after analyzing this class
+        # Register class info FIRST (before analyzing method bodies)
+        # so that this.method() calls can look up method parameters
         if not hasattr(self, 'classes'):
             self.classes = {}
         fields_info = []
@@ -165,7 +161,25 @@ class SemanticAnalyzer:
             "fields": fields_info,
             "methods": methods_info
         }
-        self.current_class = node.name
+
+        # Enter class scope for analyzing fields and methods
+        self.symbol_table.enter_scope()
+
+        # Analyze fields
+        for field in node.fields:
+            self.analyze_field_declaration(field)
+
+        # Analyze methods (now class info is available for this.method() calls)
+        for method in node.methods:
+            self.analyze_method_declaration(method)
+
+        # Restore current_class
+        self.current_class = old_current_class
+
+        # Debug: Print class info
+        print(f"DEBUG: Analyzing class '{node.name}' with {len(node.fields)} fields and {len(node.methods)} methods")
+
+        self.symbol_table.exit_scope()
 
     def analyze_field_declaration(self, node: FieldDeclaration):
         # Fields are just stored in the class scope
@@ -244,6 +258,10 @@ class SemanticAnalyzer:
     def analyze_member_expression(self, node: MemberExpression):
         # Analyze the object
         object_type = self.analyze(node.object)
+        
+        # Handle .length property on strings and arrays - returns int
+        if node.property == "length" and object_type in ["string", "array"]:
+            return "int"
         
         # If this is a 'this' expression, look up the field in current class
         if hasattr(node.object, '__class__') and node.object.__class__.__name__ == 'ThisExpression':
@@ -588,6 +606,38 @@ class SemanticAnalyzer:
                 if method_name == "length":
                     return "int"
 
+            # Handle method calls on 'this': this.method()
+            if isinstance(node.callee.object, ThisExpression):
+                if hasattr(self, 'current_class') and self.current_class:
+                    class_info = self.classes.get(self.current_class, {})
+                    methods = class_info.get("methods", {})
+                    if method_name in methods:
+                        method_info = methods[method_name]
+                        parameters = method_info["params"]
+
+                        # Expand arguments with defaults if needed
+                        while len(node.arguments) < len(parameters) and parameters[len(node.arguments)].default_value is not None:
+                            node.arguments.append(parameters[len(node.arguments)].default_value)
+
+                        num_args = len(node.arguments)
+                        num_params = len(parameters)
+                        min_args = sum(1 for p in parameters if p.default_value is None)
+                        if num_args < min_args or num_args > num_params:
+                            pos_info = self.get_position_info(node)
+                            self.add_error(f"Method '{method_name}' expects {min_args} to {num_params} arguments, got {num_args}{pos_info}")
+
+                        # Analyze provided arguments
+                        for i, arg in enumerate(node.arguments):
+                            if i < num_params:
+                                expected_type = parameters[i].param_type
+                                if expected_type:
+                                    arg_type = self.analyze(arg)
+                                    if arg_type != expected_type and arg_type != "any":
+                                        pos_info = self.get_position_info(arg)
+                                        self.add_error(f"Argument {i+1} of method '{method_name}' expects {expected_type}, got {arg_type}{pos_info}")
+
+                        return method_info["return_type"]
+
             # Handle method calls on variables: str.length()
             if isinstance(node.callee.object, Identifier):
                 obj_name = node.callee.object.name
@@ -654,3 +704,53 @@ class SemanticAnalyzer:
 
     def analyze_null_literal(self, node):
         return "null"
+
+    def analyze_while_statement(self, node):
+        """Analyze a while statement, including its condition and body"""
+        # Analyze the condition
+        self.analyze(node.condition)
+        # Analyze the body
+        if node.then_body:
+            self.analyze(node.then_body)
+
+    def analyze_if_statement(self, node):
+        """Analyze an if statement, including condition, then block, and else block"""
+        # Analyze the condition
+        self.analyze(node.condition)
+        # Analyze the then block
+        if node.then_body:
+            self.analyze(node.then_body)
+        # Analyze the else block if present
+        if node.else_body:
+            self.analyze(node.else_body)
+
+    def analyze_for_in_statement(self, node):
+        """Analyze a for-in statement"""
+        # Analyze the iterable
+        self.analyze(node.iterable)
+        # Enter a new scope for the loop variable
+        self.symbol_table.enter_scope()
+        # Declare the loop variable
+        self.symbol_table.declare(node.variable, "variable", "any")
+        # Analyze the body
+        if node.body:
+            self.analyze(node.body)
+        self.symbol_table.exit_scope()
+
+    def analyze_set_statement(self, node):
+        """Analyze a set statement (assignment)"""
+        # Analyze the target (could be an identifier or member expression)
+        self.analyze(node.target)
+        # Analyze the value
+        self.analyze(node.value)
+
+    def analyze_return_statement(self, node):
+        """Analyze a return statement"""
+        if node.value:
+            return self.analyze(node.value)
+        return "void"
+
+    def analyze_block(self, node):
+        """Analyze a block of statements"""
+        for statement in node.statements:
+            self.analyze(statement)

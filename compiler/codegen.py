@@ -398,6 +398,9 @@ class CodeGenerator:
                 self.builder.ret(llvmlite.ir.Constant(self.bool_type, 0))
             elif return_type == self.dyn_array_ptr_type:
                 self.builder.ret(llvmlite.ir.Constant(self.dyn_array_ptr_type, None))
+            elif isinstance(return_type, llvmlite.ir.PointerType):
+                # For pointer types, return null
+                self.builder.ret(llvmlite.ir.Constant(return_type, None))
             else:
                 self.builder.ret(llvmlite.ir.Constant(return_type, 0))
 
@@ -923,6 +926,39 @@ class CodeGenerator:
     def create_int_constant(self, value: int):
         """Create an integer constant"""
         return llvmlite.ir.Constant(self.int_type, value)
+    
+    def _generate_with_location(self, node, context="expression"):
+        """Helper to generate code with better error messages including source location"""
+        # Track the last source position for error reporting
+        if hasattr(node, 'line') and node.line is not None:
+            self._last_source_position = (node.line, node.column, getattr(node, 'file_path', None))
+        elif hasattr(node, 'file_path'):
+            self._last_source_position = (None, None, node.file_path)
+        
+        try:
+            result = self.generate(node)
+            if result is None and node is not None:
+                line, column, fp = getattr(self, '_last_source_position', (None, None, None))
+                pos_info = f" at line {line}, column {column}" if line is not None else ""
+                fp_info = f" in {fp}" if fp else ""
+                node_desc = f"{node.__class__.__name__}"
+                if hasattr(node, 'value') and isinstance(node.value, str):
+                    node_desc += f"('{node.value}')"
+                elif hasattr(node, 'name'):
+                    node_desc += f"('{node.name}')"
+                raise Exception(f"{context} {node_desc} generated None{pos_info}{fp_info}. This usually means semantic analysis failed to resolve its type.")
+            return result
+        except Exception as e:
+            line, column, fp = getattr(self, '_last_source_position', (None, None, None))
+            pos_info = f" at line {line}, column {column}" if line is not None else ""
+            fp_info = f" in {fp}" if fp else ""
+            node_desc = f"{node.__class__.__name__}"
+            if hasattr(node, 'value') and isinstance(node.value, str):
+                node_desc += f"('{node.value}')"
+            elif hasattr(node, 'name'):
+                node_desc += f"('{node.name}')"
+            raise Exception(f"Error generating {context} {node_desc}: {str(e)}{pos_info}{fp_info}") from e
+    
     def generate(self, node):
         if isinstance(node, Program):
             # Create LLVM structs for classes
@@ -1162,8 +1198,17 @@ class CodeGenerator:
 
                     # Generate values for all elements
                     elem_values = []
-                    for element in elements:
-                        elem_values.append(self.generate(element))
+                    for i, element in enumerate(elements):
+                        try:
+                            elem_value = self._generate_with_location(element, f"array element {i}")
+                            if elem_value is None:
+                                raise Exception(f"Array element {i} evaluated to None")
+                            elem_values.append(elem_value)
+                        except Exception as e:
+                            line = getattr(node.value, 'line', None)
+                            column = getattr(node.value, 'column', None)
+                            pos_info = f" at line {line}, column {column}" if line is not None else ""
+                            raise Exception(f"Failed to generate array element at index {i}{pos_info}: {e}")
 
                     # Create dynamic array - returns pointer to struct
                     # Always use on_heap=True to ensure array survives function returns
@@ -1818,8 +1863,16 @@ class CodeGenerator:
                     raise Exception(f"Unknown function: {node.callee.name}")
                 
                 args = []
-                for arg in node.arguments:
-                    args.append(self.generate(arg))
+                for i, arg in enumerate(node.arguments):
+                    arg_value = self.generate(arg)
+                    if arg_value is None:
+                        line = getattr(node, 'line', None)
+                        column = getattr(node, 'column', None)
+                        pos_info = f" at line {line}, column {column}" if line is not None else ""
+                        func_name = getattr(node.callee, 'name', str(node.callee))
+                        arg_name = getattr(arg, 'name', getattr(arg, 'value', str(arg)))
+                        raise Exception(f"Argument {i+1} ('{arg_name}') evaluated to None in call to '{func_name}'{pos_info}. This usually means a type was not resolved during semantic analysis.")
+                    args.append(arg_value)
                 
                 # Get position info for better error messages
                 line = getattr(node, 'line', None)
@@ -2000,6 +2053,9 @@ class CodeGenerator:
             self.variable_types = old_variable_types
             self.current_return_type = old_current_return_type  # Restore previous return type
         if isinstance(node, ReturnStatement):
+            # Skip if block is already terminated (dead code after a return)
+            if self.builder.block.is_terminated:
+                return None
             expected_type = getattr(self, 'current_return_type', self.int_type)
             
             # Check if we're in a dynamic function
@@ -2066,42 +2122,47 @@ class CodeGenerator:
                     zero = llvmlite.ir.Constant(condition.type, 0)
                     condition = self.builder.icmp_signed("!=", condition, zero, name="tobool")
             then_block = func.append_basic_block(name="then")
-            merge_block = func.append_basic_block(name="merge")
-            
-            # Only create else block if there's an else body
+
+            # Create else block BEFORE merge block so IR order is: then, else, merge
             if node.else_body:
                 else_block = func.append_basic_block(name="else")
+                merge_block = func.append_basic_block(name="merge")
                 self.builder.cbranch(condition, then_block, else_block)
             else:
+                merge_block = func.append_basic_block(name="merge")
                 self.builder.cbranch(condition, then_block, merge_block)
             
             self.builder.position_at_end(then_block)
             for statement in node.then_body.statements:
                 self.generate(statement)
-            if not self.builder.block.is_terminated:
+            # After generating statements, builder might be at a different block (from nested if/while)
+            # Track if then branch reaches merge (vs returning/etc)
+            then_end_block = self.builder.block
+            then_reaches_merge = not then_end_block.is_terminated
+            if then_reaches_merge:
                 self.builder.branch(merge_block)
 
             # Only process else block if it exists
+            else_reaches_merge = True  # Default for no else body
             if node.else_body:
                 self.builder.position_at_end(else_block)
                 for statement in node.else_body.statements:
                     self.generate(statement)
-                if not self.builder.block.is_terminated:
+                # Track if else branch reaches merge
+                else_end_block = self.builder.block
+                else_reaches_merge = not else_end_block.is_terminated
+                if else_reaches_merge:
                     self.builder.branch(merge_block)
-            
-            # Position at merge block - only add unreachable if both branches terminated
+
+            # Position at merge block
             self.builder.position_at_end(merge_block)
+            # Only add unreachable if NO paths reach merge
             if node.else_body:
-                then_terminated = not then_block.is_terminated
-                else_terminated = not else_block.is_terminated
-                # If both branches are terminated (e.g., both have return), add unreachable
-                if then_terminated and else_terminated:
+                if not then_reaches_merge and not else_reaches_merge:
                     self.builder.unreachable()
             else:
-                # No else branch - only check then branch
-                then_terminated = not then_block.is_terminated
-                if then_terminated:
-                    self.builder.unreachable()
+                # No else branch - code after if always reachable (condition could be false)
+                pass
         if isinstance(node, WhileStatement):
             func = self.builder.block.parent
 
@@ -2109,7 +2170,9 @@ class CodeGenerator:
             body_block = func.append_basic_block(name="body")
             exit_block = func.append_basic_block(name="exit")
 
-            self.builder.branch(loop_block)
+            # Only branch if current block is not already terminated
+            if not self.builder.block.is_terminated:
+                self.builder.branch(loop_block)
 
             self.builder.position_at_end(loop_block)
             condition = self.generate(node.condition)
@@ -2121,7 +2184,10 @@ class CodeGenerator:
             self.builder.position_at_end(body_block)
             for statement in node.then_body.statements:
                 self.generate(statement)
-            self.builder.branch(loop_block)
+            # After generating body, builder might be at a different block (from nested control flow)
+            # Branch back to loop from wherever we ended up, if not already terminated
+            if not self.builder.block.is_terminated:
+                self.builder.branch(loop_block)
 
             self.builder.position_at_end(exit_block)
         if isinstance(node, BoolLiteral):

@@ -42,17 +42,83 @@ if __name__ == "__main__":
         gen.classes = analyzer.classes
     gen.create_main_function()
     result = gen.generate(ast)
-    # Check if result is None or has void type (void calls return void-typed instruction)
-    if result is None or (hasattr(result, 'type') and result.type == llvmlite.ir.VoidType()):
-        result = llvmlite.ir.Constant(gen.int_type, 0)
-    gen.builder.ret(result)
+    # Only add return if block is not already terminated
+    if not gen.builder.block.is_terminated:
+        # Check if result is None or has void type (void calls return void-typed instruction)
+        if result is None or (hasattr(result, 'type') and result.type == llvmlite.ir.VoidType()):
+            result = llvmlite.ir.Constant(gen.int_type, 0)
+        gen.builder.ret(result)
 
 
     # Compile to machine code
     llvm_ir = str(gen.module)
     print(llvm_ir)
-    mod = llvm.parse_assembly(llvm_ir)
-    mod.verify()
+    
+    # Wrap LLVM parsing with detailed error information
+    try:
+        mod = llvm.parse_assembly(llvm_ir)
+        mod.verify()
+    except RuntimeError as e:
+        error_msg = str(e)
+        print(f"\n=== LLVM IR Parsing Error ===")
+        print(f"Error: {error_msg}")
+        
+        # Try to extract line number from error message
+        import re
+        line_match = re.search(r'<string>:(\d+):(\d+)', error_msg)
+        if line_match:
+            line_num = int(line_match.group(1))
+            print(f"\n=== Problem around line {line_num} of generated IR ===")
+            lines = llvm_ir.split('\n')
+            start = max(0, line_num - 5)
+            end = min(len(lines), line_num + 3)
+            print("Context:")
+            for i in range(start, end):
+                prefix = ">>> " if i == line_num - 1 else "    "
+                print(f"{prefix}{i+1}: {lines[i]}")
+        else:
+            # Try to find line with '}' that's not properly indented
+            print("\n=== Searching for potential issues ===")
+            lines = llvm_ir.split('\n')
+            for i, line in enumerate(lines):
+                if line.strip() == '}' and i > 0 and lines[i-1].strip() and not lines[i-1].strip().endswith(':'):
+                    print(f"Potential issue at line {i+1}:")
+                    for j in range(max(0, i-2), min(len(lines), i+3)):
+                        prefix = ">>> " if j == i else "    "
+                        print(f"{prefix}{j+1}: {lines[j]}")
+                    break
+        
+        # Show the last source position tracked during code generation
+        last_pos = getattr(gen, '_last_source_position', None)
+        if last_pos:
+            src_line, src_col, src_file = last_pos
+            print(f"\n=== Last source code position during code generation ===")
+            # Use the original source file if file_path not tracked
+            display_file = src_file if src_file else abs_source_file
+            if display_file:
+                print(f"File: {display_file}")
+            if src_line:
+                print(f"Line: {src_line}, Column: {src_col}")
+                # Show the actual source line if possible
+                if os.path.exists(display_file):
+                    try:
+                        with open(display_file, 'r') as sf:
+                            lines = sf.readlines()
+                            if 0 < src_line <= len(lines):
+                                source_line = lines[src_line-1].rstrip()
+                                print(f"Source: {source_line}")
+                                # Show pointer to column if available
+                                if src_col and src_col > 0 and len(source_line) >= src_col:
+                                    pointer = " " * (src_col - 1) + "^"
+                                    print(f"         {pointer}")
+                    except Exception as ex:
+                        print(f"  (could not read source: {ex})")
+            else:
+                print(f"Column: {src_col}" if src_col else "Position unknown")
+        
+        print("\n=== This is a compiler code generation bug ===")
+        print("Please report this issue with the source file and this error message.")
+        exit(1)
 
     # Create target machine
     target = llvm.Target.from_default_triple()

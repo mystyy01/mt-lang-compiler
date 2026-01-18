@@ -27,3 +27,10 @@ bool array_contains(string contain_str, array arr){
     }
     return false
 }
+array strarray(string text){
+    array items = []
+    for (i in range(text.length())){
+        string char = text[i]
+        print(char)
+    }
+}

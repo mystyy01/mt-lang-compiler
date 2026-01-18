@@ -1,11 +1,9 @@
 from libc use strlen, strcmp, strncmp, strcpy, malloc, strcat, strstr
+from stdlib.iter use strarray
 
 // Split a string by delimiter, returning an array of strings
 // Note: This is a compiler builtin - the implementation is in codegen.py
 // This declaration exists for type checking purposes
-array split(string text, string delimiter) {
-    return []
-}
 
 // Get the length of a string
 int length(string text) {
@@ -55,4 +53,21 @@ bool contains(string text, string substr) {
         return true
     }
     return false
+}
+
+bool isalnum(string text){
+    if (text.length() == 0){
+        return false
+    }
+    for (char in strarray(text)){
+        print(char)
+    }
+    return true
+}
+bool isdigit(string char){
+    // we need a try catch block to try int() it and except if theres a conversion error
+    return true
+}
+string lower(string text){
+    return text // need a lower function
 }
