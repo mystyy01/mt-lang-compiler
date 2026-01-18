@@ -1,5 +1,5 @@
 from stdlib.iter use range, array_contains
-from stdlib.strings use isdigit, isalnum, lower
+from stdlib.strings use isdigit, isalnum, lower, isalpha
 
 array KEYWORDS = ["from", "use", "as", "int", "float", "void", "array", "string", "bool", "if", "else", "for", "in", "set", "return", "typeof", "while", "bool", "true", "false", "func", "class", "new", "this", "static", "virtual", "arg"]
 array SINGLE_CHAR_SYMBOLS = ["(", ")", "[", "]", "{", "}", ",", ".", ":", "!", "+", "-", "*", "/", "=", ">", "<"]
@@ -34,10 +34,7 @@ class Tokenizer{
         return this.source[this.position]
     }
     void advance(int offset = 1){
-        print("OFFSET: " + str(offset))
         for (i in range(offset)){
-            print("POSITION:" + str(this.position))
-            print("LENGTH: " + str(this.source.length()))
             if (this.position < this.source.length()){
                 if (this.source[this.position] == "\n"){
                     set this.line = this.line + 1
@@ -55,7 +52,7 @@ class Tokenizer{
         }
         return false
     }
-    func peek_next(){
+    string peek_next(){
         if (this.position + 1 < this.source.length()){
             return this.source[this.position+1]
         }
@@ -80,7 +77,14 @@ class Tokenizer{
         int start_line = this.line
         int start_column = this.column
         while (this.is_at_end() != true && (isalnum(this.current_char()) || this.current_char() == "_")){
+            set word = word + this.current_char()
+            this.advance()
+        }
+        if (word in KEYWORDS){
             return new Token("KEYWORD", word, start_line, start_column)
+        }
+        else{
+            return new Token("NAME", word, start_line, start_column)
         }
     }
     Token read_number(){
@@ -165,7 +169,7 @@ class Tokenizer{
                     set new_str = new_str + "\r"
                 }
                 elif (escape_char == "\\"){
-                    set new_str = new_str + "\\n"
+                    set new_str = new_str + "\\"
                 }
                 elif (escape_char == '"'){
                     set new_str = new_str + '"'
@@ -231,52 +235,58 @@ class Tokenizer{
             }
             elif (this.current_char() == "-"){
                 // check negative number
+                string next_char
                 if (this.is_at_end() == false) {
-                    string next_char = this.peek_next()
+                    set next_char = this.peek_next()
                 }
                 else{
-                    string next_char = ""
+                    set next_char = null
+                }
+                if (next_char != null && isdigit(next_char)){
+                    this.advance()
+                    string number = "-"
+                    string token_type = ""
+                    int start_line = this.line
+                    int start_column = this.column
+                    Token num_token = this.read_number()
+                    set number = number + num_token.value
+                    
+                    if (num_token.type == "FLOAT_LITERAL"){
+                        set token_type = "FLOAT_LITERAL"
+                    }
+                    else{
+                        set token_type = "INTEGER_LITERAL"
+                    }
+                    Token token = new Token(token_type, number, start_line, start_column)
+                    tokens.append(token)
+                }
+                else{
+                    tokens.append(this.read_symbol())
                 }
             }
+            elif (this.current_char() in SINGLE_CHAR_SYMBOLS || (this.peek_next() != null && (this.current_char() + this.peek_next()) in DOUBLE_CHAR_SYMBOLS)){
+                Token symbol_token = this.read_symbol()
+                if (symbol_token != null){
+                    tokens.append(symbol_token)
+                }
+            }
+            elif (isalpha(this.current_char()) || this.current_char() == "_"){
+                tokens.append(this.read_word())
+            }
+            elif (isdigit(this.current_char())){
+                tokens.append(this.read_number())
+            }
+            else{
+                string char = ""
+                if (this.is_at_end() == false){
+                    set char = this.current_char()
+                }
+                else{
+                    set char = "EOF"
+                }
+                throw new CompilerError("Tokenizer failed at char " + str(this.position) + ": '" + char + "' (line " + str(this.line) + ", col " + str(this.column) + ")")
+            }
         }
+        return tokens
     }
 }
-// test all features of tokenizer (inline due to method call bug in functions)
-print("=== Testing Tokenizer ===")
-string test_source = "12345567658568"
-Tokenizer tokenizer = new Tokenizer(test_source, "test.mtc")
-
-// test current_char
-print("current_char: " + tokenizer.current_char())
-
-// test is_at_end
-print("is_at_end: " + str(tokenizer.is_at_end()))
-
-// test advance
-tokenizer.advance()
-print("after advance(1): " + tokenizer.current_char())
-
-// test advance with offset
-tokenizer.advance(2)
-print("after advance(2): " + tokenizer.current_char())
-
-// test peek_next
-if (tokenizer.peek_next()){
-    print("peek_next: " + tokenizer.peek_next())
-} else {
-    print("peek_next: null")
-}
-
-// test line and column tracking
-print("line: " + str(tokenizer.line))
-print("column: " + str(tokenizer.column))
-
-// test skip_whitespace
-print("position before skip_whitespace: " + str(tokenizer.position))
-tokenizer.skip_whitespace()
-print("position after skip_whitespace: " + str(tokenizer.position))
-print("char after skip_whitespace: " + tokenizer.current_char())
-
-print("=== Reading number ===")
-tokenizer.read_number()
-print("=== All tests complete ===")

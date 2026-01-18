@@ -317,7 +317,8 @@ class SemanticAnalyzer:
             if type_of_node != node.type and type_of_node != "any":
                 # Allow assignment if both are user-defined classes or if value is a new expression of the right type
                 # Also allow null to be assigned to string (null pointer is compatible with string*)
-                if not (isinstance(node.value, NewExpression) and node.value.class_name == node.type):
+                if not ((isinstance(node.value, NewExpression) and node.value.class_name == node.type) or
+                        (isinstance(node.value, CallExpression) and type_of_node == node.type)):
                     # null can be assigned to string (i8*)
                     if not (type_of_node == "null" and node.type == "string"):
                         pos_info = self.get_position_info(node)
@@ -329,7 +330,7 @@ class SemanticAnalyzer:
         self.symbol_table.declare(node.name, "function", node.return_type, node.parameters)
         self.symbol_table.enter_scope()
         for param in node.parameters:
-            self.symbol_table.declare(param.name, "parameter", "any")
+            self.symbol_table.declare(param.name, "parameter", param.param_type or "any")
         for statement in node.body.statements:
             self.analyze(statement)
         self.symbol_table.exit_scope()
@@ -469,23 +470,44 @@ class SemanticAnalyzer:
         print(f"module_name = {module_name}")
         # Try to load the module
         try:
-            # Check stdlib first
-            stdlib_path = os.path.join(os.path.dirname(__file__), "stdlib", module_name + ".mtc")
-            if os.path.exists(stdlib_path):
-                with open(stdlib_path, "r") as f:
+            # Check multiple paths for the module
+            module_source = None
+            module_file_path = None
+            
+            # 1. Check current directory
+            local_path = os.path.join(os.path.dirname(self.file_path), module_name + ".mtc")
+            if os.path.exists(local_path):
+                with open(local_path, "r") as f:
                     module_source = f.read()
-            else:
-                # Could check other paths, but for now just skip
+                module_file_path = local_path
+            
+            # 2. Check bootstrap directory if current file is in bootstrap
+            if module_source is None and "bootstrap" in self.file_path:
+                bootstrap_path = os.path.join(os.path.dirname(self.file_path), module_name + ".mtc")
+                if os.path.exists(bootstrap_path):
+                    with open(bootstrap_path, "r") as f:
+                        module_source = f.read()
+                    module_file_path = bootstrap_path
+            
+            # 3. Check stdlib directory
+            if module_source is None:
+                module_file_path = os.path.join(os.path.dirname(__file__), "stdlib", module_name + ".mtc")
+                if os.path.exists(module_file_path):
+                    with open(module_file_path, "r") as f:
+                        module_source = f.read()
+            
+            if module_source is None:
+                print(f"DEBUG: Could not find module '{module_name}'")
                 return
 
             # Parse and analyze the module
             from tokenizer import Tokenizer
             from parser import Parser
-            tokens = Tokenizer(module_source, stdlib_path).tokenize()
-            module_ast = Parser(tokens, stdlib_path).parse_program()
+            tokens = Tokenizer(module_source, module_file_path).tokenize()
+            module_ast = Parser(tokens, module_file_path).parse_program()
 
             # Analyze the module to find classes
-            module_analyzer = SemanticAnalyzer(stdlib_path)
+            module_analyzer = SemanticAnalyzer(module_file_path)
             module_analyzer.analyze(module_ast)
             
             # Update our class registry with the findings
@@ -674,13 +696,14 @@ class SemanticAnalyzer:
                                         pos_info = self.get_position_info(arg)
                                         self.add_error(f"Argument {i+1} of method '{method_name}' expects {expected_type}, got {arg_type}{pos_info}")
 
-                        return method_info["return_type"]
+                        # Return "any" for dynamic functions (return_type is None)
+                        return method_info["return_type"] or "any"
 
-            # Handle method calls on variables: str.length()
+            # Handle method calls on variables/parameters: str.length()
             if isinstance(node.callee.object, Identifier):
                 obj_name = node.callee.object.name
                 obj_symbol = self.symbol_table.lookup(obj_name)
-                if obj_symbol and obj_symbol["symbol_type"] == "variable":
+                if obj_symbol and obj_symbol["symbol_type"] in ("variable", "parameter"):
                     obj_type = obj_symbol["data_type"]
 
                     # String methods (built into the compiler)
@@ -716,8 +739,9 @@ class SemanticAnalyzer:
                                         if arg_type != expected_type and arg_type != "any":
                                             pos_info = self.get_position_info(arg)
                                             self.add_error(f"Argument {i+1} of method '{method_name}' expects {expected_type}, got {arg_type}{pos_info}")
-                            
-                            return method_info["return_type"]
+
+                            # Return "any" for dynamic functions (return_type is None)
+                            return method_info["return_type"] or "any"
 
         return "unknown"  # We don't know the return type
     def analyze_number_literal(self, node):

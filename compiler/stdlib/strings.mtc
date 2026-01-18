@@ -155,3 +155,29 @@ bool isdigit(string char){
 string lower(string text){
     return text // need a lower function
 }
+bool isalpha(string text){
+    if (text.length() == 0){
+        return false
+    }
+
+    int i = 0
+    while (i < text.length()){
+        string char = text[i]
+        int code = char_code(char)
+
+        // A-Z
+        if (code >= 65 && code <= 90){
+            set i = i + 1
+        }
+
+        // a-z
+        if (code >= 97 && code <= 122){
+            set i = i + 1
+        }
+
+        // anything else = not alpha
+        return false
+    }
+
+    return true
+}

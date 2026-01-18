@@ -247,6 +247,7 @@ class CodeGenerator:
 
     def resolve_module_path(self, module_path):
         """Resolve module path to actual file path"""
+        print(f"DEBUG: resolve_module_path called with: {type(module_path).__name__} = {module_path}")
         if isinstance(module_path, MemberExpression):
             # Handle dotted paths like stdlib.math or mypackage.utils
             parts = []
@@ -258,6 +259,8 @@ class CodeGenerator:
                 parts.append(node.name)
             parts.reverse()
 
+            print(f"DEBUG: parts = {parts}")
+            
             # Check if first part is "stdlib" - use stdlib path
             if parts[0] == "stdlib":
                 parts = parts[1:]  # Remove "stdlib" prefix
@@ -268,13 +271,23 @@ class CodeGenerator:
                 rel_path = os.path.join(*parts[:-1], parts[-1] + ".mtc") if len(parts) > 1 else parts[0] + ".mtc"
                 file_path = os.path.join(self.source_dir, rel_path)
         elif isinstance(module_path, Identifier):
-            # Simple name like "math" - check local only
+            # Simple name like "math" - check local first, then stdlib
+            print(f"DEBUG: Simple identifier: {module_path.name}")
             rel_path = module_path.name + ".mtc"
+            # Check local source dir first
             file_path = os.path.join(self.source_dir, rel_path)
+            if not os.path.exists(file_path):
+                # Check stdlib
+                stdlib_file_path = os.path.join(self.stdlib_path, rel_path)
+                if os.path.exists(stdlib_file_path):
+                    file_path = stdlib_file_path
+                else:
+                    file_path = os.path.join(self.source_dir, rel_path)  # Keep original for error
         else:
             rel_path = str(module_path) + ".mtc"
             file_path = os.path.join(self.source_dir, rel_path)
 
+        print(f"DEBUG: file_path = {file_path}")
         if os.path.exists(file_path):
             return file_path
 
@@ -318,11 +331,20 @@ class CodeGenerator:
 
         # Track functions before and after to know what was added
         before_funcs = set(self.functions.keys())
+        before_classes = set(self.classes.keys())
+        before_vars = set(self.variables.keys())
+        
+        # Save and set in_main_function to True so module-level variables are global
+        old_in_main_function = self.in_main_function
+        self.in_main_function = True
         
         # Generate code for all statements in module
         for statement in ast.statements:
             if isinstance(statement, LibcImportStatement):
                 # Process libc imports first to declare functions
+                self.generate(statement)
+            elif isinstance(statement, FromImportStatement):
+                # Process imports to declare functions like range, array_contains, etc.
                 self.generate(statement)
             elif isinstance(statement, (FunctionDeclaration, DynamicFunctionDeclaration)):
                 self.generate(statement)
@@ -330,11 +352,25 @@ class CodeGenerator:
                 # Generate LLVM functions for class methods
                 for method in statement.methods:
                     self.generate_class_method(statement.name, method)
+            elif isinstance(statement, VariableDeclaration):
+                # Generate code for module-level variable declarations
+                self.generate(statement)
+            elif isinstance(statement, SimpleImportStatement):
+                # Load and generate code for the entire module
+                self.generate(statement)
+        
+        # Restore in_main_function
+        self.in_main_function = old_in_main_function
         
         after_funcs = set(self.functions.keys())
-        new_funcs = after_funcs - before_funcs
+        after_classes = set(self.classes.keys())
+        after_vars = set(self.variables.keys())
         
-        # Register all new functions under the module name
+        new_funcs = after_funcs - before_funcs
+        new_classes = after_classes - before_classes
+        new_vars = after_vars - before_vars
+        
+        # Register all new items under the module name
         if isinstance(module_path, MemberExpression):
             module_name = f"{module_path.object.name}.{module_path.property}"
         else:
@@ -345,6 +381,10 @@ class CodeGenerator:
         self.modules[module_name]['_file_path'] = file_path  # Track file path
         for func in new_funcs:
             self.modules[module_name][func] = self.functions[func]
+        for cls in new_classes:
+            self.modules[module_name][cls] = self.classes[cls]
+        for var in new_vars:
+            self.modules[module_name][var] = self.variables[var]
         
         return module_name
 
@@ -871,6 +911,13 @@ class CodeGenerator:
             typed_ptr = self.builder.bitcast(current_data, self.int_type.as_pointer())
 
         elem_ptr = self.builder.gep(typed_ptr, [length], name="new_elem_ptr")
+        
+        # For class types (stored as i8*), bitcast the value to i8* before storing
+        # Class instances are stored as struct pointers, so check if value is a pointer to struct
+        value_ptr_type = getattr(value.type, 'pointee', None)
+        if value_ptr_type and hasattr(value_ptr_type, 'elements'):
+            value = self.builder.bitcast(value, self.i8_ptr_type, name="value_as_void_ptr")
+        
         self.builder.store(value, elem_ptr)
 
         # Increment length
@@ -1555,8 +1602,12 @@ class CodeGenerator:
                     # Get field index
                     field_idx = self.get_field_index(class_name, node.property)
                     
+                    # Cast obj_ptr to struct pointer type for GEP
+                    struct_type = self.classes[class_name]['llvm_struct']
+                    obj_struct_ptr = self.builder.bitcast(obj_ptr, struct_type.as_pointer(), name=f"{obj_name}_struct")
+                    
                     # Access field
-                    field_ptr = self.builder.gep(obj_ptr, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"{node.property}_field")
+                    field_ptr = self.builder.gep(obj_struct_ptr, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"{node.property}_field")
                     return self.builder.load(field_ptr, name=node.property)
                 else:
                     # Try to handle as array method if it's not a class instance

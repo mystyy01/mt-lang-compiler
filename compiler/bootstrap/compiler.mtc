@@ -1,0 +1,10 @@
+from tokenizer use Tokenizer
+from stdlib.io use File
+
+File source_file = new File("./tokenizer.mtc", "r")
+string source = source_file.read()
+
+Tokenizer tokens_class = new Tokenizer(source, "fp")
+array tokens = tokens_class.tokenize()
+print(tokens.length())
+print(str(tokens))
