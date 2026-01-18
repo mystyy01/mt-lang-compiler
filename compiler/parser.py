@@ -301,6 +301,9 @@ class Parser:
                 return self.parse_expression_statement()
             elif self.current_token().type == "NAME" or (self.peek_token() and self.peek_token().type == "NAME"):
                 return self.parse_declaration()
+            elif self.peek_token() and self.peek_token().type == "SYMBOL" and self.peek_token().value == "<":
+                # Handle array<Type> syntax - this is a typed array declaration
+                return self.parse_declaration()
             else:
                 # Fallback: parse as expression
                 return self.parse_expression_statement()
@@ -340,16 +343,28 @@ class Parser:
         self.expect("SYMBOL", "{")
         statements = []
         while not self.match("SYMBOL", "}"):
+            if self.is_at_end():
+                raise CompilerError(f"Unterminated block - expected '}}' but reached end of file", "ERROR", self.file_path)
+            start_pos = self.position
             statements.append(self.parse_statement())
+            # Check if parser made progress - if not, we're stuck on an unrecognized token
+            if self.position == start_pos:
+                token = self.current_token()
+                raise CompilerError(f"Unexpected token '{token.value}' at line {token.line}, column {token.column}", "ERROR", self.file_path)
         self.expect("SYMBOL", "}")
         return Block(statements)
     def parse_if_statement(self):
-        self.advance()
+        self.advance()  # Move past 'if' or 'elif'
         self.expect("SYMBOL", "(")
         condition = self.parse_expression()
         self.expect("SYMBOL", ")")
         body = self.parse_block()
-        if self.match("KEYWORD", "else"):
+        if self.match("KEYWORD", "elif"):
+            # elif is syntactic sugar for else { if ... }
+            # Recursively parse the elif as a nested if statement
+            nested_if = self.parse_if_statement()
+            else_body = Block([nested_if])
+        elif self.match("KEYWORD", "else"):
             self.advance()
             else_body = self.parse_block()
         else:
@@ -432,10 +447,15 @@ class Parser:
         start_line = self.current_token().line
         start_column = self.current_token().column
         self.expect("KEYWORD", "throw")
-        
-        # Parse the expression to throw
-        expression = self.parse_expression()
-        
+
+        # Check if there's an expression to throw or if it's a standalone throw
+        if self.match("SYMBOL", "}") or self.is_at_end() or self.match("KEYWORD", "catch") or self.match("KEYWORD", "else"):
+            # Standalone throw - no expression
+            expression = None
+        else:
+            # Parse the expression to throw
+            expression = self.parse_expression()
+
         return ThrowStatement(expression, start_line, start_column)
     
     def parse_break_statement(self):
@@ -489,19 +509,38 @@ class Parser:
         body = Block(statements)
         return DynamicFunctionDeclaration(func_name, params, body)
     
+    def parse_type_with_element(self):
+        """Parse type that may include element type: array<int>, array<Token>"""
+        base_type = self.current_token().value
+        self.advance()
+
+        element_type = None
+        if base_type == "array" and self.match("SYMBOL", "<"):
+            self.advance()  # consume '<'
+            if self.current_token().type == "KEYWORD":
+                element_type = self.current_token().value
+            elif self.current_token().type == "NAME":
+                element_type = self.current_token().value
+            else:
+                current = self.current_token()
+                pos_info = self.get_position_info(current)
+                raise CompilerError(f"Expected type name after '<'{pos_info} but found '{current.value}'", "ERROR", self.file_path)
+            self.advance()
+            self.expect("SYMBOL", ">")
+
+        return base_type, element_type
+
     def parse_parameter(self):
-        param_type = self.current_token().value
-        self.expect("KEYWORD")
+        base_type, element_type = self.parse_type_with_element()
         param_name = self.current_token().value
         self.expect("NAME")
         default_value = None
         if self.match("SYMBOL", "="):
             self.advance()
             default_value = self.parse_expression()
-        return Parameter(param_name, param_type, default_value)
+        return Parameter(param_name, base_type, default_value, element_type)
     def parse_variable_declaration(self):
-        var_type = self.current_token().value
-        self.advance()
+        base_type, element_type = self.parse_type_with_element()
         var_name = self.current_token().value
         self.expect("NAME")
         if self.match("SYMBOL", "="):
@@ -509,9 +548,15 @@ class Parser:
             value = self.parse_expression()
         else:
             value = None
-        return VariableDeclaration(var_type, var_name, value)
+        return VariableDeclaration(base_type, var_name, value, element_type)
     def parse_declaration(self):
-        next_token = self.peek_token(2)
+        # Handle array<Type> syntax - need to look past <Type> to find the name
+        offset = 1  # Default: type name
+        if self.current_token().value == "array" and self.peek_token(1) and self.peek_token(1).value == "<":
+            # array<Type> name - skip past < Type >
+            offset = 4  # array < Type > name
+
+        next_token = self.peek_token(offset + 1)
         if next_token:
             if next_token.value == "(" and next_token.type == "SYMBOL":
                 return self.parse_function_declaration()
@@ -594,6 +639,13 @@ class Parser:
                 if token and token.type == "KEYWORD" and token.value in ["int", "float", "void", "string", "bool", "array"]:
                     type_match = True
                     peek_pos += 1  # skip type
+                    # Handle array<Type> syntax
+                    if token.value == "array" and peek_pos < len(self.tokens) and self.tokens[peek_pos].type == "SYMBOL" and self.tokens[peek_pos].value == "<":
+                        peek_pos += 1  # skip <
+                        if peek_pos < len(self.tokens):
+                            peek_pos += 1  # skip element type
+                        if peek_pos < len(self.tokens) and self.tokens[peek_pos].type == "SYMBOL" and self.tokens[peek_pos].value == ">":
+                            peek_pos += 1  # skip >
                 elif token and token.type == "NAME":
                     # User-defined type (class name)
                     type_match = True
@@ -634,8 +686,7 @@ class Parser:
             self.advance()
             is_constructor_arg = True
 
-        field_type = self.current_token().value
-        self.advance()
+        field_type, element_type = self.parse_type_with_element()
         field_name = self.current_token().value
         self.expect("NAME")
 
@@ -645,7 +696,7 @@ class Parser:
             self.advance()
             initializer = self.parse_expression()
 
-        return FieldDeclaration(field_name, field_type, initializer=initializer, is_constructor_arg=is_constructor_arg)
+        return FieldDeclaration(field_name, field_type, initializer=initializer, is_constructor_arg=is_constructor_arg, element_type=element_type)
 
     def parse_method_declaration(self):
         is_static = False

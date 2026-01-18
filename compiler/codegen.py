@@ -157,6 +157,21 @@ class CodeGenerator:
         else:
             # For user-defined types (classes), use pointer to byte
             return self.i8_ptr_type
+
+    def get_element_llvm_type(self, element_type_str):
+        """Get LLVM type and size for array element types"""
+        if element_type_str == "int":
+            return self.int_type, 4
+        elif element_type_str == "float":
+            return self.float_type, 8
+        elif element_type_str == "string":
+            return self.i8_ptr_type, 8
+        elif element_type_str == "bool":
+            return self.bool_type, 1
+        else:
+            # For user-defined class types (or unknown types), use pointer
+            # Classes are stored as i8* pointers
+            return self.i8_ptr_type, 8
     
     def get_field_index(self, class_name, field_name):
         """Get the field index for a given class and field name"""
@@ -1146,16 +1161,46 @@ class CodeGenerator:
 
             # Initialize constructor arguments
             arg_fields = [f for f in ordered_fields if f['is_constructor_arg']]
-            if len(node.arguments) != len(arg_fields):
-                raise Exception(f"Wrong number of arguments for {class_name} constructor: expected {len(arg_fields)}, got {len(node.arguments)}")
 
+            # Check argument count - allow fewer args if remaining have defaults
+            if len(node.arguments) > len(arg_fields):
+                raise Exception(f"Too many arguments for {class_name} constructor: expected at most {len(arg_fields)}, got {len(node.arguments)}")
+
+            # Find required args (those without initializers)
+            required_count = 0
+            for f in arg_fields:
+                if f.get('initializer') is None:
+                    required_count += 1
+                else:
+                    break  # Once we hit a default, all following should have defaults
+
+            if len(node.arguments) < required_count:
+                raise Exception(f"Not enough arguments for {class_name} constructor: expected at least {required_count}, got {len(node.arguments)}")
+
+            # Initialize provided arguments
             for i, arg in enumerate(node.arguments):
                 value = self.generate(arg)
                 field_ptr = self.builder.gep(obj_ptr, [self.create_int_constant(0), self.create_int_constant(i)], name=f"{arg_fields[i]['name']}_ptr")
                 self.builder.store(value, field_ptr)
 
-            # Initialize regular fields with defaults if any (for now, assume no defaults)
-            # TODO: handle initializers
+            # Initialize remaining constructor args with defaults
+            for i in range(len(node.arguments), len(arg_fields)):
+                field = arg_fields[i]
+                if field.get('initializer') is not None:
+                    value = self.generate(field['initializer'])
+                    field_ptr = self.builder.gep(obj_ptr, [self.create_int_constant(0), self.create_int_constant(i)], name=f"{field['name']}_ptr")
+                    self.builder.store(value, field_ptr)
+                else:
+                    raise Exception(f"Missing argument for {class_name} constructor: '{field['name']}' has no default value")
+
+            # Initialize regular fields with defaults if any
+            regular_fields = [f for f in ordered_fields if not f['is_constructor_arg']]
+            for i, field in enumerate(regular_fields):
+                field_idx = len(arg_fields) + i
+                if field.get('initializer') is not None:
+                    value = self.generate(field['initializer'])
+                    field_ptr = self.builder.gep(obj_ptr, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"{field['name']}_ptr")
+                    self.builder.store(value, field_ptr)
 
             return obj_ptr
         if isinstance(node, BinaryExpression):
@@ -1292,10 +1337,15 @@ class CodeGenerator:
 
             if node.type == "array":
                 # Arrays are special - we store the pointer directly
+                # Check for explicit element type from array<Type> syntax
+                explicit_element_type = getattr(node, 'element_type', None)
+
                 if isinstance(node.value, ArrayLiteral):
                     elements = node.value.elements
-                    # Determine element type from first element
-                    if len(elements) > 0 and isinstance(elements[0], StringLiteral):
+                    # Determine element type: explicit type > inferred from elements > default int
+                    if explicit_element_type:
+                        elem_type, elem_size = self.get_element_llvm_type(explicit_element_type)
+                    elif len(elements) > 0 and isinstance(elements[0], StringLiteral):
                         elem_type = self.i8_ptr_type
                         elem_size = 8
                     else:
@@ -1331,10 +1381,13 @@ class CodeGenerator:
                     self.variables[node.name] = array_ptr  # Store pointer directly
                     self.array_lengths[node.name] = (elem_type, elem_size)
                 elif node.value is None:
-                    # Initialize empty array - default to int elements
+                    # Initialize empty array - use explicit element type or default to int
                     # Always use on_heap=True to ensure array survives function returns
-                    elem_type = self.int_type
-                    elem_size = 4
+                    if explicit_element_type:
+                        elem_type, elem_size = self.get_element_llvm_type(explicit_element_type)
+                    else:
+                        elem_type = self.int_type
+                        elem_size = 4
                     array_ptr, _, _ = self.create_dynamic_array([], elem_type, on_heap=True)
 
                     # If in main function, create a global variable
@@ -1362,6 +1415,12 @@ class CodeGenerator:
                         self.global_arrays[node.name] = global_var
 
                     self.variables[node.name] = array_ptr
+
+                    # Use explicit element type if provided
+                    if explicit_element_type:
+                        elem_type, elem_size = self.get_element_llvm_type(explicit_element_type)
+                        self.array_lengths[node.name] = (elem_type, elem_size)
+                        return None
 
                     # Determine element type from context
                     if isinstance(node.value, CallExpression):
@@ -1463,6 +1522,9 @@ class CodeGenerator:
             # Special handling for arrays - return the pointer directly
             if var_type == self.dyn_array_ptr_type:
                 return storage  # Return the pointer directly, no load needed
+            # Special handling for class instances - return the pointer directly
+            elif node.name in self.variable_classes:
+                return storage  # Return the class instance pointer directly
             else:
                 # For non-array types, load from the allocated space
                 return self.builder.load(storage, name=node.name)
@@ -2339,6 +2401,10 @@ class CodeGenerator:
             body_block = func.append_basic_block(name="body")
             exit_block = func.append_basic_block(name="exit")
 
+            # Save and set loop exit block for break statements
+            old_exit_block = getattr(self, 'current_loop_exit_block', None)
+            self.current_loop_exit_block = exit_block
+
             # Only branch if current block is not already terminated
             if not self.builder.block.is_terminated:
                 self.builder.branch(loop_block)
@@ -2357,6 +2423,12 @@ class CodeGenerator:
             # Branch back to loop from wherever we ended up, if not already terminated
             if not self.builder.block.is_terminated:
                 self.builder.branch(loop_block)
+
+            # Restore previous loop exit block
+            if old_exit_block is not None:
+                self.current_loop_exit_block = old_exit_block
+            else:
+                self.current_loop_exit_block = None
 
             self.builder.position_at_end(exit_block)
         if isinstance(node, BoolLiteral):
@@ -2714,19 +2786,65 @@ class CodeGenerator:
     
     def generate_throw_statement(self, node):
         """Generate code for throw statement"""
-        # For now, print error message and exit
-        # A full implementation would use setjmp/longjmp for exception handling
-        
-        # Generate the exception expression
-        exc_obj = self.generate(node.expression)
-        
-        # For now, just print a generic error and exit
-        # The exception's message field should contain the error details
-        error_msg = self.create_string_constant("Uncaught exception\n")
-        self.builder.call(self.printf, [error_msg], name="print_uncaught")
-        self.builder.call(self.exit, [llvmlite.ir.Constant(self.int_type, 1)], name="exit_on_exception")
-        self.builder.unreachable()
-        
+        # If no expression, print generic error and exit
+        if node.expression is None:
+            error_msg = self.create_string_constant("Error thrown, exiting.\n")
+            self.builder.call(self.printf, [error_msg], name="print_error")
+            self.builder.call(self.exit, [llvmlite.ir.Constant(self.int_type, 1)], name="exit_on_throw")
+            self.builder.unreachable()
+            return None
+
+        # Determine the class name and get the exception object pointer
+        class_name = None
+        exc_obj_ptr = None
+
+        if isinstance(node.expression, NewExpression):
+            class_name = node.expression.class_name
+            # NewExpression returns a pointer to the allocated struct
+            exc_obj_ptr = self.generate(node.expression)
+        elif isinstance(node.expression, Identifier):
+            # It's a variable - look up its class type and get the pointer
+            var_name = node.expression.name
+            if var_name in self.variable_classes:
+                class_name = self.variable_classes[var_name]
+            if var_name in self.variables:
+                # Get the pointer directly, don't load the value
+                exc_obj_ptr = self.variables[var_name]
+
+        if class_name is None or exc_obj_ptr is None:
+            # Fallback: just print generic error and exit
+            error_msg = self.create_string_constant("Uncaught exception\n")
+            self.builder.call(self.printf, [error_msg], name="print_uncaught")
+            self.builder.call(self.exit, [llvmlite.ir.Constant(self.int_type, 1)], name="exit_on_exception")
+            self.builder.unreachable()
+            return None
+
+        # Look for the raise() method in the class hierarchy
+        raise_func_name = f"{class_name}_raise"
+        current_class = class_name
+        while raise_func_name not in self.functions and current_class in self.classes:
+            parent_class = self.classes[current_class].get('parent_class')
+            if parent_class:
+                current_class = parent_class
+                raise_func_name = f"{current_class}_raise"
+            else:
+                break
+
+        if raise_func_name in self.functions:
+            # Call the raise() method with the exception object pointer as 'this'
+            raise_func = self.functions[raise_func_name]
+            struct_type = self.classes[current_class]['llvm_struct']
+            exc_struct_ptr = self.builder.bitcast(exc_obj_ptr, struct_type.as_pointer(), name="exc_struct")
+            self.builder.call(raise_func, [exc_struct_ptr], name="call_raise")
+            # After raise() returns (it might not if it calls exit), add unreachable
+            self.builder.unreachable()
+        else:
+            # No raise method found - print generic error and exit
+            error_msg = self.create_string_constant("Uncaught exception (no raise method)\n")
+            self.builder.call(self.printf, [error_msg], name="print_uncaught")
+            self.builder.call(self.exit, [llvmlite.ir.Constant(self.int_type, 1)], name="exit_on_exception")
+            self.builder.unreachable()
+
         return None
         
     def generate_in_expression(self, node):

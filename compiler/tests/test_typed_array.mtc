@@ -1,0 +1,29 @@
+// Test typed array syntax: array<ElementType>
+
+// Test 1: Typed array with int elements
+array<int> nums = [1, 2, 3]
+print(nums[0])
+print(nums[1])
+print(nums[2])
+
+// Test 2: Empty typed array of strings
+array<string> names = []
+names.append("hello")
+names.append("world")
+print(names[0])
+print(names[1])
+
+// Test 3: Typed array with explicit string type
+array<string> words = ["foo", "bar"]
+print(words[0])
+
+// Test 4: Untyped array (backward compatibility - should default to int)
+array numbers = [10, 20, 30]
+print(numbers[0])
+
+// Test 5: Empty untyped array (backward compatibility - should default to int)
+array empty = []
+empty.append(42)
+print(empty[0])
+
+print("All typed array tests passed!")

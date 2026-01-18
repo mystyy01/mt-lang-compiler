@@ -1,6 +1,12 @@
 #!/bin/bash
 
-COMPILER_DIR="/home/juxtaa/coding/mt-lang/compiler"
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+COMPILER_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
 source "$COMPILER_DIR/venv/bin/activate"
 python "$COMPILER_DIR/compiler.py" "$@"

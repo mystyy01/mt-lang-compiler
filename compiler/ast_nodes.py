@@ -47,14 +47,16 @@ class ArrayLiteral:
     def __repr__(self):
         return f"ArrayLiteral({self.elements})"
 class VariableDeclaration:
-    def __init__(self, var_type, name, value = None, line=None, column=None):
+    def __init__(self, var_type, name, value = None, element_type=None, line=None, column=None):
         self.type = var_type
         self.name = name
         self.value = value
+        self.element_type = element_type  # For typed arrays: array<int>, array<Token>, etc.
         self.line = line
         self.column = column
     def __repr__(self):
-        return f"VariableDeclaration({self.type}, {self.name}, {self.value})"
+        elem_str = f"<{self.element_type}>" if self.element_type else ""
+        return f"VariableDeclaration({self.type}{elem_str}, {self.name}, {self.value})"
 class SetStatement:
     def __init__(self, target, value, line=None, column=None):
         self.target = target
@@ -173,12 +175,14 @@ class TypeLiteral:
     def __repr__(self):
         return f"TypeLiteral({self.name})"
 class Parameter:
-    def __init__(self, name, param_type=None, default_value=None):
+    def __init__(self, name, param_type=None, default_value=None, element_type=None):
         self.name = name
         self.param_type = param_type  # Type annotation like "array", "int", etc.
         self.default_value = default_value
+        self.element_type = element_type  # For typed arrays: array<int>, array<Token>, etc.
     def __repr__(self):
-        type_info = f": {self.param_type}" if self.param_type else ""
+        elem_str = f"<{self.element_type}>" if self.element_type else ""
+        type_info = f": {self.param_type}{elem_str}" if self.param_type else ""
         default_info = f" = {self.default_value}" if self.default_value else ""
         return f"Parameter({self.name}{type_info}{default_info})"
 class BoolLiteral:
@@ -209,17 +213,19 @@ class ClassDeclaration:
         return f"ClassDeclaration({self.name}{inherits_str}, {len(self.constructor_args)} args, {len(self.regular_fields)} fields, {len(self.methods)} methods)"
 
 class FieldDeclaration:
-    def __init__(self, name, field_type, initializer=None, is_constructor_arg=False, line=None, column=None):
+    def __init__(self, name, field_type, initializer=None, is_constructor_arg=False, element_type=None, line=None, column=None):
         self.name = name
         self.type = field_type
         self.initializer = initializer
         self.is_constructor_arg = is_constructor_arg
+        self.element_type = element_type  # For typed arrays: array<int>, array<Token>, etc.
         self.line = line
         self.column = column
     def __repr__(self):
         arg_str = " arg" if self.is_constructor_arg else ""
+        elem_str = f"<{self.element_type}>" if self.element_type else ""
         init_str = f" = {self.initializer}" if self.initializer else ""
-        return f"FieldDeclaration({self.name}: {self.type}{arg_str}{init_str})"
+        return f"FieldDeclaration({self.name}: {self.type}{elem_str}{arg_str}{init_str})"
 
 class MethodDeclaration:
     def __init__(self, name, params=None, return_type=None, body=None, is_virtual=False, is_static=False, line=None, column=None):

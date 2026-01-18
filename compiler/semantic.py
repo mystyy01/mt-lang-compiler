@@ -10,9 +10,9 @@ class SymbolTable:
         self.scopes.append({})
     def exit_scope(self):
         self.scopes.pop()
-    def declare(self, name, symbol_type, data_type, parameters=None):
+    def declare(self, name, symbol_type, data_type, parameters=None, element_type=None):
         current_scope = self.scopes[-1]
-        current_scope[name] = {"symbol_type": symbol_type, "data_type": data_type, "parameters": parameters}
+        current_scope[name] = {"symbol_type": symbol_type, "data_type": data_type, "parameters": parameters, "element_type": element_type}
     def lookup(self, name):
         for scope in reversed(self.scopes):
             if name in scope:
@@ -157,7 +157,8 @@ class SemanticAnalyzer:
             fields_info.append({
                 'name': field.name,
                 'type': field.type,
-                'is_constructor_arg': field.is_constructor_arg
+                'is_constructor_arg': field.is_constructor_arg,
+                'initializer': field.initializer
             })
         methods_info = {}
         for method in node.methods:
@@ -169,7 +170,8 @@ class SemanticAnalyzer:
             "symbol_type": "class",
             "data_type": node.name,
             "fields": fields_info,
-            "methods": methods_info
+            "methods": methods_info,
+            "parent_class": node.inherits_from
         }
 
         # Enter class scope for analyzing fields and methods
@@ -245,20 +247,24 @@ class SemanticAnalyzer:
         obj_type = self.analyze(node.object)
         if not obj_type:
             return None
-        
+
         # Analyze the index - should be int
         index_type = self.analyze(node.index)
         if index_type != "int":
             pos_info = self.get_position_info(node)
             self.add_error(f"Array/string index must be an integer{pos_info}")
             return None
-        
+
         # Determine return type based on object type
         if obj_type == "string":
             return "string"  # Single character as string
         elif obj_type == "array":
-            # For arrays, we need to know the element type
-            # For now, assume int elements (can be extended later)
+            # Check if the array has a declared element type
+            if isinstance(node.object, Identifier):
+                symbol = self.symbol_table.lookup(node.object.name)
+                if symbol and symbol.get("element_type"):
+                    return symbol["element_type"]
+            # Default to int for untyped arrays
             return "int"
         else:
             pos_info = self.get_position_info(node)
@@ -297,6 +303,14 @@ class SemanticAnalyzer:
             pos_info = self.get_position_info(node)
             self.add_error(f"Unknown type '{node.type}'{pos_info}")
 
+        # Validate element_type for typed arrays
+        element_type = getattr(node, 'element_type', None)
+        if element_type:
+            elem_type_symbol = self.symbol_table.lookup(element_type)
+            if not elem_type_symbol and element_type not in ["int", "float", "string", "bool"]:
+                pos_info = self.get_position_info(node)
+                self.add_error(f"Unknown element type '{element_type}'{pos_info}")
+
         if node.value:
             type_of_node = self.analyze(node.value)
             # "any" is a wildcard that matches any type
@@ -310,7 +324,7 @@ class SemanticAnalyzer:
                         print(f"DEBUG: Assignment type mismatch: {type_of_node} to {node.type}")
                         print(f"DEBUG: Assignment node: {node}")
                         self.add_error(f"Type mismatch{pos_info}. Cannot assign type {type_of_node} to {node.type}")
-        self.symbol_table.declare(node.name, "variable", node.type)
+        self.symbol_table.declare(node.name, "variable", node.type, element_type=element_type)
     def analyze_function_declaration(self, node: FunctionDeclaration):
         self.symbol_table.declare(node.name, "function", node.return_type, node.parameters)
         self.symbol_table.enter_scope()
@@ -833,32 +847,42 @@ class SemanticAnalyzer:
     def analyze_throw_statement(self, node):
         """Analyze a throw statement"""
         print(f"DEBUG: Analyzing ThrowStatement")
-        
+
+        # If no expression, it's a standalone throw - just exits with generic error
+        if node.expression is None:
+            return None
+
         # Analyze the expression being thrown
         expr_type = self.analyze(node.expression)
-        
+
         # Verify it's an Exception type
         if expr_type is None or expr_type == "unknown":
             pos_info = self.get_position_info(node)
             self.add_error(f"Cannot determine type of expression being thrown{pos_info}")
             return None
-        
+
         # Check if it's an Exception or subclass
         if expr_type != "Exception":
-            # Check if it's a subclass of Exception
-            exc_class = self.symbol_table.lookup(expr_type)
-            if exc_class and exc_class.get("symbol_type") == "class":
-                # Check inheritance from Exception
-                # For now, allow any class to be thrown
-                pass
-            else:
-                # Try to look up in exception registry
-                if hasattr(self, 'exception_types'):
-                    if expr_type not in self.exception_types:
-                        pos_info = self.get_position_info(node)
-                        self.add_error(f"Cannot throw type '{expr_type}' - must be an Exception{pos_info}")
-                else:
+            # Check if it's a subclass of Exception using self.classes
+            exc_class_info = self.classes.get(expr_type)
+            if exc_class_info:
+                # Check if it extends Exception (directly or indirectly)
+                parent = exc_class_info.get("parent_class")
+                extends_exception = False
+                while parent:
+                    if parent == "Exception":
+                        extends_exception = True
+                        break
+                    parent_info = self.classes.get(parent)
+                    if parent_info:
+                        parent = parent_info.get("parent_class")
+                    else:
+                        break
+                if not extends_exception:
                     pos_info = self.get_position_info(node)
-                    self.add_error(f"Cannot throw type '{expr_type}' - must be an Exception{pos_info}")
-        
+                    self.add_error(f"Cannot throw type '{expr_type}' - must extend Exception{pos_info}")
+            else:
+                pos_info = self.get_position_info(node)
+                self.add_error(f"Cannot throw type '{expr_type}' - must be an Exception{pos_info}")
+
         return None

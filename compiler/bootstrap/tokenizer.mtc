@@ -15,6 +15,8 @@ class Token{
 }
 class CompilerError extends Exception{ // doesnt work at all
     arg string message
+    arg string severity = ""
+    arg string file_path = ""
     // print("MESSAGE:\n" + this.message + "\nSEVERITY:\n" + this.severity + "\nAT:\n" + this.file_path)
 }
 class Tokenizer{
@@ -104,7 +106,7 @@ class Tokenizer{
                 }
             }else{
                 CompilerError error = new CompilerError("Invalid float literal at line " + str(start_line) + ": expected digits after decimal point", "ERROR", this.file_path)
-                error.raise()
+                throw error
             }
         }
         if (this.is_at_end() == false && lower(this.current_char()) == "e"){
@@ -124,7 +126,7 @@ class Tokenizer{
             }
             else{
                 CompilerError error = new CompilerError("Invalid float literal at line " + str(start_line) + ": expected digits in exponent", "ERROR", this.file_path)
-                error.raise()
+                throw error
             }
         }
         bool is_float = has_decimal || has_exponent
@@ -156,22 +158,22 @@ class Tokenizer{
                 if (escape_char == "n"){
                     set new_str = new_str + "\n"
                 }
-                if (escape_char == "t"){
+                elif (escape_char == "t"){
                     set new_str = new_str + "\t"
                 }
-                if (escape_char == "r"){
+                elif (escape_char == "r"){
                     set new_str = new_str + "\r"
                 }
-                if (escape_char == "\\"){
+                elif (escape_char == "\\"){
                     set new_str = new_str + "\\n"
                 }
-                if (escape_char == '"'){
+                elif (escape_char == '"'){
                     set new_str = new_str + '"'
                 }
-                if (escape_char == "'"){
+                elif (escape_char == "'"){
                     set new_str = new_str + "'"
                 }
-                if (escape_char == "0"){
+                elif (escape_char == "0"){
                     set new_str = new_str + "\0"
                 }
                 else{
@@ -186,6 +188,56 @@ class Tokenizer{
         if (this.is_at_end()){
             string error_message = "Unterminated string literal starting at line " + str(start_line) + ", column " + str(start_column)
             throw new CompilerError(error_message)
+        }
+        this.advance()
+        return new Token("STRING", new_str, start_line, start_column)
+    }
+    Token read_symbol(){
+        if (this.is_at_end() == false){
+            if (this.current_char() == "/" && this.peek_next() == "/"){
+                this.advance(2)
+                while (this.is_at_end() == false && this.current_char() != "\n"){
+                    this.advance()
+                }
+                return null
+            }
+            elif (this.peek_next() != null && (this.current_char() + this.peek_next()) in DOUBLE_CHAR_SYMBOLS){
+                Token token = new Token("SYMBOL", this.current_char() + this.peek_next(), this.line, this.column)
+                this.advance(2)
+                return token
+            }
+            elif (this.current_char() in SINGLE_CHAR_SYMBOLS){
+                Token token = new Token("SYMBOL", this.current_char(), this.line, this.column)
+                this.advance()
+                return token
+            }
+            else{
+                throw new CompilerError("Unknown symbol '" + this.current_char() + "' at line " + str(this.line) + ", column " + str(this.column))
+            }
+            
+        }
+    }
+    array tokenize(){
+        array<Token> tokens = []
+        while (this.is_at_end() == false){
+            this.skip_whitespace()
+            this.skip_comment()
+            this.skip_whitespace()
+            if (this.is_at_end() == true){
+                break
+            }
+            if (this.current_char() in QUOTES){
+                tokens.append(this.read_string())
+            }
+            elif (this.current_char() == "-"){
+                // check negative number
+                if (this.is_at_end() == false) {
+                    string next_char = this.peek_next()
+                }
+                else{
+                    string next_char = ""
+                }
+            }
         }
     }
 }
