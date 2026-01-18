@@ -58,7 +58,7 @@
       "name": "keyword.other.mtc"
     },
     {
-      "match": "\\b(arg|fclose|fopen|fread|free|fseek|ftell|fwrite|malloc|set|typeof)\\b",
+      "match": "\\b(arg|break|catch|except|null|set|throw|try|typeof)\\b",
       "name": "support.function.builtin.mtc"
     },
     {

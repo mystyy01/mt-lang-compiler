@@ -244,7 +244,24 @@ class Parser:
             expression = BinaryExpression(left, operator, right)
             left = expression
         return left
+    def parse_in(self):
+        left = self.parse_equality()
+        while self.current_token().type == "KEYWORD" and self.current_token().value == "in":
+            operator = self.current_token()
+            self.advance()
+            right = self.parse_equality()
+            expression = InExpression(left, right)
+            left = expression
+        return left
     def parse_and(self):
+        left = self.parse_in()
+        while self.current_token().value == "&&":
+            operator = self.current_token()
+            self.advance()
+            right = self.parse_in()
+            expression = BinaryExpression(left, operator, right)
+            left = expression
+        return left
         left = self.parse_equality()
         while self.current_token().value == "&&":
             operator = self.current_token()
@@ -276,8 +293,18 @@ class Parser:
         elif self.match("KEYWORD", "func"):
             return self.parse_dynamic_function()
         elif (self.match("KEYWORD", "int") or self.match("KEYWORD", "float") or self.match("KEYWORD", "void") or
-              self.match("KEYWORD", "array") or self.match("KEYWORD", "string") or self.match("KEYWORD", "bool") or
-              (self.current_token().type == "NAME" and self.peek_token() and self.peek_token().type == "NAME")):
+              self.match("KEYWORD", "array") or self.match("KEYWORD", "string") or self.match("KEYWORD", "bool")):
+            # Check if this is a builtin function call like int(x) or a declaration like int foo = ...
+            # Look ahead: if next token is (, it's a builtin call; if next is NAME, it could be declaration
+            if self.peek_token() and self.peek_token().type == "SYMBOL" and self.peek_token().value == "(":
+                # Builtin function call - parse as expression
+                return self.parse_expression_statement()
+            elif self.current_token().type == "NAME" or (self.peek_token() and self.peek_token().type == "NAME"):
+                return self.parse_declaration()
+            else:
+                # Fallback: parse as expression
+                return self.parse_expression_statement()
+        elif (self.current_token().type == "NAME" and self.peek_token() and self.peek_token().type == "NAME"):
             return self.parse_declaration()
         elif self.match("KEYWORD", "from") or self.match("KEYWORD", "use"):
             return self.parse_import_statement()
@@ -285,6 +312,12 @@ class Parser:
             return self.parse_while_statement()
         elif self.match("KEYWORD", "class"):
             return self.parse_class_declaration()
+        elif self.match("KEYWORD", "try"):
+            return self.parse_try_statement()
+        elif self.match("KEYWORD", "throw"):
+            return self.parse_throw_statement()
+        elif self.match("KEYWORD", "break"):
+            return self.parse_break_statement()
         else:
             return self.parse_expression_statement()
     def parse_expression_statement(self):
@@ -339,6 +372,79 @@ class Parser:
         self.expect("SYMBOL", ")")
         body = self.parse_block()
         return WhileStatement(loop_condition, body)
+    def parse_try_statement(self):
+        """Parse try/catch/except statement"""
+        start_line = self.current_token().line
+        start_column = self.current_token().column
+        self.expect("KEYWORD", "try")
+        
+        # Parse try block
+        try_block = self.parse_block()
+        
+        # Parse one or more catch/except blocks
+        catch_blocks = []
+        while self.match("KEYWORD", "catch") or self.match("KEYWORD", "except"):
+            catch_block = self.parse_catch_block()
+            catch_blocks.append(catch_block)
+        
+        if not catch_blocks:
+            raise CompilerError(f"try statement must have at least one catch block", "ERROR", self.file_path)
+        
+        return TryStatement(try_block, catch_blocks, start_line, start_column)
+    
+    def parse_catch_block(self):
+        """Parse a catch or except block"""
+        start_line = self.current_token().line
+        start_column = self.current_token().column
+        
+        # Handle both 'catch' and 'except' keywords
+        if self.match("KEYWORD", "catch"):
+            self.advance()
+        elif self.match("KEYWORD", "except"):
+            self.advance()
+        
+        exception_type = None
+        identifier = None
+        
+        # Check if we have an exception type (next token is NAME/KEYWORD)
+        if (self.current_token().type == "NAME" or self.current_token().type == "KEYWORD") and self.current_token().value not in ["{"]:
+            exception_type = self.current_token().value
+            self.advance()
+        
+        # Parse optional (var) or (Type var) binding
+        if self.match("SYMBOL", "("):
+            self.advance()
+            # Variable name
+            if self.current_token().type == "NAME":
+                identifier = self.current_token().value
+                self.advance()
+            else:
+                raise CompilerError(f"Expected exception variable name in catch block", "ERROR", self.file_path)
+            self.expect("SYMBOL", ")")
+        
+        # Parse catch body
+        body = self.parse_block()
+        
+        return CatchBlock(exception_type, identifier, body, start_line, start_column)
+    
+    def parse_throw_statement(self):
+        """Parse throw statement"""
+        start_line = self.current_token().line
+        start_column = self.current_token().column
+        self.expect("KEYWORD", "throw")
+        
+        # Parse the expression to throw
+        expression = self.parse_expression()
+        
+        return ThrowStatement(expression, start_line, start_column)
+    
+    def parse_break_statement(self):
+        """Parse break statement"""
+        start_line = self.current_token().line
+        start_column = self.current_token().column
+        self.expect("KEYWORD", "break")
+        return BreakStatement(start_line, start_column)
+    
     def parse_function_declaration(self):
         return_type = self.current_token().value
         self.advance()
@@ -443,6 +549,14 @@ class Parser:
         self.advance()  # consume 'class'
         class_name = self.current_token().value
         self.expect("NAME")
+        
+        # Check for inheritance
+        inherits_from = None
+        if self.match("NAME", "inherits") or self.match("NAME", "extends"):
+            self.advance()
+            inherits_from = self.current_token().value
+            self.expect("NAME")
+        
         self.expect("SYMBOL", "{")
 
         fields = []
@@ -511,7 +625,7 @@ class Parser:
             raise CompilerError(f"Expected field or method declaration in class{pos_info}", "ERROR", self.file_path)
 
         self.expect("SYMBOL", "}")
-        return ClassDeclaration(class_name, fields, methods)
+        return ClassDeclaration(class_name, fields, methods, inherits_from=inherits_from)
 
     def parse_field_declaration(self):
         # Check for arg keyword (only valid in class context)

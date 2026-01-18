@@ -28,6 +28,21 @@ if __name__ == "__main__":
     abs_source_file = os.path.abspath(source_file)
     tokens = Tokenizer(source_code, abs_source_file).tokenize()
     ast = Parser(tokens, abs_source_file).parse_program()
+    
+    # Prepend exception imports to enable try/catch/throw
+    from tokenizer import Tokenizer as ExTokenizer
+    from parser import Parser as ExParser
+    stdlib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stdlib")
+    exceptions_path = os.path.join(stdlib_dir, "exceptions.mtc")
+    if os.path.exists(exceptions_path):
+        with open(exceptions_path, "r") as f:
+            exceptions_code = f.read()
+        exc_tokens = ExTokenizer(exceptions_code, exceptions_path).tokenize()
+        exc_ast = ExParser(exc_tokens, exceptions_path).parse_program()
+        
+        # Prepend exception classes to the program
+        ast.statements = exc_ast.statements + ast.statements
+    
     from semantic import SemanticAnalyzer
     analyzer = SemanticAnalyzer(abs_source_file)
     analyzer.analyze(ast)
@@ -135,4 +150,5 @@ if __name__ == "__main__":
     os.system(f"rm {out}.o")
     print(f"\n=== Compiled to {out} ===")
     print("\n=== Running now ===")
-    os.system(f"./{out}")
+    os.chdir(os.path.dirname(os.path.abspath(out)) or ".")
+    os.system(f"{os.path.basename(out)}")

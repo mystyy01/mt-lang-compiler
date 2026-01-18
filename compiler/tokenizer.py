@@ -1,4 +1,4 @@
-KEYWORDS = ["from", "use", "as", "int", "float", "void", "array", "string", "bool", "if", "else", "for", "in", "set", "return", "typeof", "while", "bool", "true", "false", "func", "class", "new", "this", "static", "virtual", "arg", "null"]
+KEYWORDS = ["from", "use", "as", "int", "float", "void", "array", "string", "bool", "if", "else", "for", "in", "set", "return", "typeof", "while", "bool", "true", "false", "func", "class", "new", "this", "static", "virtual", "arg", "null", "try", "catch", "throw", "except", "break"]
 SINGLE_CHAR_SYMBOLS = ["(", ")", "[", "]", "{", "}", ",", ".", ":", "!", "+", "-", "*", "/", "=", ">", "<"]
 DOUBLE_CHAR_SYMBOLS = ["==", "!=", "+=", ">=", "<=", "&&", "||"]
 QUOTES = ['"', "'"]

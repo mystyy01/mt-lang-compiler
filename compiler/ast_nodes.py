@@ -33,6 +33,14 @@ class BinaryExpression:
         self.right = right
     def __repr__(self):
         return f"BinaryExpression({self.left}, {self.operator.value}, {self.right})"
+class InExpression:
+    def __init__(self, item, container, line=None, column=None):
+        self.item = item
+        self.container = container
+        self.line = line
+        self.column = column
+    def __repr__(self):
+        return f"InExpression({self.item} in {self.container})"
 class ArrayLiteral:
     def __init__(self, elements: list):
         self.elements = elements
@@ -55,6 +63,12 @@ class SetStatement:
         self.column = column
     def __repr__(self):
         return f"SetStatement({self.target}, {self.value})"
+class BreakStatement:
+    def __init__(self, line=None, column=None):
+        self.line = line
+        self.column = column
+    def __repr__(self):
+        return f"BreakStatement()"
 class ReturnStatement:
     def __init__(self, value = None):
         self.value = value
@@ -180,17 +194,19 @@ class NullLiteral:
         return "NullLiteral()"
 
 class ClassDeclaration:
-    def __init__(self, name, fields=None, methods=None, line=None, column=None):
+    def __init__(self, name, fields=None, methods=None, inherits_from=None, line=None, column=None):
         self.name = name
         self.fields = fields or []
         self.methods = methods or []
+        self.inherits_from = inherits_from
         # Separate constructor args from regular fields
         self.constructor_args = [f for f in self.fields if f.is_constructor_arg]
         self.regular_fields = [f for f in self.fields if not f.is_constructor_arg]
         self.line = line
         self.column = column
     def __repr__(self):
-        return f"ClassDeclaration({self.name}, {len(self.constructor_args)} args, {len(self.regular_fields)} fields, {len(self.methods)} methods)"
+        inherits_str = f" inherits {self.inherits_from}" if self.inherits_from else ""
+        return f"ClassDeclaration({self.name}{inherits_str}, {len(self.constructor_args)} args, {len(self.regular_fields)} fields, {len(self.methods)} methods)"
 
 class FieldDeclaration:
     def __init__(self, name, field_type, initializer=None, is_constructor_arg=False, line=None, column=None):
@@ -254,3 +270,31 @@ class FieldAccessExpression:
         self.column = column
     def __repr__(self):
         return f"FieldAccessExpression({self.object_expr}.{self.field_name})"
+
+class TryStatement:
+    def __init__(self, try_block, catch_blocks, line=None, column=None):
+        self.try_block = try_block
+        self.catch_blocks = catch_blocks
+        self.line = line
+        self.column = column
+    def __repr__(self):
+        return f"TryStatement(try={self.try_block}, catches={self.catch_blocks})"
+
+class CatchBlock:
+    def __init__(self, exception_type=None, identifier=None, body=None, line=None, column=None):
+        self.exception_type = exception_type
+        self.identifier = identifier
+        self.body = body
+        self.line = line
+        self.column = column
+    def __repr__(self):
+        type_str = self.exception_type if self.exception_type else "*"
+        return f"CatchBlock({type_str} {self.identifier})"
+
+class ThrowStatement:
+    def __init__(self, expression, line=None, column=None):
+        self.expression = expression
+        self.line = line
+        self.column = column
+    def __repr__(self):
+        return f"ThrowStatement({self.expression})"

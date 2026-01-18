@@ -1,0 +1,13 @@
+// Test basic try/catch/throw
+try {
+    print("In try block")
+    throw new Exception("Test exception")
+    print("After throw")
+} catch Exception (err) {
+    print("Caught exception!")
+    print(err.message)
+} catch (err) {
+    print("Should not reach here")
+}
+
+print("After try/catch")

@@ -1,0 +1,25 @@
+from libc use exit
+
+class Exception {
+    arg string message = ""
+    void raise(){
+        print("Exception: " + this.message)
+        exit(1)
+    }
+}
+
+class ValueError extends Exception {
+    string message = ""
+}
+
+class TypeError extends Exception {
+    string message = ""
+}
+
+class NullPointerError extends Exception {
+    string message = ""
+}
+
+class RuntimeError extends Exception {
+    string message = ""
+}

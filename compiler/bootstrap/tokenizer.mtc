@@ -13,14 +13,10 @@ class Token{
     arg int line = 0
     arg int column = 0
 }
-class CompilerError{
-    arg string message = ""
-    arg string severity = ""
-    arg string file_path = ""
-    void raise(){
-        print("MESSAGE:\n" + this.message + "\nSEVERITY:\n" + this.severity + "\nAT:\n" + this.file_path)
-
-    }}
+class CompilerError extends Exception{ // doesnt work at all
+    arg string message
+    // print("MESSAGE:\n" + this.message + "\nSEVERITY:\n" + this.severity + "\nAT:\n" + this.file_path)
+}
 class Tokenizer{
     arg string source = ""
     arg string file_path = ""
@@ -92,7 +88,7 @@ class Tokenizer{
         int start_line = this.line
         int start_column = this.column
 
-        while (this.is_at_end() != false && isdigit(this.current_char())){
+        while (this.is_at_end() != true && isdigit(this.current_char())){
             string char = this.current_char()
             set number =  number + this.current_char()
             this.advance()
@@ -137,9 +133,60 @@ class Tokenizer{
             set token_type = "FLOAT_LITERAL"
         }
         else{
-            set token_type = "INTEGER LITERAL"
+            set token_type = "INTEGER_LITERAL"
         }
         return new Token(token_type, number, start_line, start_column)
+    }
+    Token read_string(){
+        string new_str = ""
+        if ((this.current_char() in QUOTES) == false){
+            return null
+        }
+        string quote_char = this.current_char()
+        int start_line = this.line
+        int start_column = this.column
+        this.advance()
+        while (this.is_at_end() == false && this.current_char() != quote_char){
+            if (this.current_char() == "\\" && this.is_at_end() == false){
+                this.advance()
+                if (this.is_at_end()){
+                    break
+                }
+                string escape_char = this.current_char()
+                if (escape_char == "n"){
+                    set new_str = new_str + "\n"
+                }
+                if (escape_char == "t"){
+                    set new_str = new_str + "\t"
+                }
+                if (escape_char == "r"){
+                    set new_str = new_str + "\r"
+                }
+                if (escape_char == "\\"){
+                    set new_str = new_str + "\\n"
+                }
+                if (escape_char == '"'){
+                    set new_str = new_str + '"'
+                }
+                if (escape_char == "'"){
+                    set new_str = new_str + "'"
+                }
+                if (escape_char == "0"){
+                    set new_str = new_str + "\0"
+                }
+                else{
+                    set new_str = new_str + "\\" + escape_char
+                }
+            }
+            else{
+                set new_str = new_str + this.current_char()
+            }
+            this.advance()
+        }
+        if (this.is_at_end()){
+            string error_message = "Unterminated string literal starting at line " + str(start_line) + ", column " + str(start_column)
+            throw new CompilerError(error_message)
+        }
     }
 }
 // test all features of tokenizer (inline due to method call bug in functions)

@@ -106,6 +106,8 @@ class SemanticAnalyzer:
             return self.analyze_call_expression(node)
         if isinstance(node, BinaryExpression):
             return self.analyze_binary_expression(node)
+        if isinstance(node, InExpression):
+            return self.analyze_in_expression(node)
         if isinstance(node, IndexExpression):
             return self.analyze_index_expression(node)
         if isinstance(node, MemberExpression):
@@ -124,6 +126,14 @@ class SemanticAnalyzer:
             return self.analyze_return_statement(node)
         if isinstance(node, Block):
             return self.analyze_block(node)
+        if isinstance(node, TryStatement):
+            return self.analyze_try_statement(node)
+        if isinstance(node, CatchBlock):
+            return self.analyze_catch_block(node)
+        if isinstance(node, ThrowStatement):
+            return self.analyze_throw_statement(node)
+        if isinstance(node, BreakStatement):
+            return self.analyze_break_statement(node)
         if isinstance(node, BoolLiteral):
             return "bool"
         # cant implement bools yet since they arent an AST class yet (adding soon)
@@ -368,7 +378,13 @@ class SemanticAnalyzer:
             else:
                 # For mixed types (string, array, etc.), return "any" for now
                 return "any"
-
+    
+    def analyze_in_expression(self, node: InExpression):
+        """Analyze 'item in collection' expression - returns bool"""
+        self.analyze(node.item)
+        self.analyze(node.container)
+        return "bool"
+    
     def analyze_if_statement(self, node: IfStatement):
         self.analyze(node.condition)
         self.symbol_table.enter_scope()
@@ -380,7 +396,14 @@ class SemanticAnalyzer:
             for statement in node.else_body.statements:
                 self.analyze(statement)
             self.symbol_table.exit_scope()
-
+    
+    def analyze_break_statement(self, node: BreakStatement):
+        """Analyze break statement - just marks that we're in a loop"""
+        # Track that this scope contains a break for validation
+        if not hasattr(self, 'break_depth'):
+            self.break_depth = 0
+        self.break_depth += 1
+    
     def analyze_for_statement(self, node: ForInStatement):
         self.analyze(node.iterable)
         self.symbol_table.enter_scope()
@@ -490,6 +513,7 @@ class SemanticAnalyzer:
 
         except Exception as e:
             # If we can't load the module, just declare as function for now
+            print(f"DEBUG: Exception loading module '{module_name}': {e}")
             for symbol in node.symbols:
                 self.symbol_table.declare(symbol, "function", "any")
 
@@ -754,3 +778,87 @@ class SemanticAnalyzer:
         """Analyze a block of statements"""
         for statement in node.statements:
             self.analyze(statement)
+    
+    def analyze_try_statement(self, node):
+        """Analyze a try/catch statement"""
+        print(f"DEBUG: Analyzing TryStatement")
+        
+        # Analyze try block
+        self.symbol_table.enter_scope()
+        self.analyze(node.try_block)
+        self.symbol_table.exit_scope()
+        
+        # Analyze catch blocks
+        catch_types_seen = []
+        for catch_block in node.catch_blocks:
+            self.analyze_catch_block(catch_block, catch_types_seen)
+        
+        return None
+    
+    def analyze_catch_block(self, node, catch_types_seen=None):
+        """Analyze a catch block"""
+        if catch_types_seen is None:
+            catch_types_seen = []
+        
+        # Check exception type if specified
+        if node.exception_type:
+            # Verify exception type exists (Exception or subclass)
+            exc_class = self.symbol_table.lookup(node.exception_type)
+            if not exc_class or exc_class.get("symbol_type") != "class":
+                pos_info = self.get_position_info(node)
+                self.add_error(f"Unknown exception type '{node.exception_type}'{pos_info}")
+                return None
+            
+            # Check for duplicate catch types
+            if node.exception_type in catch_types_seen:
+                pos_info = self.get_position_info(node)
+                self.add_error(f"Duplicate catch block for exception type '{node.exception_type}'{pos_info}")
+            catch_types_seen.append(node.exception_type)
+        
+        # Enter scope for catch block body
+        self.symbol_table.enter_scope()
+        
+        # Declare exception binding if present
+        if node.identifier:
+            exc_type = node.exception_type if node.exception_type else "Exception"
+            self.symbol_table.declare(node.identifier, "variable", exc_type)
+        
+        # Analyze catch body
+        self.analyze(node.body)
+        
+        self.symbol_table.exit_scope()
+        
+        return None
+    
+    def analyze_throw_statement(self, node):
+        """Analyze a throw statement"""
+        print(f"DEBUG: Analyzing ThrowStatement")
+        
+        # Analyze the expression being thrown
+        expr_type = self.analyze(node.expression)
+        
+        # Verify it's an Exception type
+        if expr_type is None or expr_type == "unknown":
+            pos_info = self.get_position_info(node)
+            self.add_error(f"Cannot determine type of expression being thrown{pos_info}")
+            return None
+        
+        # Check if it's an Exception or subclass
+        if expr_type != "Exception":
+            # Check if it's a subclass of Exception
+            exc_class = self.symbol_table.lookup(expr_type)
+            if exc_class and exc_class.get("symbol_type") == "class":
+                # Check inheritance from Exception
+                # For now, allow any class to be thrown
+                pass
+            else:
+                # Try to look up in exception registry
+                if hasattr(self, 'exception_types'):
+                    if expr_type not in self.exception_types:
+                        pos_info = self.get_position_info(node)
+                        self.add_error(f"Cannot throw type '{expr_type}' - must be an Exception{pos_info}")
+                else:
+                    pos_info = self.get_position_info(node)
+                    self.add_error(f"Cannot throw type '{expr_type}' - must be an Exception{pos_info}")
+        
+        return None
