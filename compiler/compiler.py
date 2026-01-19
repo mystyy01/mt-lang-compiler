@@ -150,5 +150,13 @@ if __name__ == "__main__":
     os.system(f"rm {out}.o")
     print(f"\n=== Compiled to {out} ===")
     print("\n=== Running now ===")
-    os.chdir(os.path.dirname(os.path.abspath(out)) or ".")
-    os.system(f"{os.path.basename(out)}")
+
+    out_path = os.path.abspath(out)
+    out_dir = os.path.dirname(out_path)
+    out_name = os.path.basename(out_path)
+
+    # If executable is in current directory, run with ./
+    if out_dir == os.getcwd() or out_dir == "":
+        os.system(f"./{out_name}")
+    else:
+        os.system(out_path)

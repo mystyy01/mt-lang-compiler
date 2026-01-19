@@ -1,0 +1,129 @@
+from stdlib.iter use range, array_contains
+from stdlib.strings use isdigit, isalnum, lower, isalpha
+
+array KEYWORDS = ["from", "use", "as", "int", "float", "void", "array", "string", "bool", "if", "else", "for", "in", "set", "return", "typeof", "while", "bool", "true", "false", "func", "class", "new", "this", "static", "virtual", "arg"]
+array SINGLE_CHAR_SYMBOLS = ["(", ")", "[", "]", "{", "}", ",", ".", ":", "!", "+", "-", "*", "/", "=", ">", "<"]
+array DOUBLE_CHAR_SYMBOLS = ["==", "!=", "+=", ">=", "<=", "&&", "||"]
+array QUOTES = ['"', "'"]
+array WHITESPACE = [" ", "\t", "\n"]
+
+class Token{
+    arg string type = ""
+    arg string value = ""
+    arg int line = 0
+    arg int column = 0
+}
+
+class Tokenizer{
+    arg string source = ""
+    int position = 0
+    int line = 1
+    int column = 1
+
+    string current_char(){
+        return this.source[this.position]
+    }
+    void advance(int offset = 1){
+        for (i in range(offset)){
+            if (this.position < this.source.length()){
+                if (this.source[this.position] == "\n"){
+                    set this.line = this.line + 1
+                    set this.column = 1
+                } else{
+                    set this.column = this.column + 1
+                }
+            }
+            set this.position = this.position + 1
+        }
+    }
+    bool is_at_end(){
+        if (this.position >= this.source.length()){
+            return true
+        }
+        return false
+    }
+    string peek_next(){
+        if (this.position + 1 < this.source.length()){
+            return this.source[this.position+1]
+        }
+        return null
+    }
+    void skip_whitespace(){
+        while (this.is_at_end() != true && array_contains(this.current_char(), WHITESPACE)){
+            this.advance()
+        }
+    }
+    Token read_word(){
+        string word = ""
+        int start_line = this.line
+        int start_column = this.column
+        while (this.is_at_end() != true && (isalnum(this.current_char()) || this.current_char() == "_")){
+            set word = word + this.current_char()
+            this.advance()
+        }
+        if (word in KEYWORDS){
+            return new Token("KEYWORD", word, start_line, start_column)
+        }
+        else{
+            return new Token("NAME", word, start_line, start_column)
+        }
+    }
+    Token read_number(){
+        string number = ""
+        int start_line = this.line
+        int start_column = this.column
+        while (this.is_at_end() != true && isdigit(this.current_char())){
+            set number = number + this.current_char()
+            this.advance()
+        }
+        if (this.is_at_end() == false && this.current_char() == "."){
+            set number = number + "."
+            this.advance()
+            while (this.is_at_end() == false && isdigit(this.current_char())){
+                set number = number + this.current_char()
+                this.advance()
+            }
+            return new Token("FLOAT", number, start_line, start_column)
+        }
+        return new Token("INT", number, start_line, start_column)
+    }
+    array tokenize(){
+        array<Token> tokens = []
+        while (this.is_at_end() == false){
+            this.skip_whitespace()
+            if (this.is_at_end() == true){
+                break
+            }
+            if (isalpha(this.current_char()) || this.current_char() == "_"){
+                tokens.append(this.read_word())
+            }
+            elif (isdigit(this.current_char())){
+                tokens.append(this.read_number())
+            }
+            elif (this.peek_next() != null && (this.current_char() + this.peek_next()) in DOUBLE_CHAR_SYMBOLS){
+                Token token = new Token("SYMBOL", this.current_char() + this.peek_next(), this.line, this.column)
+                this.advance(2)
+                tokens.append(token)
+            }
+            elif (this.current_char() in SINGLE_CHAR_SYMBOLS){
+                Token token = new Token("SYMBOL", this.current_char(), this.line, this.column)
+                this.advance()
+                tokens.append(token)
+            }
+            else{
+                this.advance()
+            }
+        }
+        return tokens
+    }
+}
+
+// Test the tokenizer
+print("=== Tokenizer Test ===")
+Tokenizer t = new Tokenizer("int x = 10 + 5.5 && y >= 3")
+array tokens = t.tokenize()
+print("Input: 'int x = 10 + 5.5 && y >= 3'")
+print("Found " + str(tokens.length()) + " tokens:")
+for (token in tokens){
+    print("  " + token.type + ": '" + token.value + "' at " + str(token.line) + ":" + str(token.column))
+}

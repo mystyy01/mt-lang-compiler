@@ -5,17 +5,31 @@ class File{
     arg string path
     arg string mode
     string read(){
-        // need to check if files exists other wise we get seg fault
         if (this.mode != "r"){
             return "Cannot read files without read permissions"
         }
         string file = fopen(this.path, "r")
+        if (file == null){
+            return "fopen returned null for: " + this.path
+        }
         fseek(file, 0, 2)
         int fileSize = ftell(file)
+        if (fileSize < 0){
+            fclose(file)
+            return "ftell returned negative size"
+        }
         fseek(file, 0, 0)
         int bufferSize = fileSize + 1
         string buffer = malloc(bufferSize)
-        fread(buffer, 1, fileSize, file)
+        if (buffer == null){
+            fclose(file)
+            return "malloc failed"
+        }
+        int bytesRead = fread(buffer, 1, fileSize, file)
+        if (bytesRead != fileSize){
+            fclose(file)
+            return "fread mismatch: expected " + str(fileSize) + ", got " + str(bytesRead)
+        }
         fclose(file)
         return buffer
     }

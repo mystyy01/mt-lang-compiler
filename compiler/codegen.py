@@ -25,6 +25,8 @@ LIBC_FUNCTIONS = {
     "strchr": {"ret": "ptr", "args": ["ptr", "int"]},
     "sprintf": {"ret": "int", "args": ["ptr", "ptr"], "var_arg": True},
     "snprintf": {"ret": "int", "args": ["ptr", "int", "ptr"], "var_arg": True},
+    "tolower": {"ret": "int", "args": ["int"]},
+    "toupper": {"ret": "int", "args": ["int"]},
 
     # File I/O
     "fopen": {"ret": "ptr", "args": ["ptr", "ptr"]},
@@ -100,6 +102,7 @@ EXCEPTION_TYPE_TAGS = {
     "TypeError": 2,
     "NullPointerError": 3,
     "RuntimeError": 4,
+    "IndexError": 5,
 }
 
 class CodeGenerator:
@@ -110,6 +113,7 @@ class CodeGenerator:
         self.array_lengths = {}
         self.modules = {}  # alias -> {func_name: llvm_func}
         self.variable_classes = {}  # var_name -> class_name
+        self.array_element_classes = {}  # array_var_name -> element_class_name
         self.classes = {}  # class_name -> class_info
         self.module = llvmlite.ir.Module(name="mt_lang")
         self.int_type = llvmlite.ir.IntType(32)
@@ -120,6 +124,7 @@ class CodeGenerator:
         self.i1_type = llvmlite.ir.IntType(1)
         self.bool_type = self.i1_type  # Use i1 for bool (proper 1-bit type)
         self.string_counter = 0
+        self.bounds_check_counter = 0
         self.source_dir = source_dir if source_dir else os.getcwd()
         self.stdlib_path = os.path.join(os.path.dirname(__file__), "stdlib")
         self.imported_modules = set()  # Track which modules we've already imported
@@ -159,19 +164,19 @@ class CodeGenerator:
             return self.i8_ptr_type
 
     def get_element_llvm_type(self, element_type_str):
-        """Get LLVM type and size for array element types"""
+        """Get LLVM type and size for array element types. Returns (llvm_type, size, class_name)"""
         if element_type_str == "int":
-            return self.int_type, 4
+            return self.int_type, 4, None
         elif element_type_str == "float":
-            return self.float_type, 8
+            return self.float_type, 8, None
         elif element_type_str == "string":
-            return self.i8_ptr_type, 8
+            return self.i8_ptr_type, 8, None
         elif element_type_str == "bool":
-            return self.bool_type, 1
+            return self.bool_type, 1, None
         else:
             # For user-defined class types (or unknown types), use pointer
             # Classes are stored as i8* pointers
-            return self.i8_ptr_type, 8
+            return self.i8_ptr_type, 8, element_type_str
     
     def get_field_index(self, class_name, field_name):
         """Get the field index for a given class and field name"""
@@ -189,6 +194,26 @@ class CodeGenerator:
                 return i
         
         raise Exception(f"Field '{field_name}' not found in class '{class_name}'")
+
+    def get_type_size(self, llvm_type):
+        """Get the size of an LLVM type in bytes (returns LLVM IR value)"""
+        if isinstance(llvm_type, llvmlite.ir.IntType):
+            return llvmlite.ir.Constant(self.int_type, llvm_type.width // 8)
+        elif isinstance(llvm_type, llvmlite.ir.PointerType):
+            return llvmlite.ir.Constant(self.int_type, 8)  # 64-bit pointers
+        elif isinstance(llvm_type, llvmlite.ir.FloatType):
+            return llvmlite.ir.Constant(self.int_type, 4)
+        elif isinstance(llvm_type, llvmlite.ir.DoubleType):
+            return llvmlite.ir.Constant(self.int_type, 8)
+        elif isinstance(llvm_type, llvmlite.ir.ArrayType):
+            element_size = self.get_type_size(llvm_type.element)
+            return llvmlite.ir.Constant(self.int_type, llvm_type.count * 8)  # Simplification: assume 8-byte elements
+        elif isinstance(llvm_type, llvmlite.ir.LiteralStructType):
+            # For structs, calculate total size assuming 8 bytes per field (pointer size)
+            return llvmlite.ir.Constant(self.int_type, len(llvm_type.elements) * 8)
+        else:
+            # Default fallback
+            return llvmlite.ir.Constant(self.int_type, 8)
 
     def create_class_structs(self):
         """Create LLVM struct types for all classes"""
@@ -566,7 +591,9 @@ class CodeGenerator:
         # jmp_buf is typically an array of ints (size varies by platform, use 16 for x86-64)
         # On x86-64 Linux, jmp_buf is typically [8 x i64] but we'll use i8* for compatibility
         # The actual structure is platform-specific and handled by libc
-        self.jmp_buf_type = llvmlite.ir.ArrayType(self.int_type, 16)
+        # jmp_buf needs to be large enough for the platform
+        # On x86_64 Linux, jmp_buf is about 200 bytes, so use 64 x i64 (512 bytes) to be safe
+        self.jmp_buf_type = llvmlite.ir.ArrayType(llvmlite.ir.IntType(64), 64)
         self.jmp_buf_ptr_type = llvmlite.ir.PointerType(self.jmp_buf_type)
         
         # Use i8* (void*) for setjmp/longjmp since jmp_buf is opaque to us
@@ -603,13 +630,20 @@ class CodeGenerator:
         # Global jump buffer for exception handling
         # This is a single global buffer that gets reused for each try/catch
         self.global_jmp_buf = llvmlite.ir.GlobalVariable(self.module, self.jmp_buf_type, "__mt_exception_jmp_buf")
-        zero = llvmlite.ir.Constant(self.int_type, 0)
-        self.global_jmp_buf.initializer = llvmlite.ir.Constant(self.jmp_buf_type, [zero] * 16)
+        zero_i64 = llvmlite.ir.Constant(llvmlite.ir.IntType(64), 0)
+        self.global_jmp_buf.initializer = llvmlite.ir.Constant(self.jmp_buf_type, [zero_i64] * 64)
         
         # Exception depth counter to track nested try blocks
         self.global_exception_depth = llvmlite.ir.GlobalVariable(self.module, self.int_type, "__mt_exception_depth")
         self.global_exception_depth.initializer = llvmlite.ir.Constant(self.int_type, 0)
-        
+
+        # Global storage for exception info (used by throw and catch)
+        self.global_exception_type = llvmlite.ir.GlobalVariable(self.module, self.int_type, "__mt_exception_type")
+        self.global_exception_type.initializer = llvmlite.ir.Constant(self.int_type, 0)
+
+        self.global_exception_message = llvmlite.ir.GlobalVariable(self.module, self.i8_ptr_type, "__mt_exception_message")
+        self.global_exception_message.initializer = llvmlite.ir.Constant(self.i8_ptr_type, None)
+
         # Create exception handling runtime
         self.create_exception_runtime()
     
@@ -932,6 +966,63 @@ class CodeGenerator:
 
     def string_index(self, string_ptr, index):
         """Get character at index from string, return as single-character string"""
+        func = self.builder.block.parent
+
+        # Get string length for bounds checking
+        str_len = self.builder.call(self.strlen, [string_ptr], name="str_len")
+
+        # Check if index < 0
+        zero = llvmlite.ir.Constant(self.int_type, 0)
+        is_negative = self.builder.icmp_signed("<", index, zero, name="idx_negative")
+
+        # Check if index >= length
+        is_too_large = self.builder.icmp_signed(">=", index, str_len, name="idx_too_large")
+
+        # Combine: out of bounds if negative OR too large
+        is_out_of_bounds = self.builder.or_(is_negative, is_too_large, name="idx_out_of_bounds")
+
+        # Create blocks for bounds check with unique names
+        bc_id = self.bounds_check_counter
+        self.bounds_check_counter += 1
+        error_block = func.append_basic_block(name=f"str_index_error_{bc_id}")
+        ok_block = func.append_basic_block(name=f"str_index_ok_{bc_id}")
+
+        self.builder.cbranch(is_out_of_bounds, error_block, ok_block)
+
+        # Error block - throw IndexError (use longjmp if in try block)
+        self.builder.position_at_end(error_block)
+
+        # Store exception type for catch block
+        index_error_tag = self.builder.load(self.get_exception_type_tag("IndexError"), name="index_error_tag")
+        self.builder.store(index_error_tag, self.global_exception_type)
+
+        # Check at RUNTIME if we're in a try block by checking exception depth > 0
+        exc_depth = self.builder.load(self.global_exception_depth, name="exc_depth_check")
+        is_in_try = self.builder.icmp_signed(">", exc_depth, self.create_int_constant(0), name="is_in_try")
+
+        # Create blocks for try/no-try paths
+        throw_block = func.append_basic_block(name=f"str_idx_throw_{bc_id}")
+        exit_block = func.append_basic_block(name=f"str_idx_exit_{bc_id}")
+
+        self.builder.cbranch(is_in_try, throw_block, exit_block)
+
+        # Throw block - use longjmp to jump to catch handler
+        self.builder.position_at_end(throw_block)
+        jmp_buf_ptr = self.builder.gep(self.global_jmp_buf, [self.create_int_constant(0), self.create_int_constant(0)], name="jmp_buf_for_index_error")
+        jmp_buf_void_ptr = self.builder.bitcast(jmp_buf_ptr, self.i8_ptr_type, name="jmp_buf_void_ptr")
+        self.builder.call(self.longjmp, [jmp_buf_void_ptr, self.create_int_constant(1)], name="longjmp_index_error")
+        self.builder.unreachable()
+
+        # Exit block - print error and exit (no try block)
+        self.builder.position_at_end(exit_block)
+        error_msg = self.create_string_constant("IndexError: string index out of bounds\n")
+        self.builder.call(self.printf, [error_msg], name="print_index_error")
+        self.builder.call(self.exit, [self.create_int_constant(1)], name="exit_on_index_error")
+        self.builder.unreachable()
+
+        # OK block - continue with indexing
+        self.builder.position_at_end(ok_block)
+
         # Get the character at string_ptr + index
         char_ptr = self.builder.gep(string_ptr, [index], name="char_ptr")
         char = self.builder.load(char_ptr, name="char")
@@ -955,8 +1046,64 @@ class CodeGenerator:
 
     def array_get(self, array_ptr, index, elem_type):
         """Get element at index from dynamic array"""
+        func = self.builder.block.parent
         zero = llvmlite.ir.Constant(self.int_type, 0)
         two = llvmlite.ir.Constant(self.int_type, 2)
+
+        # Get array length for bounds checking
+        length_ptr = self.builder.gep(array_ptr, [zero, zero], name="arr_len_ptr")
+        arr_len = self.builder.load(length_ptr, name="arr_len")
+
+        # Check if index < 0
+        is_negative = self.builder.icmp_signed("<", index, zero, name="arr_idx_negative")
+
+        # Check if index >= length
+        is_too_large = self.builder.icmp_signed(">=", index, arr_len, name="arr_idx_too_large")
+
+        # Combine: out of bounds if negative OR too large
+        is_out_of_bounds = self.builder.or_(is_negative, is_too_large, name="arr_idx_out_of_bounds")
+
+        # Create blocks for bounds check with unique names
+        bc_id = self.bounds_check_counter
+        self.bounds_check_counter += 1
+        error_block = func.append_basic_block(name=f"arr_index_error_{bc_id}")
+        ok_block = func.append_basic_block(name=f"arr_index_ok_{bc_id}")
+
+        self.builder.cbranch(is_out_of_bounds, error_block, ok_block)
+
+        # Error block - throw IndexError (use longjmp if in try block)
+        self.builder.position_at_end(error_block)
+
+        # Store exception type for catch block
+        index_error_tag = self.builder.load(self.get_exception_type_tag("IndexError"), name="arr_index_error_tag")
+        self.builder.store(index_error_tag, self.global_exception_type)
+
+        # Check at RUNTIME if we're in a try block by checking exception depth > 0
+        exc_depth = self.builder.load(self.global_exception_depth, name="arr_exc_depth_check")
+        is_in_try = self.builder.icmp_signed(">", exc_depth, self.create_int_constant(0), name="arr_is_in_try")
+
+        # Create blocks for try/no-try paths
+        throw_block = func.append_basic_block(name=f"arr_idx_throw_{bc_id}")
+        exit_block = func.append_basic_block(name=f"arr_idx_exit_{bc_id}")
+
+        self.builder.cbranch(is_in_try, throw_block, exit_block)
+
+        # Throw block - use longjmp to jump to catch handler
+        self.builder.position_at_end(throw_block)
+        jmp_buf_ptr = self.builder.gep(self.global_jmp_buf, [self.create_int_constant(0), self.create_int_constant(0)], name="jmp_buf_for_arr_index_error")
+        jmp_buf_void_ptr = self.builder.bitcast(jmp_buf_ptr, self.i8_ptr_type, name="jmp_buf_void_ptr")
+        self.builder.call(self.longjmp, [jmp_buf_void_ptr, self.create_int_constant(1)], name="longjmp_arr_index_error")
+        self.builder.unreachable()
+
+        # Exit block - print error and exit (no try block)
+        self.builder.position_at_end(exit_block)
+        error_msg = self.create_string_constant("IndexError: array index out of bounds\n")
+        self.builder.call(self.printf, [error_msg], name="print_arr_index_error")
+        self.builder.call(self.exit, [self.create_int_constant(1)], name="exit_on_arr_index_error")
+        self.builder.unreachable()
+
+        # OK block - continue with indexing
+        self.builder.position_at_end(ok_block)
 
         data_field_ptr = self.builder.gep(array_ptr, [zero, two], name="data_ptr_ptr")
         data_ptr = self.builder.load(data_field_ptr, name="data_ptr")
@@ -1203,8 +1350,26 @@ class CodeGenerator:
             struct_type = class_info['llvm_struct']
             ordered_fields = class_info['ordered_fields']
 
-            # Allocate memory for the struct
-            obj_ptr = self.builder.alloca(struct_type, name=f"{class_name}_obj")
+            # Calculate struct size for heap allocation
+            # Each field: i8* (pointer/string) = 8 bytes, i32 (int) = 4 bytes, f32 (float) = 4 bytes
+            struct_size = 0
+            for field in ordered_fields:
+                field_type = field['type']
+                if field_type == self.i8_ptr_type or (hasattr(field_type, 'pointee')):
+                    struct_size += 8  # pointer
+                elif field_type == self.int_type:
+                    struct_size += 4
+                elif field_type == self.float_type:
+                    struct_size += 4
+                else:
+                    struct_size += 8  # default to pointer size for unknown types
+            # Add padding to align to 8 bytes
+            struct_size = ((struct_size + 7) // 8) * 8
+
+            # Allocate memory for the struct ON THE HEAP so it persists beyond function scope
+            size_val = self.create_int_constant(struct_size)
+            obj_mem = self.builder.call(self.malloc, [size_val], name=f"{class_name}_mem")
+            obj_ptr = self.builder.bitcast(obj_mem, struct_type.as_pointer(), name=f"{class_name}_obj")
 
             # Initialize constructor arguments
             arg_fields = [f for f in ordered_fields if f['is_constructor_arg']]
@@ -1251,30 +1416,106 @@ class CodeGenerator:
 
             return obj_ptr
         if isinstance(node, BinaryExpression):
+            # Handle short-circuit evaluation for && and || BEFORE generating right operand
+            if node.operator.value == "&&":
+                func = self.builder.block.parent
+                # Create blocks for short-circuit evaluation
+                eval_right_block = func.append_basic_block(name="and_eval_right")
+                merge_block = func.append_basic_block(name="and_merge")
+
+                # Evaluate left operand
+                left = self.generate(node.left)
+                bool_left = self.promote_to_bool(left)
+                left_block = self.builder.block
+
+                # If left is false, short-circuit to merge with false
+                self.builder.cbranch(bool_left, eval_right_block, merge_block)
+
+                # Evaluate right operand only if left was true
+                self.builder.position_at_end(eval_right_block)
+                right = self.generate(node.right)
+                bool_right = self.promote_to_bool(right)
+                right_block = self.builder.block
+                self.builder.branch(merge_block)
+
+                # Merge block - phi node selects result
+                self.builder.position_at_end(merge_block)
+                phi = self.builder.phi(self.bool_type, name="and_result")
+                phi.add_incoming(llvmlite.ir.Constant(self.bool_type, 0), left_block)  # false from short-circuit
+                phi.add_incoming(bool_right, right_block)  # result from right eval
+                return phi
+
+            elif node.operator.value == "||":
+                func = self.builder.block.parent
+                # Create blocks for short-circuit evaluation
+                eval_right_block = func.append_basic_block(name="or_eval_right")
+                merge_block = func.append_basic_block(name="or_merge")
+
+                # Evaluate left operand
+                left = self.generate(node.left)
+                bool_left = self.promote_to_bool(left)
+                left_block = self.builder.block
+
+                # If left is true, short-circuit to merge with true
+                self.builder.cbranch(bool_left, merge_block, eval_right_block)
+
+                # Evaluate right operand only if left was false
+                self.builder.position_at_end(eval_right_block)
+                right = self.generate(node.right)
+                bool_right = self.promote_to_bool(right)
+                right_block = self.builder.block
+                self.builder.branch(merge_block)
+
+                # Merge block - phi node selects result
+                self.builder.position_at_end(merge_block)
+                phi = self.builder.phi(self.bool_type, name="or_result")
+                phi.add_incoming(llvmlite.ir.Constant(self.bool_type, 1), left_block)  # true from short-circuit
+                phi.add_incoming(bool_right, right_block)  # result from right eval
+                return phi
+
             left = self.generate(node.left)
             right = self.generate(node.right)
 
             # Handle string concatenation
             if node.operator.value == "+" and left.type == self.i8_ptr_type and right.type == self.i8_ptr_type:
-                len1 = self.builder.call(self.strlen, [left], name="len1")
-                len2 = self.builder.call(self.strlen, [right], name="len2")
+                # Replace null with empty string using select
+                null_ptr = llvmlite.ir.Constant(self.i8_ptr_type, None)
+                empty_str = self.create_string_constant("")
+                
+                left_safe = self.builder.select(
+                    self.builder.icmp_signed("==", left, null_ptr, name="left_is_null"),
+                    empty_str,
+                    left,
+                    name="left_safe"
+                )
+                right_safe = self.builder.select(
+                    self.builder.icmp_signed("==", right, null_ptr, name="right_is_null"),
+                    empty_str,
+                    right,
+                    name="right_safe"
+                )
+                
+                len1 = self.builder.call(self.strlen, [left_safe], name="len1")
+                len2 = self.builder.call(self.strlen, [right_safe], name="len2")
                 total_len = self.builder.add(len1, len2, name="total_len")
                 total_len_plus1 = self.builder.add(total_len, self.create_int_constant(1), name="total_len_plus1")
                 new_str = self.builder.call(self.malloc, [total_len_plus1], name="new_str")
-                _ = self.builder.call(self.strcpy, [new_str, left], name="copy1")
-                _ = self.builder.call(self.strcat, [new_str, right], name="concat")
+                _ = self.builder.call(self.strcpy, [new_str, left_safe], name="copy1")
+                _ = self.builder.call(self.strcat, [new_str, right_safe], name="concat")
                 return new_str
 
+            # Handle string comparisons specially (before null comparison)
             # Handle pointer vs null comparison (e.g., strstr result != null)
-            # Check if left is i8* and right is a null constant
-            if left.type == self.i8_ptr_type:
+            # Only check for null comparison if one operand is actually a null literal
+            # Check if right is a null constant and left is i8*
+            if right.type == self.i8_ptr_type and isinstance(node.right, NullLiteral):
                 null_ptr = llvmlite.ir.Constant(self.i8_ptr_type, None)
                 if node.operator.value == "==":
                     return self.builder.icmp_signed("==", left, null_ptr, name="is_null")
                 elif node.operator.value == "!=":
                     return self.builder.icmp_signed("!=", left, null_ptr, name="is_not_null")
-            # Check if right is i8* and left is a null constant
-            if right.type == self.i8_ptr_type:
+            # Check if left is a null constant and right is i8*
+            if left.type == self.i8_ptr_type and isinstance(node.left, NullLiteral):
                 null_ptr = llvmlite.ir.Constant(self.i8_ptr_type, None)
                 if node.operator.value == "==":
                     return self.builder.icmp_signed("==", right, null_ptr, name="is_null")
@@ -1358,17 +1599,7 @@ class CodeGenerator:
                 else:
                     return self.builder.icmp_signed(">=", left_promoted, right_promoted, name="getmp")
             
-            # Logical operations (both operands must be boolean)
-            elif node.operator.value == "&&":
-                # Promote to bool if needed
-                bool_left = self.promote_to_bool(left_promoted)
-                bool_right = self.promote_to_bool(right_promoted)
-                return self.builder.and_(bool_left, bool_right, name="andtmp")
-            elif node.operator.value == "||":
-                # Promote to bool if needed
-                bool_left = self.promote_to_bool(left_promoted)
-                bool_right = self.promote_to_bool(right_promoted)
-                return self.builder.or_(bool_left, bool_right, name="ortmp")
+            # Note: && and || are handled above with short-circuit evaluation
         if isinstance(node, InExpression):
             return self.generate_in_expression(node)
         if isinstance(node, VariableDeclaration):
@@ -1391,7 +1622,9 @@ class CodeGenerator:
                     elements = node.value.elements
                     # Determine element type: explicit type > inferred from elements > default int
                     if explicit_element_type:
-                        elem_type, elem_size = self.get_element_llvm_type(explicit_element_type)
+                        elem_type, elem_size, elem_class = self.get_element_llvm_type(explicit_element_type)
+                        if elem_class:
+                            self.array_element_classes[node.name] = elem_class
                     elif len(elements) > 0 and isinstance(elements[0], StringLiteral):
                         elem_type = self.i8_ptr_type
                         elem_size = 8
@@ -1431,7 +1664,9 @@ class CodeGenerator:
                     # Initialize empty array - use explicit element type or default to int
                     # Always use on_heap=True to ensure array survives function returns
                     if explicit_element_type:
-                        elem_type, elem_size = self.get_element_llvm_type(explicit_element_type)
+                        elem_type, elem_size, elem_class = self.get_element_llvm_type(explicit_element_type)
+                        if elem_class:
+                            self.array_element_classes[node.name] = elem_class
                     else:
                         elem_type = self.int_type
                         elem_size = 4
@@ -1465,8 +1700,10 @@ class CodeGenerator:
 
                     # Use explicit element type if provided
                     if explicit_element_type:
-                        elem_type, elem_size = self.get_element_llvm_type(explicit_element_type)
+                        elem_type, elem_size, elem_class = self.get_element_llvm_type(explicit_element_type)
                         self.array_lengths[node.name] = (elem_type, elem_size)
+                        if elem_class:
+                            self.array_element_classes[node.name] = elem_class
                         return None
 
                     # Determine element type from context
@@ -2004,21 +2241,19 @@ class CodeGenerator:
                     
                     # Call atoi for conversion
                     converted = self.builder.call(self.atoi, [arg], name="atoi_result")
-                    
+
                     # Validate: check if all characters were consumed by atoi
-                    # atoi stops at first non-digit, so we need to verify
-                    
-                    # Get string length
-                    strlen_result = self.builder.call(self.strlen, [arg], name="strlen_for_validation")
-                    
+                    # atoi stops at first non-digit, so we need to verify the whole string was consumed
+
                     # Format converted int back to string using sprintf
                     buffer = self.builder.call(self.malloc, [self.create_int_constant(32)], name="itoa_buffer")
                     sprintf_fmt = self.create_string_constant("%d")
                     sprintf_result = self.builder.call(self.sprintf, [buffer, sprintf_fmt, converted], name="itoa_sprintf")
-                    
-                    # Compare lengths - if different, atoi didn't consume whole string
-                    strlen_itoa = self.builder.call(self.strlen, [buffer], name="strlen_itoa")
-                    is_valid = self.builder.icmp_signed("==", strlen_result, strlen_itoa, name="is_valid_int")
+
+                    # Compare strings - if different, atoi didn't consume whole string
+                    # Use strcmp to compare original arg with reformatted buffer
+                    cmp_result = self.builder.call(self.strcmp, [arg, buffer], name="strconv_cmp")
+                    is_valid = self.builder.icmp_signed("==", cmp_result, self.create_int_constant(0), name="is_valid_int")
                     
                     # Create blocks for valid and invalid paths
                     valid_block = func.append_basic_block(name="int_valid")
@@ -2570,6 +2805,24 @@ class CodeGenerator:
             self.variables[node.variable] = loop_var_ptr
             self.variable_types[node.variable] = elem_type
 
+            # Track element class type for field access in loop body
+            elem_class_name = None
+            if isinstance(node.iterable, Identifier):
+                # Check if the array has a known element class type
+                if node.iterable.name in self.array_element_classes:
+                    elem_class_name = self.array_element_classes[node.iterable.name]
+            # If element is a class pointer, try to infer class name from type
+            if elem_class_name is None and elem_type == self.i8_ptr_type:
+                # For i8* (class pointer), check if we can infer from context
+                if isinstance(node.iterable, Identifier):
+                    if node.iterable.name in self.array_lengths:
+                        potential_class = self.array_element_classes.get(node.iterable.name)
+                        if potential_class:
+                            elem_class_name = potential_class
+
+            if elem_class_name:
+                self.variable_classes[node.variable] = elem_class_name
+
             # Create basic blocks for the loop structure
             loop_block = func.append_basic_block(name="for_loop")
             body_block = func.append_basic_block(name="for_body")
@@ -2600,6 +2853,7 @@ class CodeGenerator:
             old_variables = dict(self.variables)
             old_variable_types = dict(self.variable_types)
             old_array_lengths = dict(self.array_lengths)
+            old_variable_classes = dict(self.variable_classes)
 
             # Generate loop body statements
             for statement in node.body.statements:
@@ -2626,6 +2880,7 @@ class CodeGenerator:
             self.variables = old_variables
             self.variable_types = old_variable_types  
             self.array_lengths = old_array_lengths
+            self.variable_classes = old_variable_classes
             self.builder.position_at_end(exit_block)
         
         if isinstance(node, BreakStatement):
@@ -2682,42 +2937,66 @@ class CodeGenerator:
         
         # Try block - execute the protected code
         self.builder.position_at_end(try_block)
-        
+
+        # Increment exception depth at runtime
+        current_depth = self.builder.load(self.global_exception_depth, name="current_exc_depth")
+        new_depth = self.builder.add(current_depth, self.create_int_constant(1), name="new_exc_depth")
+        self.builder.store(new_depth, self.global_exception_depth)
+
         # Set the in-try flag so throw can check it
         self.variables["_in_try_block"] = True
-        
+
         # Generate try block statements
         for statement in node.try_block.statements:
             self.generate(statement)
             if self.builder.block.is_terminated:
                 break
-        
+
         # Clear the in-try flag
         self.variables["_in_try_block"] = False
-        
+
         # If try block completes without exception, continue
         if not self.builder.block.is_terminated:
+            # Decrement exception depth before leaving try block
+            depth_before_leave = self.builder.load(self.global_exception_depth, name="depth_before_leave")
+            depth_after_leave = self.builder.sub(depth_before_leave, self.create_int_constant(1), name="depth_after_leave")
+            self.builder.store(depth_after_leave, self.global_exception_depth)
             self.builder.branch(continue_block)
-        
+
         # Catch block - handle the exception
         self.builder.position_at_end(catch_block)
-        
+
+        # Decrement exception depth since we're leaving the try context
+        depth_in_catch = self.builder.load(self.global_exception_depth, name="depth_in_catch")
+        depth_after_catch = self.builder.sub(depth_in_catch, self.create_int_constant(1), name="depth_after_catch")
+        self.builder.store(depth_after_catch, self.global_exception_depth)
+
+        # Retrieve exception info from global variables
+        exc_type_tag = self.builder.load(self.global_exception_type, name="exc_type_tag")
+        exc_message = self.builder.load(self.global_exception_message, name="exc_message")
+
         # Generate catch block statements
         for catch_clause in node.catch_blocks:
+            # Store exception variable for catch block
+            if catch_clause.identifier:
+                self.variables[catch_clause.identifier] = exc_message
+                self.variable_types[catch_clause.identifier] = self.i8_ptr_type
+                self.variable_classes[catch_clause.identifier] = "Exception"
+
             for statement in catch_clause.body.statements:
                 self.generate(statement)
             if self.builder.block.is_terminated:
                 break
-        
+
         # Branch to continue if not terminated
         if not self.builder.block.is_terminated:
             self.builder.branch(continue_block)
-        
+
         # Continue block
         self.builder.position_at_end(continue_block)
-        
+
         return None
-        
+
         func = self.builder.block.parent
         
         # Allocate jump buffer on the stack
@@ -2823,6 +3102,10 @@ class CodeGenerator:
             # Store exception info for binding
             if catch_block.identifier:
                 self.variables[catch_block.identifier] = exc_message
+                # Set variable type if exception type is known
+                if catch_block.exception_type:
+                    self.variable_types[catch_block.identifier] = catch_block.exception_type
+                    self.variable_classes[catch_block.identifier] = catch_block.exception_type
             
             # Generate catch body
             for statement in catch_block.body.statements:
@@ -2837,6 +3120,9 @@ class CodeGenerator:
     
     def generate_throw_statement(self, node):
         """Generate code for throw statement"""
+        if not hasattr(self, 'builder') or self.builder is None or self.builder.block is None:
+            return None
+
         # If no expression, print generic error and exit
         if node.expression is None:
             error_msg = self.create_string_constant("Error thrown, exiting.\n")
@@ -2851,50 +3137,52 @@ class CodeGenerator:
 
         if isinstance(node.expression, NewExpression):
             class_name = node.expression.class_name
-            # NewExpression returns a pointer to the allocated struct
             exc_obj_ptr = self.generate(node.expression)
         elif isinstance(node.expression, Identifier):
-            # It's a variable - look up its class type and get the pointer
             var_name = node.expression.name
             if var_name in self.variable_classes:
                 class_name = self.variable_classes[var_name]
             if var_name in self.variables:
-                # Get the pointer directly, don't load the value
                 exc_obj_ptr = self.variables[var_name]
 
         if class_name is None or exc_obj_ptr is None:
-            # Fallback: just print generic error and exit
             error_msg = self.create_string_constant("Uncaught exception\n")
             self.builder.call(self.printf, [error_msg], name="print_uncaught")
             self.builder.call(self.exit, [llvmlite.ir.Constant(self.int_type, 1)], name="exit_on_exception")
             self.builder.unreachable()
             return None
 
-        # Look for the raise() method in the class hierarchy
-        raise_func_name = f"{class_name}_raise"
-        current_class = class_name
-        while raise_func_name not in self.functions and current_class in self.classes:
-            parent_class = self.classes[current_class].get('parent_class')
-            if parent_class:
-                current_class = parent_class
-                raise_func_name = f"{current_class}_raise"
-            else:
-                break
+        # Store exception type tag in global variable
+        tag_global = self.get_exception_type_tag(class_name)
+        tag_value = self.builder.load(tag_global, name=f"tag_{class_name}")
+        self.builder.store(tag_value, self.global_exception_type)
 
-        if raise_func_name in self.functions:
-            # Call the raise() method with the exception object pointer as 'this'
-            raise_func = self.functions[raise_func_name]
-            struct_type = self.classes[current_class]['llvm_struct']
-            exc_struct_ptr = self.builder.bitcast(exc_obj_ptr, struct_type.as_pointer(), name="exc_struct")
-            self.builder.call(raise_func, [exc_struct_ptr], name="call_raise")
-            # After raise() returns (it might not if it calls exit), add unreachable
-            self.builder.unreachable()
-        else:
-            # No raise method found - print generic error and exit
-            error_msg = self.create_string_constant("Uncaught exception (no raise method)\n")
-            self.builder.call(self.printf, [error_msg], name="print_uncaught")
-            self.builder.call(self.exit, [llvmlite.ir.Constant(self.int_type, 1)], name="exit_on_exception")
-            self.builder.unreachable()
+        # Allocate exception object on heap (must persist across longjmp)
+        struct_type = self.classes[class_name]['llvm_struct']
+        struct_size = self.get_type_size(struct_type)
+        heap_ptr = self.builder.call(self.malloc, [struct_size], name="exc_heap_ptr")
+        heap_ptr_typed = self.builder.bitcast(heap_ptr, struct_type.as_pointer(), name="exc_heap_typed")
+
+        # Copy exception object to heap (use i8* for memcpy)
+        exc_obj_i8ptr = self.builder.bitcast(exc_obj_ptr, self.i8_ptr_type, name="exc_obj_i8ptr")
+        self.builder.call(self.memcpy, [heap_ptr, exc_obj_i8ptr, struct_size, self.create_int_constant(0)], name="exc_copy")
+
+        # Store heap pointer (cast to i8*) in global variable
+        exc_obj_i8ptr = self.builder.bitcast(heap_ptr_typed, self.i8_ptr_type, name="exc_obj_i8ptr")
+        self.builder.store(exc_obj_i8ptr, self.global_exception_message)
+
+        # Check if we're in a try block and use longjmp
+        in_try = self.variables.get("_in_try_block", False)
+        if in_try and hasattr(self, 'global_jmp_buf'):
+            jmp_buf_ptr = self.builder.gep(self.global_jmp_buf, [self.create_int_constant(0), self.create_int_constant(0)], name="jmp_buf_for_longjmp")
+            jmp_buf_void_ptr = self.builder.bitcast(jmp_buf_ptr, self.i8_ptr_type, name="jmp_buf_void_ptr")
+            self.builder.call(self.longjmp, [jmp_buf_void_ptr, self.create_int_constant(1)], name="longjmp_throw")
+
+        # If not in try block or no global_jmp_buf, print error and exit
+        error_msg = self.create_string_constant("Uncaught exception\n")
+        self.builder.call(self.printf, [error_msg], name="print_uncaught")
+        self.builder.call(self.exit, [llvmlite.ir.Constant(self.int_type, 1)], name="exit_on_exception")
+        self.builder.unreachable()
 
         return None
         

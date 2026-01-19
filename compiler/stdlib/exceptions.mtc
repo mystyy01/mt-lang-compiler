@@ -23,3 +23,7 @@ class NullPointerError extends Exception {
 class RuntimeError extends Exception {
     string message = ""
 }
+
+class IndexError extends Exception {
+    string message = ""
+}

@@ -291,6 +291,20 @@ class SemanticAnalyzer:
                 # For now, return any for methods
                 return "any"
         
+        # Handle obj.field for class instances (Identifier with known class type)
+        if isinstance(node.object, Identifier):
+            var_name = node.object.name
+            # Look up the variable in the symbol table
+            var_symbol = self.symbol_table.lookup(var_name)
+            if var_symbol and var_symbol.get('symbol_type') == 'variable':
+                var_decl_type = var_symbol.get('data_type')
+                # Look up the class info
+                class_info = self.classes.get(var_decl_type, {})
+                fields = class_info.get('fields', [])
+                for field in fields:
+                    if field['name'] == node.property:
+                        return field['type']
+        
         # For module.function calls, return "any" since we don't track module function types
         if object_type == "module":
             return "any"

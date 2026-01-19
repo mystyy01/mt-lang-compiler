@@ -1,4 +1,4 @@
-from libc use strlen, strcmp, strncmp, strcpy, malloc, strcat, strstr, sprintf
+from libc use strlen, strcmp, strncmp, strcpy, malloc, strcat, strstr, sprintf, tolower
 from iter use range
 
 // Split a string by delimiter, returning an array of strings
@@ -142,8 +142,6 @@ bool isalnum(string text){
     return true
 }
 bool isdigit(string char){
-    // we need a try catch block to try int() it and except if theres a conversion error
-    // Note: int() doesn't throw exceptions yet - implementation pending
     try{
         int(char)
         return true
@@ -151,9 +149,6 @@ bool isdigit(string char){
     catch{
         return false
     }
-}
-string lower(string text){
-    return text // need a lower function
 }
 bool isalpha(string text){
     if (text.length() == 0){
@@ -168,16 +163,35 @@ bool isalpha(string text){
         // A-Z
         if (code >= 65 && code <= 90){
             set i = i + 1
+        } else {
+            // a-z
+            if (code >= 97 && code <= 122){
+                set i = i + 1
+            } else {
+                // anything else = not alpha
+                return false
+            }
         }
-
-        // a-z
-        if (code >= 97 && code <= 122){
-            set i = i + 1
-        }
-
-        // anything else = not alpha
-        return false
     }
 
     return true
+}
+
+string lower(string text) {
+    int len = strlen(text)
+    if (len == 0) {
+        return ""
+    }
+    string result = ""
+    int i = 0
+    while (i < len) {
+        string char = text[i]
+        int code = char_code(char)
+        int lower_code = tolower(code)
+        string lower_char = malloc(2)
+        sprintf(lower_char, "%c", lower_code)
+        set result = concat(result, lower_char)
+        set i = i + 1
+    }
+    return result
 }
