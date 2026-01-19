@@ -1,4 +1,13 @@
 // =========================
+// BASE CLASS
+// =========================
+
+class ASTNode{
+    arg int line = 0
+    arg int column = 0
+}
+
+// =========================
 // LITERALS & IDENTIFIERS
 // =========================
 
@@ -76,6 +85,15 @@ class IndexExpression{
 }
 
 class TypeofExpression{
+    arg any argument
+}
+
+class HasattrExpression{
+    arg any obj
+    arg string attr_name
+}
+
+class ClassofExpression{
     arg any argument
 }
 

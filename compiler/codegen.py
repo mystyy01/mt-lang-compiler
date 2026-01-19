@@ -374,9 +374,12 @@ class CodeGenerator:
             elif isinstance(statement, (FunctionDeclaration, DynamicFunctionDeclaration)):
                 self.generate(statement)
             elif isinstance(statement, ClassDeclaration):
-                # Generate LLVM functions for class methods
                 for method in statement.methods:
-                    self.generate_class_method(statement.name, method)
+                    self.register_class_method_signature(statement.name, method)
+                for method in statement.methods:
+                    func_name = f"{statement.name}_{method.name}"
+                    pre_registered = self.functions.get(func_name)
+                    self.generate_class_method(statement.name, method, pre_registered_func=pre_registered)
             elif isinstance(statement, VariableDeclaration):
                 # Generate code for module-level variable declarations
                 self.generate(statement)
@@ -413,7 +416,25 @@ class CodeGenerator:
         
         return module_name
 
-    def generate_class_method(self, class_name, method):
+    def register_class_method_signature(self, class_name, method):
+        """Register method signature without generating body (for forward references)."""
+        struct_type = self.classes[class_name]['llvm_struct']
+        param_types = [struct_type.as_pointer()]  # 'this' pointer
+
+        for param in method.params:
+            if param.param_type:
+                param_types.append(self.get_llvm_type(param.param_type))
+            else:
+                param_types.append(self.int_type)
+
+        return_type = self.get_llvm_type(method.return_type)
+        func_name = f"{class_name}_{method.name}"
+        func_type = llvmlite.ir.FunctionType(return_type, param_types)
+        func = llvmlite.ir.Function(self.module, func_type, name=func_name)
+        self.functions[func_name] = func
+        return func
+
+    def generate_class_method(self, class_name, method, pre_registered_func=None):
         """Generate LLVM function for a class method"""
         old_current_class = getattr(self, 'current_class', None)
         self.current_class = class_name
@@ -446,11 +467,14 @@ class CodeGenerator:
         return_type = self.get_llvm_type(method.return_type)
         self.current_return_type = return_type
 
-        # Function name: Class_method
         func_name = f"{class_name}_{method.name}"
-        func_type = llvmlite.ir.FunctionType(return_type, param_types)
-        func = llvmlite.ir.Function(self.module, func_type, name=func_name)
-        self.functions[func_name] = func
+        if pre_registered_func is not None:
+            func = pre_registered_func
+            self.functions[func_name] = func
+        else:
+            func_type = llvmlite.ir.FunctionType(return_type, param_types)
+            func = llvmlite.ir.Function(self.module, func_type, name=func_name)
+            self.functions[func_name] = func
 
         block = func.append_basic_block(name="entry")
         self.builder = llvmlite.ir.IRBuilder(block)
@@ -1281,9 +1305,12 @@ class CodeGenerator:
                 result = self.generate(statement)
             return result  # Return the last statement result
         if isinstance(node, ClassDeclaration):
-            # Generate LLVM functions for class methods
             for method in node.methods:
-                self.generate_class_method(node.name, method)
+                self.register_class_method_signature(node.name, method)
+            for method in node.methods:
+                func_name = f"{node.name}_{method.name}"
+                pre_registered = self.functions.get(func_name)
+                self.generate_class_method(node.name, method, pre_registered_func=pre_registered)
             return None
         if isinstance(node, FromImportStatement):
             # Load the module for code generation
@@ -1519,23 +1546,43 @@ class CodeGenerator:
                 _ = self.builder.call(self.strcat, [new_str, right_safe], name="concat")
                 return new_str
 
-            # Handle string comparisons specially (before null comparison)
-            # Handle pointer vs null comparison (e.g., strstr result != null)
-            # Only check for null comparison if one operand is actually a null literal
-            # Check if right is a null constant and left is i8*
-            if right.type == self.i8_ptr_type and isinstance(node.right, NullLiteral):
-                null_ptr = llvmlite.ir.Constant(self.i8_ptr_type, None)
+            # Handle null comparisons for any type
+            # null comparison: compare against zero value for the type
+            is_right_null = isinstance(node.right, NullLiteral)
+            is_left_null = isinstance(node.left, NullLiteral)
+
+            if is_right_null or is_left_null:
+                # Determine which side is the non-null value
+                non_null_value = left if is_right_null else right
+                non_null_type = non_null_value.type
+
+                # Get the appropriate zero/null value for the type
+                if non_null_type == self.i8_ptr_type:
+                    zero_val = llvmlite.ir.Constant(self.i8_ptr_type, None)
+                elif non_null_type == self.int_type:
+                    zero_val = llvmlite.ir.Constant(self.int_type, 0)
+                elif non_null_type == self.float_type:
+                    zero_val = llvmlite.ir.Constant(self.float_type, 0.0)
+                elif non_null_type == self.bool_type:
+                    zero_val = llvmlite.ir.Constant(self.bool_type, 0)
+                elif hasattr(non_null_type, 'pointee'):
+                    # Any other pointer type
+                    zero_val = llvmlite.ir.Constant(non_null_type, None)
+                else:
+                    # Default to comparing against zero for unknown types
+                    zero_val = llvmlite.ir.Constant(non_null_type, 0)
+
+                # Perform the comparison
                 if node.operator.value == "==":
-                    return self.builder.icmp_signed("==", left, null_ptr, name="is_null")
+                    if non_null_type == self.float_type:
+                        return self.builder.fcmp_ordered("==", non_null_value, zero_val, name="is_null")
+                    else:
+                        return self.builder.icmp_signed("==", non_null_value, zero_val, name="is_null")
                 elif node.operator.value == "!=":
-                    return self.builder.icmp_signed("!=", left, null_ptr, name="is_not_null")
-            # Check if left is a null constant and right is i8*
-            if left.type == self.i8_ptr_type and isinstance(node.left, NullLiteral):
-                null_ptr = llvmlite.ir.Constant(self.i8_ptr_type, None)
-                if node.operator.value == "==":
-                    return self.builder.icmp_signed("==", right, null_ptr, name="is_null")
-                elif node.operator.value == "!=":
-                    return self.builder.icmp_signed("!=", right, null_ptr, name="is_not_null")
+                    if non_null_type == self.float_type:
+                        return self.builder.fcmp_ordered("!=", non_null_value, zero_val, name="is_not_null")
+                    else:
+                        return self.builder.icmp_signed("!=", non_null_value, zero_val, name="is_not_null")
 
             # Handle string comparisons specially
             if left.type == self.i8_ptr_type and right.type == self.i8_ptr_type:
@@ -1848,6 +1895,8 @@ class CodeGenerator:
 
             storage = self.variables[node.name]
             var_type = self.variable_types[node.name]
+            storage = self.variables[node.name]
+            var_type = self.variable_types[node.name]
 
             # Special handling for arrays - return the pointer directly
             if var_type == self.dyn_array_ptr_type:
@@ -1907,6 +1956,88 @@ class CodeGenerator:
                             raise Exception(f"Unknown array property: {node.property}")
                     else:
                         raise Exception(f"Unknown field '{node.property}' on variable '{obj_name}'")
+            elif isinstance(node.object, CallExpression):
+                # Handle field access on call result: e.g., this.current_token().type
+                # First, determine the return type of the call
+                call_result = self.generate(node.object)
+
+                # Try to determine the class of the returned object
+                # Check if it's a method call on this or an object
+                callee = node.object.callee
+                return_class = None
+
+                if isinstance(callee, MemberExpression):
+                    # Method call like this.method() or obj.method()
+                    if isinstance(callee.object, ThisExpression):
+                        # this.method() - look up method return type in current class
+                        if hasattr(self, 'current_class') and self.current_class in self.classes:
+                            methods = self.classes[self.current_class].get('methods', {})
+                            if callee.property in methods:
+                                return_class = methods[callee.property].get('return_type')
+                    elif isinstance(callee.object, Identifier):
+                        # obj.method() - look up method return type in obj's class
+                        obj_name = callee.object.name
+                        if obj_name in self.variable_classes:
+                            class_name = self.variable_classes[obj_name]
+                            if class_name in self.classes:
+                                methods = self.classes[class_name].get('methods', {})
+                                if callee.property in methods:
+                                    return_class = methods[callee.property].get('return_type')
+
+                if return_class and return_class in self.classes:
+                    # We know the class, access the field
+                    struct_type = self.classes[return_class]['llvm_struct']
+                    field_idx = self.get_field_index(return_class, node.property)
+
+                    # Cast call result to struct pointer
+                    obj_struct_ptr = self.builder.bitcast(call_result, struct_type.as_pointer(), name="call_result_struct")
+
+                    # Access field
+                    field_ptr = self.builder.gep(obj_struct_ptr, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"{node.property}_field")
+                    return self.builder.load(field_ptr, name=node.property)
+                else:
+                    raise Exception(f"Cannot determine return type for field access: {node.object}.{node.property}")
+            elif isinstance(node.object, MemberExpression):
+                # Handle chained member access: e.g., this.tokens.length
+                inner_obj = self.generate(node.object)
+
+                # Check if this is an array length access
+                if node.property == "length" and inner_obj.type == self.dyn_array_ptr_type:
+                    return self.array_length(inner_obj)
+
+                # Try to determine if the inner object is a class field
+                inner_member = node.object
+                field_class = None
+
+                if isinstance(inner_member.object, ThisExpression):
+                    # this.field.property - look up field type in current class
+                    if hasattr(self, 'current_class') and self.current_class in self.classes:
+                        fields = self.classes[self.current_class].get('fields', [])
+                        for f in fields:
+                            if f['name'] == inner_member.property:
+                                field_class = f.get('type')
+                                break
+                elif isinstance(inner_member.object, Identifier):
+                    # obj.field.property - look up field type in obj's class
+                    obj_name = inner_member.object.name
+                    if obj_name in self.variable_classes:
+                        class_name = self.variable_classes[obj_name]
+                        if class_name in self.classes:
+                            fields = self.classes[class_name].get('fields', [])
+                            for f in fields:
+                                if f['name'] == inner_member.property:
+                                    field_class = f.get('type')
+                                    break
+
+                if field_class and field_class in self.classes:
+                    # Access field on the class instance
+                    struct_type = self.classes[field_class]['llvm_struct']
+                    field_idx = self.get_field_index(field_class, node.property)
+                    obj_struct_ptr = self.builder.bitcast(inner_obj, struct_type.as_pointer(), name="member_struct")
+                    field_ptr = self.builder.gep(obj_struct_ptr, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"{node.property}_field")
+                    return self.builder.load(field_ptr, name=node.property)
+                else:
+                    raise Exception(f"Cannot determine type for chained member access: {node.object}.{node.property}")
             else:
                 # For other member access, assume it's method call (handled elsewhere)
                 raise Exception(f"Field access not implemented for {type(node.object)}.{node.property}")
@@ -2481,6 +2612,36 @@ class CodeGenerator:
             else:
                 type_str = "unknown"
             return self.create_string_constant(type_str)
+        if isinstance(node, HasattrExpression):
+            # hasattr is evaluated at compile time by semantic analysis
+            # The result is stored in node.compile_time_result
+            result = getattr(node, 'compile_time_result', False)
+            return llvmlite.ir.Constant(self.bool_type, 1 if result else 0)
+        if isinstance(node, ClassofExpression):
+            # classof returns the class name as a string
+            arg_value = self.generate(node.argument)
+            # Check if this is a class instance (struct pointer)
+            if hasattr(arg_value.type, 'pointee') and hasattr(arg_value.type.pointee, 'elements'):
+                # Try to find the class name from our tracking
+                for var_name, class_name in self.variable_classes.items():
+                    if var_name in self.variables:
+                        var_ptr = self.variables[var_name]
+                        # Check if this is the same variable
+                        if hasattr(var_ptr, 'type') and var_ptr.type == arg_value.type:
+                            return self.create_string_constant(class_name)
+                return self.create_string_constant("object")
+            elif arg_value.type == self.int_type:
+                return self.create_string_constant("int")
+            elif arg_value.type == self.float_type:
+                return self.create_string_constant("float")
+            elif arg_value.type == self.i8_ptr_type:
+                return self.create_string_constant("string")
+            elif arg_value.type == self.bool_type:
+                return self.create_string_constant("bool")
+            elif arg_value.type == self.dyn_array_ptr_type:
+                return self.create_string_constant("array")
+            else:
+                return self.create_string_constant("unknown")
         if isinstance(node, StringLiteral):
             return self.create_string_constant(node.value)
         if isinstance(node, FunctionDeclaration):

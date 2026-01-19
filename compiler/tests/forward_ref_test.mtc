@@ -1,0 +1,15 @@
+class Test {
+    int value
+
+    void test() {
+        this.foo()
+    }
+
+    int foo() {
+        return 42
+    }
+}
+
+Test t = new Test()
+t.test()
+print("Done")

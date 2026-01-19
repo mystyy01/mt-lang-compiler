@@ -1,0 +1,24 @@
+class Calculator {
+    int value
+
+    void init() {
+        set this.value = 0
+    }
+
+    void add(int x) {
+        this.increment()
+        set this.value = this.value + x
+    }
+
+    void increment() {
+        set this.value = this.value + 1
+    }
+
+    int getValue() {
+        return this.value
+    }
+}
+
+Calculator calc = new Calculator()
+calc.add(5)
+print(calc.getValue())

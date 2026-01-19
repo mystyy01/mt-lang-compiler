@@ -1,0 +1,58 @@
+from libc use printf
+
+class Person {
+    arg string name
+    arg int age
+
+    func greet() {
+        printf("Hello, I'm %s\n", this.name)
+    }
+}
+
+// Test hasattr with a class instance
+Person p = new Person("Alice", 30)
+
+// Test hasattr - should be true for existing fields
+if (hasattr(p, "name")) {
+    printf("Person has 'name' field: true\n")
+} else {
+    printf("Person has 'name' field: false\n")
+}
+
+if (hasattr(p, "age")) {
+    printf("Person has 'age' field: true\n")
+} else {
+    printf("Person has 'age' field: false\n")
+}
+
+// Test hasattr - should be true for existing methods
+if (hasattr(p, "greet")) {
+    printf("Person has 'greet' method: true\n")
+} else {
+    printf("Person has 'greet' method: false\n")
+}
+
+// Test hasattr - should be false for non-existent field
+if (hasattr(p, "address")) {
+    printf("Person has 'address' field: true\n")
+} else {
+    printf("Person has 'address' field: false\n")
+}
+
+// Test classof
+string class_name = classof(p)
+printf("Class of p: %s\n", class_name)
+
+// Test typeof (existing)
+string type_name = typeof(p)
+printf("Type of p: %s\n", type_name)
+
+// Test with primitives
+int x = 42
+if (hasattr(x, "value")) {
+    printf("int has 'value': true\n")
+} else {
+    printf("int has 'value': false\n")
+}
+
+printf("Reflection tests completed!\n")

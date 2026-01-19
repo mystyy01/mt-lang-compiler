@@ -1,0 +1,47 @@
+from libc use printf
+
+// Test int comparison with null
+int x = 0
+int y = 5
+
+if (x == null) {
+    printf("x (0) is equal to null\n")
+}
+if (y != null) {
+    printf("y (5) is not equal to null\n")
+}
+
+// Test float comparison with null
+float f = 0.0
+float g = 3.14
+
+if (f == null) {
+    printf("f (0.0) is equal to null\n")
+}
+if (g != null) {
+    printf("g (3.14) is not equal to null\n")
+}
+
+// Test bool comparison with null
+bool b = false
+bool c = true
+
+if (b == null) {
+    printf("b (false) is equal to null\n")
+}
+if (c != null) {
+    printf("c (true) is not equal to null\n")
+}
+
+// Test string comparison with null
+string s = null
+string t = "hello"
+
+if (s == null) {
+    printf("s is null\n")
+}
+if (t != null) {
+    printf("t is not null\n")
+}
+
+printf("All null comparisons completed!\n")

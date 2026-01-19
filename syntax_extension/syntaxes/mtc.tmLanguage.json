@@ -58,7 +58,7 @@
       "name": "keyword.other.mtc"
     },
     {
-      "match": "\\b(arg|break|catch|except|null|set|throw|try|typeof)\\b",
+      "match": "\\b(arg|break|catch|classof|elif|except|hasattr|null|set|throw|try|typeof)\\b",
       "name": "support.function.builtin.mtc"
     },
     {

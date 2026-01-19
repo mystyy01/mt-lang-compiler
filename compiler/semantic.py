@@ -136,6 +136,14 @@ class SemanticAnalyzer:
             return self.analyze_break_statement(node)
         if isinstance(node, BoolLiteral):
             return "bool"
+        if isinstance(node, TypeofExpression):
+            self.analyze(node.argument)
+            return "string"
+        if isinstance(node, HasattrExpression):
+            return self.analyze_hasattr_expression(node)
+        if isinstance(node, ClassofExpression):
+            self.analyze(node.argument)
+            return "string"
         # cant implement bools yet since they arent an AST class yet (adding soon)
     def analyze_program(self, node: Program):
         for statement in node.statements:
@@ -322,12 +330,24 @@ class SemanticAnalyzer:
         # For module.function calls, return "any" since we don't track module function types
         if object_type == "module":
             return "any"
+
+        # Handle field access on call results (e.g., this.current_token().value)
+        # object_type is the return type of the call, look up the field in that class
+        if isinstance(node.object, CallExpression):
+            class_info = self.classes.get(object_type, {})
+            fields = class_info.get('fields', [])
+            for field in fields:
+                if field['name'] == node.property:
+                    return field['type']
+            # Field not found, return any
+            return "any"
+
         return object_type
 
     def analyze_variable_declaration(self, node: VariableDeclaration):
         # Check if the declared type is valid (built-in or user-defined class)
         type_symbol = self.symbol_table.lookup(node.type)
-        if not type_symbol and node.type not in ["int", "float", "string", "bool", "array", "void"]:
+        if not type_symbol and node.type not in ["int", "float", "string", "bool", "array", "void", "any"]:
             pos_info = self.get_position_info(node)
             self.add_error(f"Unknown type '{node.type}'{pos_info}")
 
@@ -341,8 +361,8 @@ class SemanticAnalyzer:
 
         if node.value:
             type_of_node = self.analyze(node.value)
-            # "any" is a wildcard that matches any type
-            if type_of_node != node.type and type_of_node != "any":
+            # "any" is a wildcard that matches any type (both directions)
+            if type_of_node != node.type and type_of_node != "any" and node.type != "any":
                 # Allow assignment if both are user-defined classes or if value is a new expression of the right type
                 # Also allow null to be assigned to any type (null is compatible with all pointer types)
                 if not ((isinstance(node.value, NewExpression) and node.value.class_name == node.type) or
@@ -648,7 +668,7 @@ class SemanticAnalyzer:
                         expected_type = parameters[i].param_type
                         if expected_type:
                             arg_type = self.analyze(arg)
-                            if arg_type != expected_type and arg_type != "any":
+                            if arg_type != expected_type and arg_type != "any" and expected_type != "any" and arg_type != "null":
                                 pos_info = self.get_position_info(arg)
                                 self.add_error(f"Argument {i+1} of '{func_name}' expects {expected_type}, got {arg_type}{pos_info}")
                 
@@ -737,7 +757,7 @@ class SemanticAnalyzer:
                                 expected_type = parameters[i].param_type
                                 if expected_type:
                                     arg_type = self.analyze(arg)
-                                    if arg_type != expected_type and arg_type != "any":
+                                    if arg_type != expected_type and arg_type != "any" and expected_type != "any" and arg_type != "null":
                                         pos_info = self.get_position_info(arg)
                                         self.add_error(f"Argument {i+1} of method '{method_name}' expects {expected_type}, got {arg_type}{pos_info}")
 
@@ -781,7 +801,7 @@ class SemanticAnalyzer:
                                     expected_type = parameters[i].param_type
                                     if expected_type:
                                         arg_type = self.analyze(arg)
-                                        if arg_type != expected_type and arg_type != "any":
+                                        if arg_type != expected_type and arg_type != "any" and expected_type != "any" and arg_type != "null":
                                             pos_info = self.get_position_info(arg)
                                             self.add_error(f"Argument {i+1} of method '{method_name}' expects {expected_type}, got {arg_type}{pos_info}")
 
@@ -811,6 +831,28 @@ class SemanticAnalyzer:
 
     def analyze_null_literal(self, node):
         return "null"
+
+    def analyze_hasattr_expression(self, node):
+        """Analyze hasattr(obj, 'attr') - compile-time check if class has attribute"""
+        obj_type = self.analyze(node.obj)
+        attr_name = node.attr_name
+
+        # Check if the object is a class instance
+        if obj_type in self.classes:
+            class_info = self.classes[obj_type]
+            # Check fields (list of dicts with 'name' key)
+            field_names = [f['name'] for f in class_info['fields']]
+            # Check methods (dict with method names as keys)
+            method_names = list(class_info['methods'].keys())
+            has_attr = attr_name in field_names or attr_name in method_names
+            # Store the result for codegen (compile-time evaluation)
+            node.compile_time_result = has_attr
+        else:
+            # For non-class types, check if it's a primitive type attribute
+            # Primitives don't have attributes, so always false
+            node.compile_time_result = False
+
+        return "bool"
 
     def analyze_while_statement(self, node):
         """Analyze a while statement, including its condition and body"""
@@ -842,7 +884,7 @@ class SemanticAnalyzer:
         
         # Type checking for assignment
         if target_type and value_type:
-            if target_type != value_type and value_type != "any":
+            if target_type != value_type and value_type != "any" and target_type != "any":
                 # null can be assigned to any type
                 if value_type != "null":
                     pos_info = self.get_position_info(node)

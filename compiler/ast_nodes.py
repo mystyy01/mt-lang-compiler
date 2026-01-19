@@ -111,6 +111,17 @@ class TypeofExpression:
         self.argument = argument
     def __repr__(self):
         return f"TypeofExpression({self.argument})"
+class HasattrExpression:
+    def __init__(self, obj, attr_name):
+        self.obj = obj
+        self.attr_name = attr_name  # string literal
+    def __repr__(self):
+        return f"HasattrExpression({self.obj}, {self.attr_name})"
+class ClassofExpression:
+    def __init__(self, argument):
+        self.argument = argument
+    def __repr__(self):
+        return f"ClassofExpression({self.argument})"
 class IfStatement:
     def __init__(self, condition, then_body: Block, else_body: Block = None):
         self.condition = condition

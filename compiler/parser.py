@@ -96,6 +96,24 @@ class Parser:
             node = self.parse_expression()
             self.expect("SYMBOL", ")")
             return TypeofExpression(node)
+        elif self.current_token().type == "KEYWORD" and self.current_token().value == "hasattr":
+            self.advance()
+            self.expect("SYMBOL", "(")
+            obj = self.parse_expression()
+            self.expect("SYMBOL", ",")
+            # attribute name must be a string literal
+            if self.current_token().type != "STRING":
+                raise SyntaxError(f"hasattr requires a string literal for attribute name{self.get_position_info()}")
+            attr_name = self.current_token().value
+            self.advance()
+            self.expect("SYMBOL", ")")
+            return HasattrExpression(obj, attr_name)
+        elif self.current_token().type == "KEYWORD" and self.current_token().value == "classof":
+            self.advance()
+            self.expect("SYMBOL", "(")
+            node = self.parse_expression()
+            self.expect("SYMBOL", ")")
+            return ClassofExpression(node)
         elif self.match("KEYWORD", "this"):
             self.advance()
             return ThisExpression()
