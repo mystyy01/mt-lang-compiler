@@ -36,5 +36,19 @@ class Parser{
             set token = this.current_token()
         }
         // need to implement hasattr or some sort of that. See line 27 in parser.py
+        // hacky try catch fix for now
+        try{
+            if (token.line != null){ // cannot compare against null because of LLVM IR parsing error: error: null must be pointer type
+            //  %"is_not_null" = icmp ne i32 %"line", null
+            //                                        ^
+                string pos_info = " at line " + str(token.line)
+                if (token.column != null){
+                    set pos_info = pos_info + ", column " + str(token.column)
+                }
+                return pos_info
+            }
+        }catch{
+            return ""
+        }
     }
 }
