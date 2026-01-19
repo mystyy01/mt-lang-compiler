@@ -158,7 +158,8 @@ class SemanticAnalyzer:
                 'name': field.name,
                 'type': field.type,
                 'is_constructor_arg': field.is_constructor_arg,
-                'initializer': field.initializer
+                'initializer': field.initializer,
+                'element_type': getattr(field, 'element_type', None)
             })
         methods_info = {}
         for method in node.methods:
@@ -195,13 +196,13 @@ class SemanticAnalyzer:
 
     def analyze_field_declaration(self, node: FieldDeclaration):
         # Fields are just stored in the class scope
-        self.symbol_table.declare(node.name, "field", node.type)
+        self.symbol_table.declare(node.name, "field", node.type, element_type=getattr(node, 'element_type', None))
 
         # Analyze initializer if present
         if node.initializer:
             init_type = self.analyze(node.initializer)
             # Check type compatibility
-            if init_type != node.type and init_type != "any":
+            if init_type != node.type and init_type != "any" and init_type != "null":
                 pos_info = self.get_position_info(node)
                 self.add_error(f"Field initializer type mismatch{pos_info}. Cannot assign {init_type} to {node.type}")
 
@@ -260,10 +261,23 @@ class SemanticAnalyzer:
             return "string"  # Single character as string
         elif obj_type == "array":
             # Check if the array has a declared element type
+            element_type = None
             if isinstance(node.object, Identifier):
                 symbol = self.symbol_table.lookup(node.object.name)
                 if symbol and symbol.get("element_type"):
                     return symbol["element_type"]
+            elif isinstance(node.object, MemberExpression):
+                # Handle this.tokens or similar member expressions
+                field_name = None
+                if isinstance(node.object.property, Identifier):
+                    field_name = node.object.property.name
+                elif isinstance(node.object.property, str):
+                    field_name = node.object.property
+                
+                if field_name:
+                    symbol = self.symbol_table.lookup(field_name)
+                    if symbol and symbol.get("element_type"):
+                        return symbol["element_type"]
             # Default to int for untyped arrays
             return "int"
         else:
@@ -330,11 +344,11 @@ class SemanticAnalyzer:
             # "any" is a wildcard that matches any type
             if type_of_node != node.type and type_of_node != "any":
                 # Allow assignment if both are user-defined classes or if value is a new expression of the right type
-                # Also allow null to be assigned to string (null pointer is compatible with string*)
+                # Also allow null to be assigned to any type (null is compatible with all pointer types)
                 if not ((isinstance(node.value, NewExpression) and node.value.class_name == node.type) or
                         (isinstance(node.value, CallExpression) and type_of_node == node.type)):
-                    # null can be assigned to string (i8*)
-                    if not (type_of_node == "null" and node.type == "string"):
+                    # null can be assigned to any type
+                    if type_of_node != "null":
                         pos_info = self.get_position_info(node)
                         print(f"DEBUG: Assignment type mismatch: {type_of_node} to {node.type}")
                         print(f"DEBUG: Assignment node: {node}")
@@ -378,9 +392,6 @@ class SemanticAnalyzer:
         return res["data_type"]
     def analyze_expression_statement(self, node: ExpressionStatement):
         self.analyze(node.expression)
-    def analyze_set_statement(self, node: SetStatement):
-        # Analyze the value
-        self.analyze(node.value)
     def analyze_binary_expression(self, node: BinaryExpression):
         left_type = self.analyze(node.left)
         right_type = self.analyze(node.right)
@@ -537,35 +548,55 @@ class SemanticAnalyzer:
                 for name, info in scope.items():
                     print(f"  {name}: {info}")
             
-            # Register imported symbols
-            for symbol in node.symbols:
-                print(f"DEBUG: Looking for symbol '{symbol}'")
-                # Check if it's a class in the module
-                class_symbol = module_analyzer.symbol_table.lookup(symbol)
-                print(f"DEBUG: Found symbol: {class_symbol}")
-                if class_symbol and class_symbol["symbol_type"] == "class":
+            # Determine which symbols to import
+            if node.is_wildcard:
+                # Wildcard import: collect all classes and functions from the module
+                symbols_to_import = []
+                for scope in module_analyzer.symbol_table.scopes:
+                    for name, info in scope.items():
+                        if info.get("symbol_type") in ("class", "function"):
+                            symbols_to_import.append((name, info))
+            else:
+                # Specific import: use the symbols list
+                symbols_to_import = []
+                for symbol in node.symbols:
+                    class_symbol = module_analyzer.symbol_table.lookup(symbol)
+                    if class_symbol:
+                        symbols_to_import.append((symbol, class_symbol))
+            
+            # Register imported symbols (with conflict detection)
+            for symbol_name, symbol_info in symbols_to_import:
+                # Check for conflicts with existing symbols
+                existing = self.symbol_table.lookup(symbol_name)
+                if existing:
+                    pos_info = self.get_position_info(node)
+                    self.add_error(f"Import conflict: '{symbol_name}' is already defined{pos_info}")
+                    continue
+                
+                if symbol_info["symbol_type"] == "class":
                     # Register the class in our symbol table
-                    self.symbol_table.declare(symbol, "class", symbol)
+                    self.symbol_table.declare(symbol_name, "class", symbol_name)
                     # Also add to a separate class registry for codegen
                     if not hasattr(self, 'classes'):
                         self.classes = {}
                     # Copy class information from module
-                    module_class_info = module_analyzer.classes.get(symbol, {})
-                    self.classes[symbol] = module_class_info
-                    print(f"DEBUG: Registered class '{symbol}' with fields: {module_class_info.get('fields', [])}")
+                    module_class_info = module_analyzer.classes.get(symbol_name, {})
+                    self.classes[symbol_name] = module_class_info
+                    print(f"DEBUG: Registered class '{symbol_name}' with fields: {module_class_info.get('fields', [])}")
                 else:
                     # It's a function - use its actual return type from the module analysis
-                    if class_symbol:
-                        self.symbol_table.declare(symbol, "function", class_symbol["data_type"], class_symbol.get("parameters"))
-                    else:
-                        # Fallback for unknown symbols
-                        self.symbol_table.declare(symbol, "function", "any")
+                    self.symbol_table.declare(symbol_name, "function", symbol_info["data_type"], symbol_info.get("parameters"))
+                    print(f"DEBUG: Registered function '{symbol_name}' with type: {symbol_info['data_type']}")
 
         except Exception as e:
             # If we can't load the module, just declare as function for now
             print(f"DEBUG: Exception loading module '{module_name}': {e}")
-            for symbol in node.symbols:
-                self.symbol_table.declare(symbol, "function", "any")
+            if node.is_wildcard:
+                # For wildcard, we can't declare fallback symbols since we don't know what they are
+                self.add_error(f"Could not load module '{module_name}' for wildcard import")
+            else:
+                for symbol in node.symbols:
+                    self.symbol_table.declare(symbol, "function", "any")
 
     def analyze_call_expression(self, node: CallExpression):
         func_name = None
@@ -789,17 +820,6 @@ class SemanticAnalyzer:
         if node.then_body:
             self.analyze(node.then_body)
 
-    def analyze_if_statement(self, node):
-        """Analyze an if statement, including condition, then block, and else block"""
-        # Analyze the condition
-        self.analyze(node.condition)
-        # Analyze the then block
-        if node.then_body:
-            self.analyze(node.then_body)
-        # Analyze the else block if present
-        if node.else_body:
-            self.analyze(node.else_body)
-
     def analyze_for_in_statement(self, node):
         """Analyze a for-in statement"""
         # Analyze the iterable
@@ -816,9 +836,19 @@ class SemanticAnalyzer:
     def analyze_set_statement(self, node):
         """Analyze a set statement (assignment)"""
         # Analyze the target (could be an identifier or member expression)
-        self.analyze(node.target)
+        target_type = self.analyze(node.target)
         # Analyze the value
-        self.analyze(node.value)
+        value_type = self.analyze(node.value)
+        
+        # Type checking for assignment
+        if target_type and value_type:
+            if target_type != value_type and value_type != "any":
+                # null can be assigned to any type
+                if value_type != "null":
+                    pos_info = self.get_position_info(node)
+                    print(f"DEBUG: SetStatement type mismatch: {value_type} to {target_type}")
+                    print(f"DEBUG: SetStatement node: {node}")
+                    self.add_error(f"Type mismatch{pos_info}. Cannot assign type {value_type} to {target_type}")
 
     def analyze_return_statement(self, node):
         """Analyze a return statement"""

@@ -422,17 +422,17 @@ class Tokenizer{
     }
 }
 
-from stdlib.io use File
+// from stdlib.io use File
 
-File source_file = new File("/home/juxtaa/coding/mt-lang/compiler/bootstrap/tokenizer.mtc", "r")
-print("Opened file")
-string source = source_file.read()
-print("TOKENIZER CLASS")
-Tokenizer tokens_class = new Tokenizer(source, "fp")
-print("Created tokenizer")
-print("TOKENS")
-array<Token> tokens = tokens_class.tokenize()
-print("Tokenization complete")
-print("FINAL TOKENS LENGTH: " + str(tokens.length()))
-Token first_token = tokens[0]
-print("FIRST TOKEN: " + str(first_token.value))
+// File source_file = new File("/home/juxtaa/coding/mt-lang/compiler/bootstrap/tokenizer.mtc", "r")
+// print("Opened file")
+// string source = source_file.read()
+// print("TOKENIZER CLASS")
+// Tokenizer tokens_class = new Tokenizer(source, "fp")
+// print("Created tokenizer")
+// print("TOKENS")
+// array<Token> tokens = tokens_class.tokenize()
+// print("Tokenization complete")
+// print("FINAL TOKENS LENGTH: " + str(tokens.length()))
+// Token first_token = tokens[0]
+// print("FIRST TOKEN: " + str(first_token.value))

@@ -1288,6 +1288,21 @@ class CodeGenerator:
         if isinstance(node, FromImportStatement):
             # Load the module for code generation
             module_name = self.load_module(node.module_path)
+            
+            # For wildcard imports, make all module symbols directly accessible
+            if node.is_wildcard:
+                module_data = self.modules.get(module_name, {})
+                # Register all functions directly (not under module prefix)
+                for func_name, func_ir in module_data.items():
+                    if func_name != '_file_path' and callable(func_ir):
+                        if func_name not in self.functions:
+                            self.functions[func_name] = func_ir
+                # Register all classes directly
+                for cls_name, cls_info in module_data.items():
+                    if cls_name != '_file_path' and isinstance(cls_info, dict):
+                        if cls_name not in self.classes:
+                            self.classes[cls_name] = cls_info
+            
             return None
         if isinstance(node, LibcImportStatement):
             # Declare requested libc functions
@@ -1778,16 +1793,47 @@ class CodeGenerator:
 
             # Handle array indexing: arr[index]
             # Determine the element type based on the array
+            elem_type = self.int_type
+            elem_size = 4
+            
             if isinstance(node.object, Identifier):
                 if node.object.name in self.array_lengths:
                     elem_type, elem_size = self.array_lengths[node.object.name]
                 else:
                     # Not an array, error
                     raise Exception(f"Cannot index into non-array/string type for {node.object.name}")
-            else:
-                # For more complex expressions, assume int elements for now
-                elem_type = self.int_type
-                elem_size = 4
+            elif isinstance(node.object, MemberExpression):
+                # Handle this.tokens or obj.field style accesses
+                field_name = None
+                if isinstance(node.object.property, Identifier):
+                    field_name = node.object.property.name
+                elif isinstance(node.object.property, str):
+                    field_name = node.object.property
+                
+                if field_name:
+                    # Look up field type from class info
+                    if isinstance(node.object.object, ThisExpression) and hasattr(self, 'current_class'):
+                        class_name = self.current_class
+                        class_fields = self.classes.get(class_name, {}).get('fields', [])
+                        for field in class_fields:
+                            if field.get('name') == field_name:
+                                # Check if it's a typed array
+                                if field.get('element_type'):
+                                    elem_type = self.get_llvm_type(field['element_type'])
+                                    elem_size = self.get_type_size(field['element_type'])
+                                break
+                    elif isinstance(node.object.object, Identifier):
+                        # Handle obj.field style - look up variable type
+                        var_name = node.object.object.name
+                        if var_name in self.variable_classes:
+                            class_name = self.variable_classes[var_name]
+                            class_fields = self.classes.get(class_name, {}).get('fields', [])
+                            for field in class_fields:
+                                if field.get('name') == field_name:
+                                    if field.get('element_type'):
+                                        elem_type = self.get_llvm_type(field['element_type'])
+                                        elem_size = self.get_type_size(field['element_type'])
+                                    break
 
             return self.array_get(obj, index, elem_type)
         if isinstance(node, Identifier):

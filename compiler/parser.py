@@ -567,6 +567,14 @@ class Parser:
             self.advance()
             module_path = self.parse_expression()
             self.expect("KEYWORD", "use")
+            # Check for wildcard import
+            if self.match("SYMBOL", "*"):
+                self.advance()
+                # Wildcard import - cannot use with libc
+                if isinstance(module_path, Identifier) and module_path.name == "libc":
+                    self.add_error("Wildcard import not allowed for libc module")
+                    return FromImportStatement(module_path, [], is_wildcard=True)
+                return FromImportStatement(module_path, None, is_wildcard=True)
             # Parse comma-separated symbols
             symbols = []
             symbol_name = self.current_token().value

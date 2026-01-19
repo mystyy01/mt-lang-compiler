@@ -1,0 +1,271 @@
+// =========================
+// LITERALS & IDENTIFIERS
+// =========================
+
+class NumberLiteral{
+    arg string number
+    arg int line = 0
+    arg int column = 0
+}
+
+class FloatLiteral{
+    arg string value
+    arg int line = 0
+    arg int column = 0
+}
+
+class StringLiteral{
+    arg string value
+    arg int line = 0
+    arg int column = 0
+}
+
+class BoolLiteral{
+    arg bool value
+}
+
+class NullLiteral{
+}
+
+class Identifier{
+    arg string name
+    arg int line = 0
+    arg int column = 0
+}
+
+class TypeLiteral{
+    arg string name
+}
+
+// =========================
+// EXPRESSIONS
+// =========================
+
+class BinaryExpression{
+    arg any left
+    arg string operator
+    arg any right
+}
+
+class InExpression{
+    arg any item
+    arg any container
+    arg int line = 0
+    arg int column = 0
+}
+
+class ArrayLiteral{
+    arg array elements
+}
+
+class CallExpression{
+    arg any callee
+    arg array arguments
+    arg int line = 0
+    arg int column = 0
+}
+
+class MemberExpression{
+    arg any object
+    arg any property
+}
+
+class IndexExpression{
+    arg any object
+    arg any index
+}
+
+class TypeofExpression{
+    arg any argument
+}
+
+class NewExpression{
+    arg string class_name
+    arg array arguments = []
+    arg int line = 0
+    arg int column = 0
+}
+
+class ThisExpression{
+    arg int line = 0
+    arg int column = 0
+}
+
+class MethodCallExpression{
+    arg any object_expr
+    arg string method_name
+    arg array arguments = []
+    arg int line = 0
+    arg int column = 0
+}
+
+class FieldAccessExpression{
+    arg any object_expr
+    arg string field_name
+    arg int line = 0
+    arg int column = 0
+}
+
+// =========================
+// STATEMENTS
+// =========================
+
+class ExpressionStatement{
+    arg any expression
+}
+
+class VariableDeclaration{
+    arg string type
+    arg string name
+    arg string value = null
+    arg string element_type = null
+    arg int line = 0
+    arg int column = 0
+}
+
+class SetStatement{
+    arg any target
+    arg any value
+    arg int line = 0
+    arg int column = 0
+}
+
+class BreakStatement{
+    arg int line = 0
+    arg int column = 0
+}
+
+class ReturnStatement{
+    arg any value = null
+}
+
+class ThrowStatement{
+    arg any expression
+    arg int line = 0
+    arg int column = 0
+}
+
+// =========================
+// CONTROL FLOW
+// =========================
+
+class Block{
+    arg array statements
+}
+
+class IfStatement{
+    arg any condition
+    arg Block then_body
+    arg Block else_body = null
+}
+
+class WhileStatement{
+    arg any condition
+    arg Block then_body
+}
+
+class ForInStatement{
+    arg any variable
+    arg any iterable
+    arg Block body
+}
+
+class TryStatement{
+    arg Block try_block
+    arg array catch_blocks
+    arg int line = 0
+    arg int column = 0
+}
+
+class CatchBlock{
+    arg string exception_type = null
+    arg string identifier = null
+    arg Block body = null
+    arg int line = 0
+    arg int column = 0
+}
+
+// =========================
+// FUNCTIONS
+// =========================
+
+class Parameter{
+    arg string name
+    arg string param_type = null
+    arg any default_value = null
+    arg string element_type = null
+}
+
+class FunctionDeclaration{
+    arg string return_type
+    arg string name
+    arg array parameters
+    arg Block body
+}
+
+class DynamicFunctionDeclaration{
+    arg string name
+    arg array parameters
+    arg Block body
+}
+
+// =========================
+// IMPORTS
+// =========================
+
+class FromImportStatement{
+    arg string module_path
+    arg array symbols = null
+    arg bool is_wildcard = false
+}
+
+class SimpleImportStatement{
+    arg string module_name
+    arg string alias = null
+}
+
+class LibcImportStatement{
+    arg array symbols
+}
+
+// =========================
+// CLASSES & OOP
+// =========================
+
+class FieldDeclaration{
+    arg string name
+    arg string type
+    arg any initializer = null
+    arg bool is_constructor_arg = false
+    arg string element_type = null
+    arg int line = 0
+    arg int column = 0
+}
+
+class MethodDeclaration{
+    arg string name
+    arg array params = []
+    arg string return_type = null
+    arg Block body = null
+    arg bool is_virtual = false
+    arg bool is_static = false
+    arg int line = 0
+    arg int column = 0
+}
+
+class ClassDeclaration{
+    arg string name
+    arg array fields = []
+    arg array methods = []
+    arg string inherits_from = null
+    arg int line = 0
+    arg int column = 0
+}
+
+// =========================
+// PROGRAM ROOT
+// =========================
+
+class Program{
+    arg array statements
+}

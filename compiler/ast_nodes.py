@@ -148,10 +148,13 @@ class DynamicFunctionDeclaration:
     def __repr__(self):
         return f"DynamicFunctionDeclaration({self.name}, {self.parameters}, {self.body})"
 class FromImportStatement:
-    def __init__(self, module_path, symbols):
+    def __init__(self, module_path, symbols, is_wildcard=False):
         self.module_path = module_path
-        self.symbols = symbols  # List of symbol names
+        self.symbols = symbols  # List of symbol names, or None for wildcard
+        self.is_wildcard = is_wildcard
     def __repr__(self):
+        if self.is_wildcard:
+            return f"FromImportStatement({self.module_path}, *)"
         return f"FromImportStatement({self.module_path}, {self.symbols})"
 class SimpleImportStatement:
     def __init__(self, module_name, alias = None):

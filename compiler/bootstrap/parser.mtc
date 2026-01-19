@@ -1,0 +1,40 @@
+from tokenizer use Token, CompilerError
+from ast_nodes use *
+
+class Parser{
+    arg array<Token> tokens
+    arg string file_path = null
+    int position = 0
+    void check_file_path(){
+        if (this.file_path == null){
+            set this.file_path = "unknown"
+        }
+    }
+    Token current_token(){
+        if (this.position >= this.tokens.length()){
+            return new Token("EOF", "")
+        }
+        return this.tokens[this.position]
+    }
+    void advance(int offset = 1){
+        set this.position = this.position + offset
+    }
+    Token peek_token(int value=1){
+        if (this.position + value < this.tokens.length()){
+            return this.tokens[this.position+value]
+        }
+        return null
+    }
+    bool is_at_end(){
+        if (this.position >= this.tokens.length()){
+            return true
+        }
+        return false
+    }
+    string get_position_info(Token token = null){
+        if (token == null){
+            set token = this.current_token()
+        }
+        // need to implement hasattr or some sort of that. See line 27 in parser.py
+    }
+}

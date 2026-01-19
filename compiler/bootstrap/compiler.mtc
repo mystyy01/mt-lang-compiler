@@ -1,4 +1,5 @@
-from tokenizer use Tokenizer
+from tokenizer use Tokenizer, Token
+from parser use Parser
 from stdlib.io use File
 
 File source_file = new File("./tokenizer.mtc", "r")
@@ -7,4 +8,12 @@ string source = source_file.read()
 Tokenizer tokens_class = new Tokenizer(source, "fp")
 array tokens = tokens_class.tokenize()
 print(tokens.length())
-print(str(tokens))
+
+Parser parser = new Parser(tokens, "")
+Token current_token = parser.current_token()
+print(current_token.value)
+parser.advance()
+Token current_token2 = parser.current_token()
+print(current_token2.value)
+Token next_token = parser.peek_token()
+print(next_token.value)
