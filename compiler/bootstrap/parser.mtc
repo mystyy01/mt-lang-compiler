@@ -35,20 +35,254 @@ class Parser{
         if (token == null){
             set token = this.current_token()
         }
-        // need to implement hasattr or some sort of that. See line 27 in parser.py
-        // hacky try catch fix for now
-        try{
-            if (token.line != null){ // cannot compare against null because of LLVM IR parsing error: error: null must be pointer type
-            //  %"is_not_null" = icmp ne i32 %"line", null
-            //                                        ^
-                string pos_info = " at line " + str(token.line)
-                if (token.column != null){
-                    set pos_info = pos_info + ", column " + str(token.column)
-                }
-                return pos_info
+        if (hasattr(token, "line") && token.line != null){
+            string pos_info = " at line " + str(token.line)
+            if (hasattr(token, "column") && token.column != null){
+                set pos_info = pos_info + ", column" + str(token.column)
             }
-        }catch{
-            return ""
+            return pos_info
+        }
+        return ""
+    }
+    bool match(string token_type, string value = null){
+        if (this.current_token() == null){
+            return false
+        }
+        if (this.current_token().type == token_type && (value == null || this.current_token().value == value)){
+            return true
+        }
+        else{
+            return false
         }
     }
+    bool peek_match(string token_type, string value = null, int offset = 0){
+        int pos = this.position + offset
+        if (pos >= this.tokens.length()){
+            return false
+        }
+        Token token = this.tokens[pos]
+        return token.type == token_type && (value == null || token.value == value)
+    }
+    void expect(string token_type, string value = null){
+        Token current = this.current_token()
+        string expected = token_type
+        if (value != null){
+            set expected = value
+        }
+        if (current.type == token_type && (value == null || current.value == value)){
+            this.advance()
+        }
+        else{
+            string pos_info = this.get_position_info(current)
+            if (value != null){
+                throw new CompilerError("Expected '" + str(value) + "'" + str(pos_info) + "but found '" + str(current.value) + "' (" + str(current.type) + ")")
+            }
+            else{
+                throw new CompilerError("Expected '" + str(token_type) + str(pos_info) + "but found '" + str(current.value) + "' (" + str(current.type) + ")")
+            }
+        }
+    }
+    func parse_primary(){
+        array builtins = ["fopen", "fclose", "fread", "fwrite", "fseek", "ftell", "malloc", "free", "int", "str", "float", "read"]
+        if (this.current_token().type == "INTEGER_LITERAL"){
+            Token token = this.current_token()
+            NumberLiteral literal = new NumberLiteral(token.value, token.line, token.column)
+            this.advance()
+            return literal
+        }
+        elif (this.current_token().type == "FLOAT_LITERAL"){
+            Token token  = this.current_token()
+            FloatLiteral literal = new FloatLiteral(token.value, token.line, token.column)
+            this.advance()
+            return literal
+        }
+        elif (this.current_token().type == "STRING"){
+            Token token = this.current_token()
+            StringLiteral literal = new StringLiteral(token.value, token.line, token.column)
+            this.advance()
+            return literal
+        }
+        elif (this.current_token().type == "NAME" || (this.current_token().type == "KEYWORD" && this.current_token().value in builtins)){
+            Token token = this.current_token()
+            Identifier literal = new Identifier(token.value, token.line, token.column)
+            this.advance()
+
+            if (this.match("SYMBOL", "(")){
+                return this.parse_function_call(literal)
+            }
+            return literal
+        }
+        elif (this.match("KEYWORD", "null")){
+            this.advance()
+            return new NullLiteral()
+        }
+        elif (this.match("KEYWORD", "typeof")){
+            this.advance()
+            this.expect("SYMBOL", "(")
+            any node = this.parse_expression()
+            this.expect("SYMBOL", ")")
+            return new TypeofExpression(node)
+        }
+        elif (this.match("KEYWORD", "hasattr")){
+            this.advance()
+            this.expect("SYMBOL", "(")
+            any obj = this.parse_expression()
+            this.expect("SYMBOL", ",")
+            if (this.current_token().type != "STRING"){
+                throw new CompilerError("hasattr requires a string literal for attribute name" + this.get_position_info())
+            }
+            string attr_name = this.current_token().value
+            this.advance()
+            this.expect("SYMBOL", ")")
+            return new HasattrExpression(obj, attr_name)
+        }
+        elif (this.match("KEYWORD", "classof")){
+            this.advance()
+            this.expect("SYMBOL", "(")
+            any node = this.parse_expression()
+            this.expect("SYMBOL", ")")
+            return new ClassofExpression(node)
+        }
+        elif (this.match("KEYWORD", "this")){
+            this.advance()
+            return new ThisExpression()
+        }
+        elif (this.match("KEYWORD", "new")){
+            this.advance()
+            string class_name = this.current_token().value
+            this.expect("NAME")
+            this.expect("SYMBOL", ")")
+            array args = []
+            if (this.match("SYMBOL", ")") == false){
+                args.append(this.parse_expression())
+                while (this.match("SYMBOL", ",")){
+                    this.advance()
+                    args.append(this.parse_expression())
+                }
+            }
+            this.expect("SYMBOL", ")")
+            return new NewExpression(class_name, args)
+        }
+        elif (this.match("KEYWORD", "int") || this.match("KEYWORD", "foat") || this.match("KEYWORD", "string") || this.match("KEYWORD", "array") || this.match("KEYWORD", "bool") || this.match("KEYWORD", "void")){
+            string value = this.current_token().value
+            this.advance()
+            return new TypeLiteral(value)
+        }
+        elif (this.match("SYMBOL")){
+            if (this.match("SYMBOL", "(")){
+                this.advance()
+                any node = this.parse_expression()
+                this.expect("SMYBOL", ")")
+                return node
+            }
+            if (this.match("SYMBOL", "[")){
+                this.advance()
+                array elements = []
+                if (this.match("SYMBOL", "]" == false)){
+                    any element = this.parse_expression()
+                    elements.append(element)
+                    while (this.match("SYMBOL", ",")){
+                        this.advance()
+                        elements.append(this.parse_expression())
+                    }
+                    this.expect("SYMBOL", "]")
+                    return new ArrayLiteral(elements)
+                }
+            }
+        }
+        elif (this.match("KEYWORD", "true")){
+            return new BoolLiteral(true)
+        }
+        elif (this.match("KEYWORD", "false")){
+            return new BoolLiteral(false)
+        }
+        else{
+            Token current = this.current_token()
+            string pos_info = this.get_position_info(current)
+            throw new CompilerError("Unexpected token " + current.type + "'" + current.value + "'" + pos_info)
+        }
+    }
+    func parse_call_member(){
+        any base = this.parse_primary()
+        while (this.match("SYMBOL", "(") || this.match("SYMBOL", ".") || this.match("SYMBOL", "[")){
+            if (this.match("SYMBOL", "(")){
+                this.advance()
+                array args = []
+                if (this.match("SYMBOL", ")") == false){
+                    args.append(this.parse_expression())
+                    while (this.match("SYMBOL", ",")){
+                        this.advance()
+                        args.append(this.parse_expression())
+                    }
+                    this.expect("SYMBOL", ")")
+                    if (hasattr(base, "line")){
+                        int line = base.line
+                        if (hasattr(base, "column")){
+                            int column = base.column
+                        }
+                    }
+                    set base = new CallExpression(base, args, line, column)
+                }
+            }
+            elif (this.match("SYMBOL", ".")){
+                this.advance()
+                if (this.match("NAME") || this.match("KEYWORD")){
+                    string member_property = this.current_token().value
+                    this.advance()
+                }
+                else{
+                    Token current = this.current_token()
+                    string pos_info = this.get_position_info()
+                    throw new CompilerError("Invalid member property: '" + current.value + "'" + pos_info + " - expected NAME or KEYWORD")
+                }
+                set base = new MemberExpression(base, member_property)
+                if (this.match("SYMBOL", "(")){
+                    this.advance()
+                    array args = []
+                    if (this.match("SYMBOL", ")") == false){
+                        args.append(this.parse_expression())
+                        while (this.match("SYMBOL", ",")){
+                            this.advance()
+                            args.append(this.parse_expression())
+                        }
+                    }
+                    this.expect("SYMBOL", ")")
+                    if (hasattr(base, "line")){
+                        int line = base.line
+                        if (hasattr(base, "column")){
+                            int column = base.column
+                        }
+                    }
+                    set base = new CallExpression(base, args, line, column)
+                }
+            }
+            elif (this.match("SYMBOL", "[") == true){
+                this.advance()
+                any index = this.parse_expression()
+                this.expect("SYMBOL", "]")
+                set base = new IndexExpression(base, index)
+            }
+        }
+        return base
+    }
+    CallExpression parse_function_call(callee){
+        this.advance() // consume '('
+        array args = []
+        if (this.match("SYMBOL", ")") == false){
+            args.append(this.parse_expression())
+            while (this.match("SYMBOL", ",")){
+                this.advance()
+                args.append(this.parse_expression())
+            }
+        }
+        this.expect("SYMBOL", ")")
+        if (hasattr(base, "line")){
+            int line = base.line
+            if (hasattr(base, "column")){
+                int column = base.column
+            }
+        }
+        return new CallExpression(callee, args, line, column)
+    }
+
 }
