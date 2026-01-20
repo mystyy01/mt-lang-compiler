@@ -20,7 +20,6 @@ class CompilerError extends Exception{
     arg string file_path = ""
     void raise(){
         // DEBUG
-        print("RAISING COMPILER ERROR: " + this.message)
     }
 }
 
@@ -39,19 +38,14 @@ class Tokenizer{
 
     string current_char(){
         // DEBUG
-        print("Accessing current_char at position " + str(this.position))
-        print("Source length: " + str(this.source.length()))
         if (this.position >= this.source.length()){
-            print("Position out of bounds, returning null")
             return null
         }
-        print("Char: " + this.source[this.position])
         return this.source[this.position]
     }
 
     void advance(int offset = 1){
         // DEBUG
-        print("Advancing by " + str(offset))
         for (i in range(offset)){
             if (this.position < this.source.length()){
                 if (this.source[this.position] == "\n"){
@@ -67,7 +61,6 @@ class Tokenizer{
 
     bool is_at_end(){
         // DEBUG
-        print("Checking is_at_end: position=" + str(this.position) + ", length=" + str(this.source.length()))
         if (this.position >= this.source.length()){
             return true
         }
@@ -76,9 +69,7 @@ class Tokenizer{
 
     string peek_next(){
         // DEBUG
-        print("Peeking next character at position " + str(this.position + 1))
         if ((this.position + 1) >= this.source.length()){
-            print("OUT OF BOUNDS, RETURNING NULL")
             return null
         }
         return this.source[this.position+1]
@@ -86,7 +77,6 @@ class Tokenizer{
 
     void skip_whitespace(){
         // DEBUG
-        print("Skipping whitespace, starting at position " + str(this.position))
         while (this.is_at_end() == false){
             if ((this.current_char() in WHITESPACE) == false){
                 break
@@ -100,7 +90,6 @@ class Tokenizer{
             if (this.current_char() == "/"){
                 if (this.peek_next() == "/"){
                     // DEBUG
-                    print("Skipping comment starting at line " + str(this.line) + ", col " + str(this.column))
                     this.advance()
                     this.advance()
                     while (this.is_at_end() == false){
@@ -129,7 +118,6 @@ class Tokenizer{
             this.advance()
         }
         // DEBUG
-        print("Read word: '" + word + "' at line " + str(start_line) + ", col " + str(start_column))
         if (word in KEYWORDS){
             return new Token("KEYWORD", word, start_line, start_column)
         }
@@ -168,7 +156,6 @@ class Tokenizer{
                     this.advance()
                 }
                 if (found_digits == false){
-                    print("Throwing CompilerError: expected digits after decimal point at line " + str(start_line))
                     CompilerError error = new CompilerError("Invalid float literal at line " + str(start_line) + ": expected digits after decimal point", "ERROR", this.file_path)
                     throw error
                 }
@@ -197,7 +184,6 @@ class Tokenizer{
                     this.advance()
                 }
                 if (found_exp_digits == false){
-                    print("Throwing CompilerError: expected digits in exponent at line " + str(start_line))
                     CompilerError error = new CompilerError("Invalid float literal at line " + str(start_line) + ": expected digits in exponent", "ERROR", this.file_path)
                     throw error
                 }
@@ -213,7 +199,6 @@ class Tokenizer{
         }
 
         // DEBUG
-        print("Read number: '" + number + "' of type " + token_type + " at line " + str(start_line) + ", col " + str(start_column))
         return new Token(token_type, number, start_line, start_column)
     }
 
@@ -269,14 +254,12 @@ class Tokenizer{
 
         if (this.is_at_end()){
             // DEBUG
-            print("Throwing CompilerError: unterminated string starting at line " + str(start_line))
             string error_message = "Unterminated string literal starting at line " + str(start_line) + ", column " + str(start_column)
             throw new CompilerError(error_message)
         }
 
         this.advance()
         // DEBUG
-        print("Read string: \"" + new_str + "\" at line " + str(start_line) + ", col " + str(start_column))
         return new Token("STRING", new_str, start_line, start_column)
     }
 
@@ -306,7 +289,6 @@ class Tokenizer{
             if (double_sym in DOUBLE_CHAR_SYMBOLS){
                 Token token = new Token("SYMBOL", double_sym, this.line, this.column)
                 this.advance(2)
-                print("Read double symbol: '" + token.value + "' at line " + str(this.line) + ", col " + str(this.column))
                 return token
             }
         }
@@ -315,32 +297,41 @@ class Tokenizer{
         if (this.current_char() in SINGLE_CHAR_SYMBOLS){
             Token token = new Token("SYMBOL", this.current_char(), this.line, this.column)
             this.advance()
-            print("Read single symbol: '" + token.value + "' at line " + str(this.line) + ", col " + str(this.column))
+            
+
             return token
         }
 
         // Unknown symbol
-        print("Throwing CompilerError: unknown symbol at line " + str(this.line) + ", col " + str(this.column))
+        
+
         throw new CompilerError("Unknown symbol '" + this.current_char() + "' at line " + str(this.line) + ", column " + str(this.column))
     }
 
     array tokenize(){
-        print("Running tokenize()")
+        
+
         array<Token> tokens = []
-        print("Created tokens array")
+        
+
         while (this.is_at_end() == false){
-            print("Still not at end")
+            
+
             this.skip_whitespace()
             this.skip_comment()
             this.skip_whitespace()
-            print("Skipped comments and whitespace")
+            
+
             if (this.is_at_end() == true){
-                print("At end")
+                
+
                 break
             }
-            print("Checking quotes")
+            
+
             if (this.current_char() in QUOTES){
-                print("Entering string")
+                
+
                 tokens.append(this.read_string())
             }
             elif (this.current_char() == "-"){
@@ -368,7 +359,8 @@ class Tokenizer{
                     }
                     Token token = new Token(token_type, number, start_line, start_column)
                     tokens.append(token)
-                    print("Read negative number: '" + number + "' at line " + str(start_line) + ", col " + str(start_column))
+                    
+
                 }
                 else{
                     tokens.append(this.read_symbol())
@@ -412,27 +404,14 @@ class Tokenizer{
                     set char = "EOF"
                 }
                 // DEBUG
-                print("Throwing CompilerError: tokenizer failed at char " + str(this.position))
+                
+
                 throw new CompilerError("Tokenizer failed at char " + str(this.position) + ": '" + char + "' (line " + str(this.line) + ", col " + str(this.column) + ")")
             }
         }
         // DEBUG
-        print("Tokenization complete. Total tokens: " + str(tokens.length()))
+        
+
         return tokens
     }
 }
-
-// from stdlib.io use File
-
-// File source_file = new File("/home/juxtaa/coding/mt-lang/compiler/bootstrap/tokenizer.mtc", "r")
-// print("Opened file")
-// string source = source_file.read()
-// print("TOKENIZER CLASS")
-// Tokenizer tokens_class = new Tokenizer(source, "fp")
-// print("Created tokenizer")
-// print("TOKENS")
-// array<Token> tokens = tokens_class.tokenize()
-// print("Tokenization complete")
-// print("FINAL TOKENS LENGTH: " + str(tokens.length()))
-// Token first_token = tokens[0]
-// print("FIRST TOKEN: " + str(first_token.value))

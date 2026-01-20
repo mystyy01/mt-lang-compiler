@@ -1861,14 +1861,23 @@ class CodeGenerator:
                     # Void variables are not allowed
                     raise TypeError(f"Cannot declare variable of type 'void'")
                 else:
-                    # For class types, store the object pointer directly (like arrays)
+                    # For class types, allocate stack space for a pointer and store pointer
+                    # This ensures proper LLVM dominance for control flow
+                    pointer = self.builder.alloca(self.i8_ptr_type, name=node.name)
+                    self.variables[node.name] = pointer
+                    
                     if node.value:
                         value = self.generate(node.value)
-                        self.variables[node.name] = value  # Store object pointer directly
-                        self.variable_types[node.name] = llvm_type
-                        # Only register as class variable if it's a known class (not 'any' or other special types)
-                        if node.type in self.classes:
-                            self.variable_classes[node.name] = node.type  # Store class name
+                        # Bitcast struct pointer to i8* for storage
+                        if hasattr(value.type, 'pointee'):
+                            value = self.builder.bitcast(value, self.i8_ptr_type, name="any_cast")
+                        # Store the object pointer to the allocated space
+                        self.builder.store(value, pointer)
+                    
+                    self.variable_types[node.name] = llvm_type
+                    # Only register as class variable if it's a known class (not 'any' or other special types)
+                    if node.type in self.classes:
+                        self.variable_classes[node.name] = node.type  # Store class name
                     return None
         if isinstance(node, IndexExpression):
             # Handle array/string indexing
@@ -1943,9 +1952,9 @@ class CodeGenerator:
             # Special handling for arrays - return the pointer directly
             if var_type == self.dyn_array_ptr_type:
                 return storage  # Return the pointer directly, no load needed
-            # Special handling for class instances - return the pointer directly
+            # Special handling for class instances - load the pointer from storage
             elif node.name in self.variable_classes:
-                return storage  # Return the class instance pointer directly
+                return self.builder.load(storage, name=node.name)
             # Special handling for 'any' type - stored as direct pointer, return directly
             elif var_type == self.i8_ptr_type and node.name not in self.variable_types:
                 # This shouldn't happen, but just in case
@@ -1976,8 +1985,11 @@ class CodeGenerator:
                 # Handle field access on class instances: obj.field
                 obj_name = node.object.name
                 if obj_name in self.variables and obj_name in self.variable_classes:
-                    # Get the object pointer
+                    # Get the object pointer - may need to load from allocated space
                     obj_ptr = self.variables[obj_name]
+                    # If obj_ptr is a pointer (allocated space), load the actual object pointer
+                    if obj_ptr.type != self.i8_ptr_type:
+                        obj_ptr = self.builder.load(obj_ptr, name=f"{obj_name}_val")
                     class_name = self.variable_classes[obj_name]
                     
                     # Get field index
@@ -2187,7 +2199,7 @@ class CodeGenerator:
                     # For arrays, replace the pointer in variables dict
                     self.variables[name] = value
                     return None  # No store operation needed for arrays
-                elif expected_type == self.i8_ptr_type and storage.type == self.i8_ptr_type:
+                elif expected_type == self.i8_ptr_type and storage.type == self.i8_ptr_type and name not in self.variable_classes:
                     # 'any' type variable stored directly (not via allocation)
                     # Replace the pointer in variables dict, similar to array handling
                     if hasattr(value.type, 'pointee'):
@@ -2195,6 +2207,13 @@ class CodeGenerator:
                         value = self.builder.bitcast(value, self.i8_ptr_type, name="any_cast")
                     self.variables[name] = value
                     return None  # No store operation needed
+                elif name in self.variable_classes:
+                    # Class type - store to allocated space
+                    if hasattr(value.type, 'pointee'):
+                        # Bitcast struct pointer to i8* for storage
+                        value = self.builder.bitcast(value, self.i8_ptr_type, name="any_cast")
+                    self.builder.store(value, storage)
+                    return None
                 else:
                     # For non-array types, store into the allocated space
                     if value.type != expected_type:
@@ -2217,6 +2236,9 @@ class CodeGenerator:
                         class_name = self.variable_classes[obj_name]
                         field_idx = self.get_field_index(class_name, property)
                         obj_ptr = self.variables[obj_name]
+                        # Load the object pointer if it's stored in allocated space
+                        if obj_ptr.type != self.i8_ptr_type:
+                            obj_ptr = self.builder.load(obj_ptr, name=f"{obj_name}_ptr")
                         field_ptr = self.builder.gep(obj_ptr, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"{property}_ptr")
                         self.builder.store(value, field_ptr)
                         return None
@@ -2391,6 +2413,9 @@ class CodeGenerator:
                         raise Exception(f"Method '{method_name}' not found in class '{class_name}'")
                     func = self.functions[func_name]
                     obj_ptr = self.variables[obj_name]
+                    # If obj_ptr is a pointer (allocated space), load the actual object pointer
+                    if obj_ptr.type != self.i8_ptr_type:
+                        obj_ptr = self.builder.load(obj_ptr, name=f"{obj_name}_val")
                     # Get the struct type for this class
                     struct_type = self.classes[class_name]['llvm_struct']
                     # Cast to struct pointer type for the first argument
