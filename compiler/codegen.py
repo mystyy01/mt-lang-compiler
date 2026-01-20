@@ -115,6 +115,7 @@ class CodeGenerator:
         self.variable_classes = {}  # var_name -> class_name
         self.array_element_classes = {}  # array_var_name -> element_class_name
         self.classes = {}  # class_name -> class_info
+        self.method_params = {}  # func_name -> list of params with default values
         self.module = llvmlite.ir.Module(name="mt_lang")
         self.int_type = llvmlite.ir.IntType(32)
         self.float_type = llvmlite.ir.DoubleType()  # 64-bit double as requested
@@ -432,6 +433,8 @@ class CodeGenerator:
         func_type = llvmlite.ir.FunctionType(return_type, param_types)
         func = llvmlite.ir.Function(self.module, func_type, name=func_name)
         self.functions[func_name] = func
+        # Store method parameters for default value handling at call sites
+        self.method_params[func_name] = method.params
         return func
 
     def generate_class_method(self, class_name, method, pre_registered_func=None):
@@ -491,7 +494,15 @@ class CodeGenerator:
                 # For array parameters, store pointer directly
                 self.variables[param_name] = func.args[i]
                 self.variable_types[param_name] = param_type
-                self.array_lengths[param_name] = (self.int_type, 4)  # Default assumption
+                # Use explicit element type if provided, otherwise default to int
+                element_type = getattr(param, 'element_type', None)
+                if element_type:
+                    elem_type, elem_size, elem_class = self.get_element_llvm_type(element_type)
+                    self.array_lengths[param_name] = (elem_type, elem_size)
+                    if elem_class:
+                        self.array_element_classes[param_name] = elem_class
+                else:
+                    self.array_lengths[param_name] = (self.int_type, 4)  # Default assumption
             else:
                 # Allocate space and store parameter
                 pointer = self.builder.alloca(param_type, name=param_name)
@@ -880,8 +891,8 @@ class CodeGenerator:
         initial_capacity = max(len(elements), 4)  # At least 4 elements capacity
 
         # Calculate element size
-        if elem_type == self.i8_ptr_type:
-            elem_size = 8  # pointer size
+        if elem_type is None or elem_type == self.i8_ptr_type:
+            elem_size = 8  # pointer size (also used as default for unknown type)
         else:
             elem_size = 4  # int size
 
@@ -963,19 +974,25 @@ class CodeGenerator:
         # Continue - store the new element
         self.builder.position_at_end(continue_block)
         current_data = self.builder.load(data_field_ptr, name="current_data")
-        if elem_type == self.i8_ptr_type:
+
+        # Determine the pointer type for element access based on element type
+        if elem_type == self.i8_ptr_type or elem_type is None:
             typed_ptr = self.builder.bitcast(current_data, self.i8_ptr_type.as_pointer())
+        elif elem_type == self.float_type:
+            typed_ptr = self.builder.bitcast(current_data, self.float_type.as_pointer())
+        elif elem_type == self.bool_type:
+            typed_ptr = self.builder.bitcast(current_data, self.bool_type.as_pointer())
         else:
             typed_ptr = self.builder.bitcast(current_data, self.int_type.as_pointer())
 
         elem_ptr = self.builder.gep(typed_ptr, [length], name="new_elem_ptr")
-        
+
         # For class types (stored as i8*), bitcast the value to i8* before storing
         # Class instances are stored as struct pointers, so check if value is a pointer to struct
         value_ptr_type = getattr(value.type, 'pointee', None)
         if value_ptr_type and hasattr(value_ptr_type, 'elements'):
             value = self.builder.bitcast(value, self.i8_ptr_type, name="value_as_void_ptr")
-        
+
         self.builder.store(value, elem_ptr)
 
         # Increment length
@@ -1435,6 +1452,15 @@ class CodeGenerator:
             for i, arg in enumerate(node.arguments):
                 value = self.generate(arg)
                 field_ptr = self.builder.gep(obj_ptr, [self.create_int_constant(0), self.create_int_constant(i)], name=f"{arg_fields[i]['name']}_ptr")
+                # Bitcast if needed for type mismatches
+                expected_type = field_ptr.type.pointee
+                if value.type != expected_type:
+                    if expected_type == self.i8_ptr_type and hasattr(value.type, 'pointee'):
+                        # Bitcast any pointer to i8* for 'any' type fields
+                        value = self.builder.bitcast(value, self.i8_ptr_type, name="field_any_cast")
+                    elif expected_type == self.dyn_array_ptr_type and value.type == self.i8_ptr_type:
+                        # Bitcast i8* to array pointer for array fields (from dynamic functions)
+                        value = self.builder.bitcast(value, self.dyn_array_ptr_type, name="field_array_cast")
                 self.builder.store(value, field_ptr)
 
             # Initialize remaining constructor args with defaults
@@ -1682,7 +1708,7 @@ class CodeGenerator:
 
                 if isinstance(node.value, ArrayLiteral):
                     elements = node.value.elements
-                    # Determine element type: explicit type > inferred from elements > default int
+                    # Determine element type: explicit type > inferred from elements > None (unknown)
                     if explicit_element_type:
                         elem_type, elem_size, elem_class = self.get_element_llvm_type(explicit_element_type)
                         if elem_class:
@@ -1690,9 +1716,18 @@ class CodeGenerator:
                     elif len(elements) > 0 and isinstance(elements[0], StringLiteral):
                         elem_type = self.i8_ptr_type
                         elem_size = 8
-                    else:
+                    elif len(elements) > 0 and isinstance(elements[0], NumberLiteral):
                         elem_type = self.int_type
                         elem_size = 4
+                    elif len(elements) == 0:
+                        # Empty array - use None as marker for unknown type
+                        # Will be determined at first append
+                        elem_type = None
+                        elem_size = 8  # Use pointer size as default for allocation
+                    else:
+                        # Non-primitive elements (likely class instances) - use pointer type
+                        elem_type = self.i8_ptr_type
+                        elem_size = 8
 
                     # Generate values for all elements
                     elem_values = []
@@ -1749,7 +1784,12 @@ class CodeGenerator:
 
                     # Type check: make sure the value is actually an array pointer
                     if array_ptr.type != self.dyn_array_ptr_type:
-                        raise TypeError(f"Cannot assign {array_ptr.type} to array variable '{node.name}': expected {self.dyn_array_ptr_type}")
+                        # Allow i8* (from dynamic functions) to be used as array pointer
+                        if array_ptr.type == self.i8_ptr_type:
+                            # Bitcast i8* to array pointer type
+                            array_ptr = self.builder.bitcast(array_ptr, self.dyn_array_ptr_type, name="array_from_any")
+                        else:
+                            raise TypeError(f"Cannot assign {array_ptr.type} to array variable '{node.name}': expected {self.dyn_array_ptr_type}")
 
                     # If in main function, create a global variable
                     if self.in_main_function:
@@ -1826,7 +1866,9 @@ class CodeGenerator:
                         value = self.generate(node.value)
                         self.variables[node.name] = value  # Store object pointer directly
                         self.variable_types[node.name] = llvm_type
-                        self.variable_classes[node.name] = node.type  # Store class name
+                        # Only register as class variable if it's a known class (not 'any' or other special types)
+                        if node.type in self.classes:
+                            self.variable_classes[node.name] = node.type  # Store class name
                     return None
         if isinstance(node, IndexExpression):
             # Handle array/string indexing
@@ -1904,6 +1946,13 @@ class CodeGenerator:
             # Special handling for class instances - return the pointer directly
             elif node.name in self.variable_classes:
                 return storage  # Return the class instance pointer directly
+            # Special handling for 'any' type - stored as direct pointer, return directly
+            elif var_type == self.i8_ptr_type and node.name not in self.variable_types:
+                # This shouldn't happen, but just in case
+                return storage
+            elif storage.type == self.i8_ptr_type:
+                # Direct pointer storage (for 'any' types stored via else branch)
+                return storage
             else:
                 # For non-array types, load from the allocated space
                 return self.builder.load(storage, name=node.name)
@@ -1954,6 +2003,21 @@ class CodeGenerator:
                             raise Exception(f"Array append should be called as method: {obj_name}.append(value)")
                         else:
                             raise Exception(f"Unknown array property: {node.property}")
+                    elif var_type == self.i8_ptr_type:
+                        # Variable is 'any' type - try to find a class with this field
+                        # This is a runtime type assumption, typically used for common AST fields
+                        for class_name, class_info in self.classes.items():
+                            try:
+                                field_idx = self.get_field_index(class_name, node.property)
+                                # Found a class with this field - use its layout
+                                struct_type = class_info['llvm_struct']
+                                obj_ptr = self.variables[obj_name]
+                                obj_struct_ptr = self.builder.bitcast(obj_ptr, struct_type.as_pointer(), name=f"{obj_name}_struct")
+                                field_ptr = self.builder.gep(obj_struct_ptr, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"{node.property}_field")
+                                return self.builder.load(field_ptr, name=node.property)
+                            except:
+                                continue
+                        raise Exception(f"Field '{node.property}' not found in any class for 'any' type variable '{obj_name}'")
                     else:
                         raise Exception(f"Unknown field '{node.property}' on variable '{obj_name}'")
             elif isinstance(node.object, CallExpression):
@@ -2038,6 +2102,57 @@ class CodeGenerator:
                     return self.builder.load(field_ptr, name=node.property)
                 else:
                     raise Exception(f"Cannot determine type for chained member access: {node.object}.{node.property}")
+            elif isinstance(node.object, IndexExpression):
+                # Handle field access on array element: arr[i].field or this.tokens[i].type
+                elem_value = self.generate(node.object)
+
+                # Determine element class from array_element_classes
+                elem_class = None
+                if isinstance(node.object.object, Identifier):
+                    arr_name = node.object.object.name
+                    if arr_name in self.array_element_classes:
+                        elem_class = self.array_element_classes[arr_name]
+                elif isinstance(node.object.object, MemberExpression):
+                    # Handle this.tokens[i].field style
+                    inner_member = node.object.object
+                    field_name = inner_member.property if isinstance(inner_member.property, str) else inner_member.property
+
+                    if isinstance(inner_member.object, ThisExpression) and hasattr(self, 'current_class'):
+                        # Look up the field's element type in the current class
+                        class_fields = self.classes.get(self.current_class, {}).get('fields', [])
+                        for field in class_fields:
+                            if field.get('name') == field_name and field.get('element_type'):
+                                elem_class = field.get('element_type')
+                                break
+                    elif isinstance(inner_member.object, Identifier):
+                        var_name = inner_member.object.name
+                        if var_name in self.variable_classes:
+                            class_name = self.variable_classes[var_name]
+                            class_fields = self.classes.get(class_name, {}).get('fields', [])
+                            for field in class_fields:
+                                if field.get('name') == field_name and field.get('element_type'):
+                                    elem_class = field.get('element_type')
+                                    break
+
+                if elem_class and elem_class in self.classes:
+                    # Bitcast element to struct pointer and access field
+                    struct_type = self.classes[elem_class]['llvm_struct']
+                    elem_struct_ptr = self.builder.bitcast(elem_value, struct_type.as_pointer(), name="elem_struct")
+                    field_idx = self.get_field_index(elem_class, node.property)
+                    field_ptr = self.builder.gep(elem_struct_ptr, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"{node.property}_field")
+                    return self.builder.load(field_ptr, name=node.property)
+                else:
+                    # Try dynamic field lookup if elem_class not found
+                    for class_name, class_info in self.classes.items():
+                        try:
+                            field_idx = self.get_field_index(class_name, node.property)
+                            struct_type = class_info['llvm_struct']
+                            elem_struct_ptr = self.builder.bitcast(elem_value, struct_type.as_pointer(), name="elem_struct_dyn")
+                            field_ptr = self.builder.gep(elem_struct_ptr, [self.create_int_constant(0), self.create_int_constant(field_idx)], name=f"{node.property}_field")
+                            return self.builder.load(field_ptr, name=node.property)
+                        except:
+                            continue
+                    raise Exception(f"Cannot determine element type for field access: {node.object}.{node.property}")
             else:
                 # For other member access, assume it's method call (handled elsewhere)
                 raise Exception(f"Field access not implemented for {type(node.object)}.{node.property}")
@@ -2072,12 +2187,25 @@ class CodeGenerator:
                     # For arrays, replace the pointer in variables dict
                     self.variables[name] = value
                     return None  # No store operation needed for arrays
+                elif expected_type == self.i8_ptr_type and storage.type == self.i8_ptr_type:
+                    # 'any' type variable stored directly (not via allocation)
+                    # Replace the pointer in variables dict, similar to array handling
+                    if hasattr(value.type, 'pointee'):
+                        # Bitcast any pointer to i8* for storage
+                        value = self.builder.bitcast(value, self.i8_ptr_type, name="any_cast")
+                    self.variables[name] = value
+                    return None  # No store operation needed
                 else:
                     # For non-array types, store into the allocated space
                     if value.type != expected_type:
-                        raise TypeError(f"Cannot assign {value.type} to variable '{name}' of type {expected_type}: type mismatch")
+                        # Special handling for 'any' type: allow assigning any pointer type
+                        if expected_type == self.i8_ptr_type and hasattr(value.type, 'pointee'):
+                            # Bitcast the pointer to i8* for storage
+                            value = self.builder.bitcast(value, self.i8_ptr_type, name="any_cast")
+                        else:
+                            raise TypeError(f"Cannot assign {value.type} to variable '{name}' of type {expected_type}: type mismatch")
 
-                self.builder.store(value, storage)
+                    self.builder.store(value, storage)
                 return None
             elif isinstance(node.target, MemberExpression):
                 obj = node.target.object
@@ -2167,8 +2295,35 @@ class CodeGenerator:
 
                     # Generate arguments, with 'this' as first argument
                     args = [this_ptr]
-                    for arg in node.arguments:
-                        args.append(self.generate(arg))
+                    expected_param_types = func.function_type.args
+                    for i, arg in enumerate(node.arguments):
+                        arg_value = self.generate(arg)
+                        # Bitcast to expected type if needed (for 'any' type parameters)
+                        expected_idx = i + 1  # +1 because first param is 'this'
+                        if expected_idx < len(expected_param_types):
+                            expected_type = expected_param_types[expected_idx]
+                            if expected_type == self.i8_ptr_type and arg_value.type != self.i8_ptr_type:
+                                # Bitcast struct pointer to i8* for 'any' type
+                                arg_value = self.builder.bitcast(arg_value, self.i8_ptr_type, name="any_cast")
+                        args.append(arg_value)
+
+                    # Fill in default values for any missing arguments
+                    method_params = self.method_params.get(func_name, [])
+                    num_provided = len(node.arguments)
+                    num_expected = len(method_params)
+                    for i in range(num_provided, num_expected):
+                        param = method_params[i]
+                        if param.default_value is not None:
+                            default_val = self.generate(param.default_value)
+                            # Bitcast if needed for 'any' type parameters
+                            expected_idx = i + 1  # +1 because first param is 'this'
+                            if expected_idx < len(expected_param_types):
+                                expected_type = expected_param_types[expected_idx]
+                                if expected_type == self.i8_ptr_type and default_val.type != self.i8_ptr_type:
+                                    default_val = self.builder.bitcast(default_val, self.i8_ptr_type, name="default_any_cast")
+                            args.append(default_val)
+                        else:
+                            raise Exception(f"Missing required argument {i+1} for method '{method_name}' in class '{class_name}'")
 
                     # Get position info for better error messages
                     line = getattr(node, 'line', None)
@@ -2177,8 +2332,8 @@ class CodeGenerator:
 
                     try:
                         return self.builder.call(func, args, name=f"this_{method_name}")
-                    except TypeError as e:
-                        raise TypeError(f"Type mismatch in call to '{class_name}.{method_name}'{pos_info}: {e}")
+                    except (TypeError, IndexError) as e:
+                        raise Exception(f"Error in call to '{class_name}.{method_name}'{pos_info}: {e}")
 
                 # Handle method calls on identifiers
                 if not isinstance(node.callee.object, Identifier):
@@ -2194,6 +2349,23 @@ class CodeGenerator:
 
                     if method_name == "append":
                         value = self.generate(node.arguments[0])
+                        # If element type is None (unknown), infer from first value
+                        if elem_type is None:
+                            if value.type == self.int_type:
+                                elem_type = self.int_type
+                                elem_size = 4
+                            elif value.type == self.float_type:
+                                elem_type = self.float_type
+                                elem_size = 8
+                            elif value.type == self.bool_type:
+                                elem_type = self.bool_type
+                                elem_size = 1
+                            else:
+                                # Pointer type (strings, class instances, etc.)
+                                elem_type = self.i8_ptr_type
+                                elem_size = 8
+                            # Update the stored element type
+                            self.array_lengths[obj_name] = (elem_type, elem_size)
                         self.array_append(array_ptr, value, elem_type, elem_size)
                         return None
                     elif method_name == "length":
