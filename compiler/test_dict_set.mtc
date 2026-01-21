@@ -1,0 +1,4 @@
+dict my_dict = {}
+string name = "key"
+set my_dict[name] = {"symbol_type": "var", "data_type": "int", "parameters": [], "element_type": ""}
+print(my_dict)

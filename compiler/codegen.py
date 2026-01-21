@@ -953,28 +953,31 @@ class CodeGenerator:
         return array_ptr, elem_type, elem_size
 
     def create_empty_dict(self, key_type=None, value_type=None):
-        """Create an empty dict"""
+        """Create an empty dict with initial capacity"""
         # Allocate dict struct on heap
         struct_size = self.create_int_constant(32)  # 4 + 4 + 8 + 8 + padding
         dict_mem = self.builder.call(self.malloc, [struct_size], name="dict_mem")
         dict_ptr = self.builder.bitcast(dict_mem, self.dict_ptr_type, name="dict")
-        
+
         # Set length to 0
-        zero = llvmlite.ir.Constant(self.int_type, 0)
-        length_ptr = self.builder.gep(dict_ptr, [zero, zero], name="length_ptr")
-        self.builder.store(zero, length_ptr)
-        
-        # Set capacity to 0
-        capacity_ptr = self.builder.gep(dict_ptr, [zero, llvmlite.ir.Constant(self.int_type, 1)], name="capacity_ptr")
-        self.builder.store(zero, capacity_ptr)
-        
-        # Set keys and values pointers to null
-        null_ptr = llvmlite.ir.Constant(self.i8_ptr_type, None)
-        keys_ptr = self.builder.gep(dict_ptr, [zero, llvmlite.ir.Constant(self.int_type, 2)], name="keys_ptr")
-        self.builder.store(null_ptr, keys_ptr)
-        values_ptr = self.builder.gep(dict_ptr, [zero, llvmlite.ir.Constant(self.int_type, 3)], name="values_ptr")
-        self.builder.store(null_ptr, values_ptr)
-        
+        length_ptr = self.builder.gep(dict_ptr, [llvmlite.ir.Constant(self.int_type, 0), llvmlite.ir.Constant(self.int_type, 0)], name="length_ptr")
+        self.builder.store(llvmlite.ir.Constant(self.int_type, 0), length_ptr)
+
+        # Set capacity to 4
+        capacity_ptr = self.builder.gep(dict_ptr, [llvmlite.ir.Constant(self.int_type, 0), llvmlite.ir.Constant(self.int_type, 1)], name="capacity_ptr")
+        self.builder.store(llvmlite.ir.Constant(self.int_type, 4), capacity_ptr)
+
+        # Allocate keys and values arrays
+        key_size = self.builder.mul(llvmlite.ir.Constant(self.int_type, 4), llvmlite.ir.Constant(self.int_type, 8), name="key_size")
+        keys_mem = self.builder.call(self.malloc, [key_size], name="keys_mem")
+        keys_ptr = self.builder.gep(dict_ptr, [llvmlite.ir.Constant(self.int_type, 0), llvmlite.ir.Constant(self.int_type, 2)], name="keys_ptr")
+        self.builder.store(keys_mem, keys_ptr)
+
+        value_size = self.builder.mul(llvmlite.ir.Constant(self.int_type, 4), llvmlite.ir.Constant(self.int_type, 8), name="value_size")
+        values_mem = self.builder.call(self.malloc, [value_size], name="values_mem")
+        values_ptr = self.builder.gep(dict_ptr, [llvmlite.ir.Constant(self.int_type, 0), llvmlite.ir.Constant(self.int_type, 3)], name="values_ptr")
+        self.builder.store(values_mem, values_ptr)
+
         return dict_ptr
 
     def create_dict_from_literal(self, key_values, value_values, key_type=None, value_type=None):
@@ -1303,14 +1306,17 @@ class CodeGenerator:
         current_data = self.builder.load(data_field_ptr, name="current_data")
 
         # Determine the pointer type for element access based on element type
-        if elem_type == self.i8_ptr_type or elem_type is None:
+        if elem_type is None or elem_type == self.i8_ptr_type:
             typed_ptr = self.builder.bitcast(current_data, self.i8_ptr_type.as_pointer())
         elif elem_type == self.float_type:
             typed_ptr = self.builder.bitcast(current_data, self.float_type.as_pointer())
         elif elem_type == self.bool_type:
             typed_ptr = self.builder.bitcast(current_data, self.bool_type.as_pointer())
+        elif hasattr(elem_type, 'pointee'):
+            # elem_type is already a pointer type
+            typed_ptr = self.builder.bitcast(current_data, elem_type)
         else:
-            typed_ptr = self.builder.bitcast(current_data, self.int_type.as_pointer())
+            typed_ptr = self.builder.bitcast(current_data, elem_type.as_pointer())
 
         elem_ptr = self.builder.gep(typed_ptr, [length], name="new_elem_ptr")
 
@@ -1319,6 +1325,9 @@ class CodeGenerator:
         value_ptr_type = getattr(value.type, 'pointee', None)
         if value_ptr_type and hasattr(value_ptr_type, 'elements'):
             value = self.builder.bitcast(value, self.i8_ptr_type, name="value_as_void_ptr")
+        elif value.type == self.i8_ptr_type.as_pointer():
+            # Load from pointer to string
+            value = self.builder.load(value, name="deref_value")
 
         self.builder.store(value, elem_ptr)
 
@@ -1423,11 +1432,280 @@ class CodeGenerator:
         
         return new_str
 
+    def dict_get(self, dict_ptr, key):
+        """Get value from dict by key - returns i8* pointer (any type)"""
+        func = self.builder.block.parent
+        zero = llvmlite.ir.Constant(self.int_type, 0)
+
+        # Get dict length
+        length_ptr = self.builder.gep(dict_ptr, [zero, zero], name="dict_len_ptr")
+        length = self.builder.load(length_ptr, name="dict_length")
+
+        # Get keys array pointer
+        keys_ptr_ptr = self.builder.gep(dict_ptr, [zero, self.create_int_constant(2)], name="keys_ptr_ptr")
+        keys_ptr = self.builder.load(keys_ptr_ptr, name="keys_ptr")
+
+        # Get values array pointer
+        values_ptr_ptr = self.builder.gep(dict_ptr, [zero, self.create_int_constant(3)], name="values_ptr_ptr")
+        values_ptr = self.builder.load(values_ptr_ptr, name="values_ptr")
+
+        # Loop through keys to find match
+        loop_block = func.append_basic_block(name="dict_get_loop")
+        body_block = func.append_basic_block(name="dict_get_body")
+        found_block = func.append_basic_block(name="dict_get_found")
+        not_found_block = func.append_basic_block(name="dict_get_not_found")
+        end_block = func.append_basic_block(name="dict_get_end")
+
+        counter_ptr = self.builder.alloca(self.int_type, name="dict_get_i")
+        self.builder.store(zero, counter_ptr)
+        result_ptr = self.builder.alloca(self.i8_ptr_type, name="dict_get_result")
+        self.builder.store(llvmlite.ir.Constant(self.i8_ptr_type, None), result_ptr)
+
+        self.builder.branch(loop_block)
+
+        self.builder.position_at_end(loop_block)
+        counter = self.builder.load(counter_ptr, name="i")
+        cond = self.builder.icmp_signed("<", counter, length, name="dict_get_cond")
+        self.builder.cbranch(cond, body_block, not_found_block)
+
+        self.builder.position_at_end(body_block)
+        current_i = self.builder.load(counter_ptr, name="curr_i")
+
+        # Get key at current index
+        key_byte_offset = self.builder.mul(current_i, self.create_int_constant(8), name="key_offset")
+        key_elem_ptr = self.builder.gep(keys_ptr, [key_byte_offset], name="key_elem_gep")
+        key_elem_ptr = self.builder.bitcast(key_elem_ptr, self.i8_ptr_type.as_pointer(), name="key_elem")
+        current_key = self.builder.load(key_elem_ptr, name="current_key")
+
+        # Compare keys (assuming string keys for now - need to handle different types)
+        # For simplicity, use string comparison
+        key_str = self.builder.call(self.strcmp, [current_key, key], name="key_cmp")
+        keys_equal = self.builder.icmp_signed("==", key_str, zero, name="keys_equal")
+
+        # If keys match, get the value
+        with self.builder.if_then(keys_equal):
+            value_byte_offset = self.builder.mul(current_i, self.create_int_constant(8), name="value_offset")
+            value_elem_ptr = self.builder.gep(values_ptr, [value_byte_offset], name="value_elem_gep")
+            value_elem_ptr = self.builder.bitcast(value_elem_ptr, self.i8_ptr_type.as_pointer(), name="value_elem")
+            found_value = self.builder.load(value_elem_ptr, name="found_value")
+            self.builder.store(found_value, result_ptr)
+            self.builder.branch(found_block)
+
+        # Increment counter
+        next_i = self.builder.add(current_i, self.create_int_constant(1), name="next_i")
+        self.builder.store(next_i, counter_ptr)
+        self.builder.branch(loop_block)
+
+        # Not found - return null
+        self.builder.position_at_end(not_found_block)
+        self.builder.branch(end_block)
+
+        # Found - already stored result
+        self.builder.position_at_end(found_block)
+        self.builder.branch(end_block)
+
+        # End
+        self.builder.position_at_end(end_block)
+        return self.builder.load(result_ptr, name="dict_get_result")
+
+    def dict_set(self, dict_ptr, key, value):
+        """Set key-value pair in dict - updates existing or adds new"""
+        func = self.builder.block.parent
+        zero = llvmlite.ir.Constant(self.int_type, 0)
+
+        # Get dict length
+        length_ptr = self.builder.gep(dict_ptr, [zero, zero], name="dict_len_ptr")
+        length = self.builder.load(length_ptr, name="dict_length")
+
+        # Get keys and values pointers
+        keys_ptr_ptr = self.builder.gep(dict_ptr, [zero, self.create_int_constant(2)], name="keys_ptr_ptr")
+        keys_ptr = self.builder.load(keys_ptr_ptr, name="keys_ptr")
+        values_ptr_ptr = self.builder.gep(dict_ptr, [zero, self.create_int_constant(3)], name="values_ptr_ptr")
+        values_ptr = self.builder.load(values_ptr_ptr, name="values_ptr")
+
+        # First, try to find existing key
+        loop_block = func.append_basic_block(name="dict_set_find_loop")
+        body_block = func.append_basic_block(name="dict_set_find_body")
+        not_found_block = func.append_basic_block(name="dict_set_not_found")
+        found_block = func.append_basic_block(name="dict_set_found")
+        end_block = func.append_basic_block(name="dict_set_end")
+
+        counter_ptr = self.builder.alloca(self.int_type, name="dict_set_i")
+        self.builder.store(zero, counter_ptr)
+
+        self.builder.branch(loop_block)
+
+        self.builder.position_at_end(loop_block)
+        counter = self.builder.load(counter_ptr, name="i")
+        cond = self.builder.icmp_signed("<", counter, length, name="dict_set_cond")
+        self.builder.cbranch(cond, body_block, not_found_block)
+
+        self.builder.position_at_end(body_block)
+        current_i = self.builder.load(counter_ptr, name="curr_i")
+
+        # Get key at current index
+        key_byte_offset = self.builder.mul(current_i, self.create_int_constant(8), name="key_offset")
+        key_elem_ptr = self.builder.gep(keys_ptr, [key_byte_offset], name="key_elem_gep")
+        key_elem_ptr = self.builder.bitcast(key_elem_ptr, self.i8_ptr_type.as_pointer(), name="key_elem")
+        current_key = self.builder.load(key_elem_ptr, name="current_key")
+
+        # Compare keys
+        key_cmp = self.builder.call(self.strcmp, [current_key, key], name="key_cmp")
+        keys_equal = self.builder.icmp_signed("==", key_cmp, zero, name="keys_equal")
+
+        with self.builder.if_then(keys_equal):
+            # Update existing value
+            value_byte_offset = self.builder.mul(current_i, self.create_int_constant(8), name="value_offset")
+            value_elem_ptr = self.builder.gep(values_ptr, [value_byte_offset], name="value_elem_gep")
+            value_elem_ptr = self.builder.bitcast(value_elem_ptr, self.i8_ptr_type.as_pointer(), name="value_elem")
+            # Bitcast value to i8* for storage
+            if hasattr(value.type, 'pointee'):
+                value = self.builder.bitcast(value, self.i8_ptr_type, name="any_cast")
+            self.builder.store(value, value_elem_ptr)
+            self.builder.branch(found_block)
+
+        # Increment counter
+        next_i = self.builder.add(current_i, self.create_int_constant(1), name="next_i")
+        self.builder.store(next_i, counter_ptr)
+        self.builder.branch(loop_block)
+
+        # Not found - add new key-value pair if space available
+        self.builder.position_at_end(not_found_block)
+        # Check if length < capacity
+        length_ptr = self.builder.gep(dict_ptr, [zero, zero], name="length_ptr")
+        current_length = self.builder.load(length_ptr, name="current_length")
+        capacity_ptr = self.builder.gep(dict_ptr, [zero, self.create_int_constant(1)], name="capacity_ptr")
+        capacity = self.builder.load(capacity_ptr, name="capacity")
+        has_space = self.builder.icmp_signed("<", current_length, capacity, name="has_space")
+
+        with self.builder.if_then(has_space):
+            # Add new key-value
+            keys_ptr_ptr = self.builder.gep(dict_ptr, [zero, self.create_int_constant(2)], name="keys_ptr_ptr")
+            keys_ptr = self.builder.load(keys_ptr_ptr, name="keys_ptr")
+            values_ptr_ptr = self.builder.gep(dict_ptr, [zero, self.create_int_constant(3)], name="values_ptr_ptr")
+            values_ptr = self.builder.load(values_ptr_ptr, name="values_ptr")
+
+            key_offset = self.builder.mul(current_length, self.create_int_constant(8), name="key_offset")
+            key_elem_gep = self.builder.gep(keys_ptr, [key_offset], name="key_elem_gep")
+            key_elem = self.builder.bitcast(key_elem_gep, self.i8_ptr_type.as_pointer(), name="key_elem")
+            self.builder.store(key, key_elem)
+
+            value_offset = self.builder.mul(current_length, self.create_int_constant(8), name="value_offset")
+            value_elem_gep = self.builder.gep(values_ptr, [value_offset], name="value_elem_gep")
+            value_elem = self.builder.bitcast(value_elem_gep, self.i8_ptr_type.as_pointer(), name="value_elem")
+            # Cast value to i8* if needed
+            if hasattr(value.type, 'pointee'):
+                pass
+            else:
+                value = self.builder.bitcast(value, self.i8_ptr_type, name="cast_value")
+            self.builder.store(value, value_elem)
+
+            new_length = self.builder.add(current_length, self.create_int_constant(1), name="new_length")
+            self.builder.store(new_length, length_ptr)
+
+        self.builder.branch(end_block)
+
+        # Found - already updated
+        self.builder.position_at_end(found_block)
+        self.builder.branch(end_block)
+
+        self.builder.position_at_end(end_block)
+
+    def array_set(self, array_ptr, index, value, elem_type):
+        """Set element at index in dynamic array"""
+        func = self.builder.block.parent
+        zero = llvmlite.ir.Constant(self.int_type, 0)
+        two = llvmlite.ir.Constant(self.int_type, 2)
+
+        # Get array length for bounds checking
+        length_ptr = self.builder.gep(array_ptr, [zero, zero], name="arr_set_len_ptr")
+        arr_len = self.builder.load(length_ptr, name="arr_set_len")
+
+        # Check if index < 0
+        is_negative = self.builder.icmp_signed("<", index, zero, name="arr_set_idx_negative")
+
+        # Check if index >= length
+        is_too_large = self.builder.icmp_signed(">=", index, arr_len, name="arr_set_idx_too_large")
+
+        # Combine: out of bounds if negative OR too large
+        is_out_of_bounds = self.builder.or_(is_negative, is_too_large, name="arr_set_idx_out_of_bounds")
+
+        # Create blocks for bounds check
+        bc_id = self.bounds_check_counter
+        self.bounds_check_counter += 1
+        error_block = func.append_basic_block(name=f"arr_set_index_error_{bc_id}")
+        ok_block = func.append_basic_block(name=f"arr_set_index_ok_{bc_id}")
+
+        self.builder.cbranch(is_out_of_bounds, error_block, ok_block)
+
+        # Error block - throw IndexError
+        self.builder.position_at_end(error_block)
+        index_error_tag = self.builder.load(self.get_exception_type_tag("IndexError"), name="arr_set_index_error_tag")
+        self.builder.store(index_error_tag, self.global_exception_type)
+
+        # Check if in try block
+        exc_depth = self.builder.load(self.global_exception_depth, name="arr_set_exc_depth_check")
+        is_in_try = self.builder.icmp_signed(">", exc_depth, self.create_int_constant(0), name="arr_set_is_in_try")
+
+        throw_block = func.append_basic_block(name=f"arr_set_idx_throw_{bc_id}")
+        exit_block = func.append_basic_block(name=f"arr_set_idx_exit_{bc_id}")
+
+        self.builder.cbranch(is_in_try, throw_block, exit_block)
+
+        # Throw block
+        self.builder.position_at_end(throw_block)
+        jmp_buf_ptr = self.builder.gep(self.global_jmp_buf, [self.create_int_constant(0), self.create_int_constant(0)], name="jmp_buf_for_arr_set_index_error")
+        jmp_buf_void_ptr = self.builder.bitcast(jmp_buf_ptr, self.i8_ptr_type, name="jmp_buf_void_ptr")
+        self.builder.call(self.longjmp, [jmp_buf_void_ptr, self.create_int_constant(1)], name="longjmp_arr_set_index_error")
+        self.builder.unreachable()
+
+        # Exit block
+        self.builder.position_at_end(exit_block)
+        error_msg = self.create_string_constant("IndexError: array index out of bounds\n")
+        self.builder.call(self.printf, [error_msg], name="print_arr_set_index_error")
+        self.builder.call(self.exit, [self.create_int_constant(1)], name="exit_on_arr_set_index_error")
+        self.builder.unreachable()
+
+        # OK block - perform the set
+        self.builder.position_at_end(ok_block)
+
+        # Get data pointer
+        data_field_ptr = self.builder.gep(array_ptr, [zero, two], name="arr_set_data_ptr_ptr")
+        data_ptr = self.builder.load(data_field_ptr, name="arr_set_data_ptr")
+
+        # Handle different element types
+        if hasattr(elem_type, 'pointee'):
+            # elem_type is already a pointer type (like dict_ptr_type)
+            typed_ptr = self.builder.bitcast(data_ptr, elem_type)
+        elif elem_type == self.i8_ptr_type:
+            # Special case for string pointers
+            typed_ptr = self.builder.bitcast(data_ptr, self.i8_ptr_type.as_pointer())
+        else:
+            # For primitive types like int, float
+            typed_ptr = self.builder.bitcast(data_ptr, elem_type.as_pointer())
+
+        elem_ptr = self.builder.gep(typed_ptr, [index], name="arr_set_elem_ptr")
+
+        # Convert value to i8* if needed for storage
+        if hasattr(value.type, 'pointee') or value.type == self.i8_ptr_type:
+            # Already a pointer, store directly
+            pass
+        else:
+            # For primitive types, need to allocate and store
+            # This is simplified - real implementation would handle different types
+            pass
+
+        self.builder.store(value, elem_ptr)
+
     def array_get(self, array_ptr, index, elem_type):
         """Get element at index from dynamic array"""
         func = self.builder.block.parent
         zero = llvmlite.ir.Constant(self.int_type, 0)
         two = llvmlite.ir.Constant(self.int_type, 2)
+
+        # Handle 'any' type arrays
+        if array_ptr.type == self.i8_ptr_type:
+            array_ptr = self.builder.bitcast(array_ptr, self.dyn_array_ptr_type, name="array_cast")
 
         # Get array length for bounds checking
         length_ptr = self.builder.gep(array_ptr, [zero, zero], name="arr_len_ptr")
@@ -1487,13 +1765,24 @@ class CodeGenerator:
         data_field_ptr = self.builder.gep(array_ptr, [zero, two], name="data_ptr_ptr")
         data_ptr = self.builder.load(data_field_ptr, name="data_ptr")
 
-        if elem_type == self.i8_ptr_type:
+        # Handle different element types
+        if elem_type is None or elem_type == self.i8_ptr_type:
+            # Default or string pointers
             typed_ptr = self.builder.bitcast(data_ptr, self.i8_ptr_type.as_pointer())
+        elif hasattr(elem_type, 'pointee'):
+            # elem_type is already a pointer type (like dict_ptr_type)
+            typed_ptr = self.builder.bitcast(data_ptr, elem_type)
         else:
-            typed_ptr = self.builder.bitcast(data_ptr, self.int_type.as_pointer())
+            # For primitive types like int, float
+            typed_ptr = self.builder.bitcast(data_ptr, elem_type.as_pointer())
 
         elem_ptr = self.builder.gep(typed_ptr, [index], name="elem_ptr")
-        return self.builder.load(elem_ptr, name="elem_val")
+
+        # For pointer types, return the pointer directly; for primitives, load the value
+        if elem_type is None or hasattr(elem_type, 'pointee'):
+            return elem_ptr
+        else:
+            return self.builder.load(elem_ptr, name="elem_val")
 
     def string_split(self, string_ptr, delimiter_ptr):
         """
@@ -1739,6 +2028,23 @@ class CodeGenerator:
             return llvmlite.ir.Constant(self.int_type, int(node.value))
         if isinstance(node, FloatLiteral):
             return llvmlite.ir.Constant(self.float_type, float(node.value))
+        if isinstance(node, ArrayLiteral):
+            # Create dynamic array from literal elements
+            elements = []
+            elem_type = None
+            for elem in node.elements:
+                elem_val = self.generate(elem)
+                if elem_val is not None:
+                    elements.append(elem_val)
+                    if elem_type is None:
+                        elem_type = elem_val.type
+                else:
+                    # Handle None values - skip or error
+                    pass
+            if elem_type is None:
+                elem_type = self.int_type  # Default
+            array_ptr, _, _ = self.create_dynamic_array(elements, elem_type)
+            return array_ptr
         if isinstance(node, DictLiteral):
             # Generate dict from literal
             key_values = [self.generate(key) for key in node.keys]
@@ -2235,7 +2541,11 @@ class CodeGenerator:
 
                     # Type check before storing
                     if value.type != llvm_type:
-                        raise TypeError(f"Cannot assign {value.type} to variable '{node.name}' of type {llvm_type}: type mismatch")
+                        if value.type == llvm_type.as_pointer() and llvm_type == self.i8_ptr_type:
+                            # Load from pointer to string
+                            value = self.builder.load(value, name="deref_ptr")
+                        else:
+                            raise TypeError(f"Cannot assign {value.type} to variable '{node.name}' of type {llvm_type}: type mismatch")
 
                     self.builder.store(value, pointer)
                     return None
@@ -2262,59 +2572,37 @@ class CodeGenerator:
                         self.variable_classes[node.name] = node.type  # Store class name
                     return None
         if isinstance(node, IndexExpression):
-            # Handle array/string indexing
+            # Handle array/string/dict indexing
             obj = self.generate(node.object)
             index = self.generate(node.index)
 
             # Check if the object is a string (i8*)
             if obj.type == self.i8_ptr_type:
-                # String indexing: return single character as string
-                return self.string_index(obj, index)
+                # For 'any' type (i8*), check index type
+                if index.type == self.i8_ptr_type:
+                    # Assume dict indexing
+                    dict_obj = self.builder.bitcast(obj, self.dict_ptr_type, name="dict_cast")
+                    return self.dict_get(dict_obj, index)
+                else:
+                    # Int index on 'any' - assume array
+                    array_obj = self.builder.bitcast(obj, self.dyn_array_ptr_type, name="array_cast")
+                    elem_type = self.i8_ptr_type  # Default
+                    if isinstance(node.object, Identifier):
+                        if node.object.name in self.array_lengths:
+                            elem_type, _ = self.array_lengths[node.object.name]
+                    return self.array_get(array_obj, index, elem_type)
+
+            # Check if the object is a dict
+            if obj.type == self.dict_ptr_type:
+                # Dict indexing: dict[key]
+                return self.dict_get(obj, index)
 
             # Handle array indexing: arr[index]
             # Determine the element type based on the array
-            elem_type = self.int_type
-            elem_size = 4
-            
+            elem_type = self.i8_ptr_type  # Default to pointer type for 'any'
             if isinstance(node.object, Identifier):
                 if node.object.name in self.array_lengths:
-                    elem_type, elem_size = self.array_lengths[node.object.name]
-                else:
-                    # Not an array, error
-                    raise Exception(f"Cannot index into non-array/string type for {node.object.name}")
-            elif isinstance(node.object, MemberExpression):
-                # Handle this.tokens or obj.field style accesses
-                field_name = None
-                if isinstance(node.object.property, Identifier):
-                    field_name = node.object.property.name
-                elif isinstance(node.object.property, str):
-                    field_name = node.object.property
-                
-                if field_name:
-                    # Look up field type from class info
-                    if isinstance(node.object.object, ThisExpression) and hasattr(self, 'current_class'):
-                        class_name = self.current_class
-                        class_fields = self.classes.get(class_name, {}).get('fields', [])
-                        for field in class_fields:
-                            if field.get('name') == field_name:
-                                # Check if it's a typed array
-                                if field.get('element_type'):
-                                    elem_type = self.get_llvm_type(field['element_type'])
-                                    elem_size = self.get_type_size(field['element_type'])
-                                break
-                    elif isinstance(node.object.object, Identifier):
-                        # Handle obj.field style - look up variable type
-                        var_name = node.object.object.name
-                        if var_name in self.variable_classes:
-                            class_name = self.variable_classes[var_name]
-                            class_fields = self.classes.get(class_name, {}).get('fields', [])
-                            for field in class_fields:
-                                if field.get('name') == field_name:
-                                    if field.get('element_type'):
-                                        elem_type = self.get_llvm_type(field['element_type'])
-                                        elem_size = self.get_type_size(field['element_type'])
-                                    break
-
+                    elem_type, _ = self.array_lengths[node.object.name]
             return self.array_get(obj, index, elem_type)
         if isinstance(node, Identifier):
             # Check if it's a global array (accessed from a method)
@@ -2333,6 +2621,9 @@ class CodeGenerator:
 
             # Special handling for arrays - return the pointer directly
             if var_type == self.dyn_array_ptr_type:
+                return storage  # Return the pointer directly, no load needed
+            # Special handling for dicts - return the pointer directly
+            elif var_type == self.dict_ptr_type:
                 return storage  # Return the pointer directly, no load needed
             # Special handling for class instances - load the pointer from storage
             elif node.name in self.variable_classes:
@@ -2636,6 +2927,38 @@ class CodeGenerator:
                     return None
                 else:
                     raise Exception(f"Unsupported member assignment: {node.target}")
+            elif isinstance(node.target, IndexExpression):
+                # Handle dict[index] = value or array[index] = value
+                obj = self.generate(node.target.object)
+                index = self.generate(node.target.index)
+                value = self.generate(node.value)
+
+                if obj.type == self.dict_ptr_type:
+                    # Dict assignment: dict[key] = value
+                    self.dict_set(obj, index, value)
+                    return None
+                elif obj.type == self.dyn_array_ptr_type:
+                    # Array assignment: arr[index] = value
+                    # Determine element type
+                    elem_type = self.int_type
+                    if isinstance(node.target.object, Identifier):
+                        if node.target.object.name in self.array_lengths:
+                            elem_type, _ = self.array_lengths[node.target.object.name]
+                    self.array_set(obj, index, value, elem_type)
+                    return None
+                elif obj.type == self.i8_ptr_type:
+                    # Assume 'any' type dict assignment
+                    dict_obj = self.builder.bitcast(obj, self.dict_ptr_type, name="dict_cast")
+                    self.dict_set(dict_obj, index, value)
+                    return None
+                elif obj.type == self.i8_ptr_type.as_pointer():
+                    # Assume pointer to dict
+                    dict_ptr = self.builder.load(obj, name="load_dict_ptr")
+                    dict_obj = self.builder.bitcast(dict_ptr, self.dict_ptr_type, name="dict_cast")
+                    self.dict_set(dict_obj, index, value)
+                    return None
+                else:
+                    raise Exception(f"Unsupported index assignment target type: {obj.type}")
             else:
                 raise Exception(f"Unsupported assignment target: {node.target}")
         if isinstance(node, ExpressionStatement):
@@ -3213,6 +3536,22 @@ class CodeGenerator:
                     if func.function_type.return_type == self.void_type:
                         return None
                     return call_result
+        if isinstance(node, InExpression):
+            # Generate 'in' operation: item in container
+            item = self.generate(node.item)
+            container = self.generate(node.container)
+
+            # For 'any' type container (dict), check if item (key) exists
+            if container.type == self.i8_ptr_type:
+                # Assume dict, check if dict_get returns non-null
+                dict_obj = self.builder.bitcast(container, self.dict_ptr_type, name="dict_cast")
+                value = self.dict_get(dict_obj, item)
+                null_ptr = llvmlite.ir.Constant(self.i8_ptr_type, None)
+                return self.builder.icmp_signed("!=", value, null_ptr, name="in_result")
+            else:
+                # For arrays or other types, not implemented yet
+                # Return false for now
+                return llvmlite.ir.Constant(llvmlite.ir.IntType(1), 0)
         if isinstance(node, NullLiteral):
             return llvmlite.ir.Constant(self.i8_ptr_type, None)
         if isinstance(node, TypeofExpression):
@@ -4021,18 +4360,88 @@ class CodeGenerator:
         """Generate code for 'item in collection' expression - returns bool"""
         item = self.generate(node.item)
         collection = self.generate(node.container)
-        
-        func = self.builder.block.parent
-        
-        # Create blocks for the comparison loop
-        loop_block = func.append_basic_block(name="in_loop")
-        found_block = func.append_basic_block(name="in_found")
-        not_found_block = func.append_basic_block(name="in_not_found")
-        continue_block = func.append_basic_block(name="in_continue")
-        
-        # Get array length
-        len_ptr = self.builder.gep(collection, [self.create_int_constant(0), self.create_int_constant(0)], name="len_ptr")
-        arr_length = self.builder.load(len_ptr, name="arr_length")
+
+        # Handle different collection types
+        if collection.type == self.i8_ptr_type:
+            # Assume dict
+            dict_obj = self.builder.bitcast(collection, self.dict_ptr_type, name="dict_cast")
+            value = self.dict_get(dict_obj, item)
+            null_ptr = llvmlite.ir.Constant(self.i8_ptr_type, None)
+            return self.builder.icmp_signed("!=", value, null_ptr, name="in_result")
+        elif collection.type == self.dyn_array_ptr_type:
+            # Array - implement loop to check containment
+            func = self.builder.block.parent
+
+            # Create blocks for the comparison loop
+            loop_block = func.append_basic_block(name="in_loop")
+            check_block = func.append_basic_block(name="in_check")
+            found_block = func.append_basic_block(name="in_found")
+            not_found_block = func.append_basic_block(name="in_not_found")
+            continue_block = func.append_basic_block(name="in_continue")
+
+            # Get array length
+            len_ptr = self.builder.gep(collection, [self.create_int_constant(0), self.create_int_constant(0)], name="len_ptr")
+            arr_length = self.builder.load(len_ptr, name="arr_length")
+
+            # Initialize index to 0
+            index_ptr = self.builder.alloca(self.int_type, name="index")
+            self.builder.store(self.create_int_constant(0), index_ptr)
+
+            # Branch to loop
+            self.builder.branch(loop_block)
+
+            # Loop block - check current element
+            self.builder.position_at_end(loop_block)
+            index = self.builder.load(index_ptr, name="index")
+            cond = self.builder.icmp_signed("<", index, arr_length, name="loop_cond")
+            self.builder.cbranch(cond, check_block, not_found_block)
+
+            # Check block - compare element with item
+            self.builder.position_at_end(check_block)
+            # Get element (simplified - assume string elements)
+            elem_type = self.i8_ptr_type  # Assume string elements for 'in'
+            if isinstance(node.container, Identifier):
+                if node.container.name in self.array_lengths:
+                    elem_type, _ = self.array_lengths[node.container.name]
+            if elem_type == self.i8_ptr_type:
+                # Get element pointer
+                data_ptr = self.builder.gep(collection, [self.create_int_constant(0), self.create_int_constant(2)], name="data_ptr")
+                data = self.builder.load(data_ptr, name="data")
+                typed_ptr = self.builder.bitcast(data, self.i8_ptr_type.as_pointer())
+                elem_ptr = self.builder.gep(typed_ptr, [index], name="elem_ptr")
+                elem = self.builder.load(elem_ptr, name="elem")
+                # Compare
+                cmp_result = self.builder.call(self.strcmp, [elem, item], name="elem_cmp")
+                is_equal = self.builder.icmp_signed("==", cmp_result, self.create_int_constant(0), name="is_equal")
+                self.builder.cbranch(is_equal, found_block, continue_block)
+            else:
+                # For non-string elements, assume not equal
+                self.builder.branch(continue_block)
+
+            # Continue block - increment index
+            self.builder.position_at_end(continue_block)
+            next_index = self.builder.add(index, self.create_int_constant(1), name="next_index")
+            self.builder.store(next_index, index_ptr)
+            self.builder.branch(loop_block)
+
+            # Found block
+            self.builder.position_at_end(found_block)
+            self.builder.branch(continue_block)
+
+            # Not found block
+            self.builder.position_at_end(not_found_block)
+            self.builder.branch(continue_block)
+
+            # Continue block (phi for result)
+            self.builder.position_at_end(continue_block)
+            phi = self.builder.phi(llvmlite.ir.IntType(1), name="in_result")
+            phi.add_incoming(llvmlite.ir.Constant(llvmlite.ir.IntType(1), 1), found_block)
+            phi.add_incoming(llvmlite.ir.Constant(llvmlite.ir.IntType(1), 0), not_found_block)
+            phi.add_incoming(llvmlite.ir.Constant(llvmlite.ir.IntType(1), 0), loop_block)  # From continue
+            return phi
+        else:
+            # Unsupported type
+            return llvmlite.ir.Constant(llvmlite.ir.IntType(1), 0)
         
         # Initialize index to 0
         index_ptr = self.builder.alloca(self.int_type, name="index")

@@ -271,11 +271,16 @@ class SemanticAnalyzer:
             # Return "any" for dict value access (could be refined with typed dicts)
             return "any"
 
+        # Any type indexing - allow any index type
+        if obj_type == "any":
+            return "any"
+
         # Array/string indexing - must be int
-        if index_type != "int" and index_type != "any":
-            pos_info = self.get_position_info(node)
-            self.add_error(f"Array/string index must be an integer{pos_info}")
-            return None
+        if obj_type == "string" or obj_type == "array":
+            if index_type != "int" and index_type != "any":
+                pos_info = self.get_position_info(node)
+                self.add_error(f"Array/string index must be an integer{pos_info}")
+                return None
 
         # Determine return type based on object type
         if obj_type == "string":
