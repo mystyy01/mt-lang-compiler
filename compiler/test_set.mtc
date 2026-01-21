@@ -1,0 +1,5 @@
+class Test {
+    void foo() {
+        set field_idx = field_idx + 1
+    }
+}

@@ -130,7 +130,7 @@ class Parser:
                     args.append(self.parse_expression())
             self.expect("SYMBOL", ")")
             return NewExpression(class_name, args)
-        elif self.match("KEYWORD", "int") or self.match("KEYWORD", "float") or self.match("KEYWORD", "string") or self.match("KEYWORD", "array") or self.match("KEYWORD", "bool") or self.match("KEYWORD", "void"):
+        elif self.match("KEYWORD", "int") or self.match("KEYWORD", "float") or self.match("KEYWORD", "string") or self.match("KEYWORD", "array") or self.match("KEYWORD", "dict") or self.match("KEYWORD", "bool") or self.match("KEYWORD", "void"):
             value = self.current_token().value
             self.advance()
             return TypeLiteral(value)  
@@ -150,7 +150,9 @@ class Parser:
                         self.advance()
                         elements.append(self.parse_expression())
                 self.expect("SYMBOL", "]")
-                return ArrayLiteral(elements) 
+                return ArrayLiteral(elements)
+            if self.current_token().value == "{":
+                return self.parse_dict_literal() 
         elif self.match("KEYWORD", "true"):
             self.advance()
             return BoolLiteral(True)
@@ -189,9 +191,9 @@ class Parser:
                 base = MemberExpression(base, member_property)
                 # Check if this is followed by function call parentheses
                 if self.match("SYMBOL", "("):
-                    # This is a method call like arr.length()
-                    self.advance()
+                    self.advance()  # consume (
                     args = []
+                    # Check if empty call () or has arguments
                     if not self.match("SYMBOL", ")"):
                         args.append(self.parse_expression())
                         while self.match("SYMBOL", ","):
@@ -211,7 +213,6 @@ class Parser:
     
     def parse_function_call(self, callee):
         """Parse a function call with the given callee"""
-        print(f"DEBUG: Parsing function call to {callee.name}")
         self.advance()  # consume '('
         args = []
         if not self.match("SYMBOL", ")"):
@@ -220,7 +221,6 @@ class Parser:
                 self.advance()
                 args.append(self.parse_expression())
         self.expect("SYMBOL", ")")
-        print(f"DEBUG: Created CallExpression with {len(args)} args for {callee.name}")
         # Get position from callee
         line = getattr(callee, 'line', None)
         column = getattr(callee, 'column', None)
@@ -311,7 +311,7 @@ class Parser:
         elif self.match("KEYWORD", "func"):
             return self.parse_dynamic_function()
         elif (self.match("KEYWORD", "int") or self.match("KEYWORD", "float") or self.match("KEYWORD", "void") or
-              self.match("KEYWORD", "array") or self.match("KEYWORD", "string") or self.match("KEYWORD", "bool")):
+              self.match("KEYWORD", "array") or self.match("KEYWORD", "dict") or self.match("KEYWORD", "string") or self.match("KEYWORD", "bool")):
             # Check if this is a builtin function call like int(x) or a declaration like int foo = ...
             # Look ahead: if next token is (, it's a builtin call; if next is NAME, it could be declaration
             if self.peek_token() and self.peek_token().type == "SYMBOL" and self.peek_token().value == "(":
@@ -347,9 +347,15 @@ class Parser:
     def parse_set_statement(self):
         self.expect("KEYWORD", "set")
         target = self.parse_call_member()
-        self.expect("SYMBOL", "=")
-        value = self.parse_expression()
-        return SetStatement(target, value)
+        
+        # Check if this is an assignment (has =) or a standalone expression statement
+        if self.match("SYMBOL", "="):
+            self.expect("SYMBOL", "=")
+            value = self.parse_expression()
+            return SetStatement(target, value)
+        else:
+            # Standalone expression statement (like "set some_function()")
+            return ExpressionStatement(target)
     def parse_return_statement(self):
         self.advance()
         if self.match("SYMBOL", "}") or self.is_at_end():
@@ -548,6 +554,67 @@ class Parser:
 
         return base_type, element_type
 
+    def parse_type_with_key_value(self):
+        """Parse type that may include key/value types: dict<KeyType, ValueType>"""
+        base_type = self.current_token().value
+        self.advance()
+
+        key_type = None
+        value_type = None
+        if base_type == "dict" and self.match("SYMBOL", "<"):
+            self.advance()  # consume '<'
+            # Parse key type
+            if self.current_token().type == "KEYWORD":
+                key_type = self.current_token().value
+            elif self.current_token().type == "NAME":
+                key_type = self.current_token().value
+            else:
+                current = self.current_token()
+                pos_info = self.get_position_info(current)
+                raise CompilerError(f"Expected key type name after '<'{pos_info} but found '{current.value}'", "ERROR", self.file_path)
+            self.advance()
+            self.expect("SYMBOL", ",")
+            # Parse value type
+            if self.current_token().type == "KEYWORD":
+                value_type = self.current_token().value
+            elif self.current_token().type == "NAME":
+                value_type = self.current_token().value
+            else:
+                current = self.current_token()
+                pos_info = self.get_position_info(current)
+                raise CompilerError(f"Expected value type name after ','{pos_info} but found '{current.value}'", "ERROR", self.file_path)
+            self.advance()
+            self.expect("SYMBOL", ">")
+
+        return base_type, key_type, value_type
+
+    def parse_dict_literal(self):
+        """Parse dict literal: {key: value, key: value, ...}"""
+        self.advance()  # consume '{'
+
+        keys = []
+        values = []
+        key_type = None
+        value_type = None
+
+        if not self.match("SYMBOL", "}"):
+            while True:
+                # Parse key - must be identifier, string, or number
+                key = self.parse_expression()
+                self.expect("SYMBOL", ":")
+                # Parse value
+                value = self.parse_expression()
+                keys.append(key)
+                values.append(value)
+
+                if not self.match("SYMBOL", ","):
+                    break
+                self.advance()  # consume ','
+
+        self.expect("SYMBOL", "}")
+
+        return DictLiteral(keys, values, key_type, value_type)
+
     def parse_parameter(self):
         base_type, element_type = self.parse_type_with_element()
         param_name = self.current_token().value
@@ -558,19 +625,34 @@ class Parser:
             default_value = self.parse_expression()
         return Parameter(param_name, base_type, default_value, element_type)
     def parse_variable_declaration(self):
-        base_type, element_type = self.parse_type_with_element()
-        var_name = self.current_token().value
-        self.expect("NAME")
-        if self.match("SYMBOL", "="):
-            self.advance()
-            value = self.parse_expression()
+        # Check if this is a dict type with key/value types
+        if self.current_token().value == "dict" and self.peek_token(1) and self.peek_token(1).value == "<":
+            base_type, key_type, value_type = self.parse_type_with_key_value()
+            var_name = self.current_token().value
+            self.expect("NAME")
+            if self.match("SYMBOL", "="):
+                self.advance()
+                value = self.parse_expression()
+            else:
+                value = None
+            return VariableDeclaration(base_type, var_name, value, None, key_type, value_type)
         else:
-            value = None
-        return VariableDeclaration(base_type, var_name, value, element_type)
+            base_type, element_type = self.parse_type_with_element()
+            var_name = self.current_token().value
+            self.expect("NAME")
+            if self.match("SYMBOL", "="):
+                self.advance()
+                value = self.parse_expression()
+            else:
+                value = None
+            return VariableDeclaration(base_type, var_name, value, element_type)
     def parse_declaration(self):
-        # Handle array<Type> syntax - need to look past <Type> to find the name
+        # Handle dict<Key, Value> syntax - need to look past <Key, Value> to find the name
         offset = 1  # Default: type name
-        if self.current_token().value == "array" and self.peek_token(1) and self.peek_token(1).value == "<":
+        if self.current_token().value == "dict" and self.peek_token(1) and self.peek_token(1).value == "<":
+            # dict<Key, Value> name - count tokens: dict < Key , Value > name
+            offset = 6  # dict < Key , Value > name
+        elif self.current_token().value == "array" and self.peek_token(1) and self.peek_token(1).value == "<":
             # array<Type> name - skip past < Type >
             offset = 4  # array < Type > name
 
@@ -662,7 +744,7 @@ class Parser:
                     peek_pos += 1  # skip 'arg'
                     token = self.tokens[peek_pos] if peek_pos < len(self.tokens) else None
 
-                if token and token.type == "KEYWORD" and token.value in ["int", "float", "void", "string", "bool", "array"]:
+                if token and token.type == "KEYWORD" and token.value in ["int", "float", "void", "string", "bool", "array", "dict"]:
                     type_match = True
                     peek_pos += 1  # skip type
                     # Handle array<Type> syntax
@@ -670,6 +752,17 @@ class Parser:
                         peek_pos += 1  # skip <
                         if peek_pos < len(self.tokens):
                             peek_pos += 1  # skip element type
+                        if peek_pos < len(self.tokens) and self.tokens[peek_pos].type == "SYMBOL" and self.tokens[peek_pos].value == ">":
+                            peek_pos += 1  # skip >
+                    # Handle dict<KeyType, ValueType> syntax
+                    elif token.value == "dict" and peek_pos < len(self.tokens) and self.tokens[peek_pos].type == "SYMBOL" and self.tokens[peek_pos].value == "<":
+                        peek_pos += 1  # skip <
+                        if peek_pos < len(self.tokens):
+                            peek_pos += 1  # skip key type
+                        if peek_pos < len(self.tokens) and self.tokens[peek_pos].type == "SYMBOL" and self.tokens[peek_pos].value == ",":
+                            peek_pos += 1  # skip ,
+                        if peek_pos < len(self.tokens):
+                            peek_pos += 1  # skip value type
                         if peek_pos < len(self.tokens) and self.tokens[peek_pos].type == "SYMBOL" and self.tokens[peek_pos].value == ">":
                             peek_pos += 1  # skip >
                 elif token and token.type == "NAME":

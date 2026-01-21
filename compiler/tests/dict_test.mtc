@@ -1,0 +1,21 @@
+// Dict type test file
+
+// Basic dict operations
+dict test_dict = {"key1": "value1", "key2": "value2"}
+print(test_dict)
+
+// Dict with int keys and string values
+dict<int, string> ages = {1: "alice", 2: "bob", 3: "charlie"}
+print(ages)
+
+// Dict with string keys and int values
+dict<string, int> scores = {"alice": 10, "bob": 20, "charlie": 30}
+print(scores)
+
+// Empty dict
+dict empty_dict = {}
+print(empty_dict)
+
+// Dict literal in variable assignment
+dict<int, string> colors = {1: "red", 2: "green", 3: "blue"}
+print(colors)

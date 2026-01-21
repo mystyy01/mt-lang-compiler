@@ -172,7 +172,7 @@ class Parser{
             this.expect("SYMBOL", ")")
             return new NewExpression(class_name, args)
         }
-        elif (this.match("KEYWORD", "int") || this.match("KEYWORD", "float") || this.match("KEYWORD", "string") || this.match("KEYWORD", "array") || this.match("KEYWORD", "bool") || this.match("KEYWORD", "void")){
+        elif (this.match("KEYWORD", "int") || this.match("KEYWORD", "float") || this.match("KEYWORD", "string") || this.match("KEYWORD", "array") || this.match("KEYWORD", "dict") || this.match("KEYWORD", "bool") || this.match("KEYWORD", "void")){
             string value = this.current_token().value
             this.advance()
             return new TypeLiteral(value)
@@ -197,6 +197,9 @@ class Parser{
                 }
                 this.expect("SYMBOL", "]")
                 return new ArrayLiteral(elements)
+            }
+            if (this.current_token().value == "{"){
+                return this.parse_dict_literal()
             }
         }
         elif (this.match("KEYWORD", "true")){
@@ -672,6 +675,74 @@ class Parser{
         return result
     }
 
+    func parse_type_with_key_value(){
+        string base_type = this.current_token().value
+        this.advance()
+
+        string key_type = null
+        string value_type = null
+        if (base_type == "dict" && this.match("SYMBOL", "<")){
+            this.advance()
+            if (this.current_token().type == "KEYWORD"){
+                set key_type = this.current_token().value
+            }
+            elif (this.current_token().type == "NAME"){
+                set key_type = this.current_token().value
+            }
+            else{
+                Token current = this.current_token()
+                string pos_info = this.get_position_info(current)
+                throw new CompilerError("Expected key type name after '<'" + pos_info + " but found '" + current.value + "'")
+            }
+            this.advance()
+            this.expect("SYMBOL", ",")
+            if (this.current_token().type == "KEYWORD"){
+                set value_type = this.current_token().value
+            }
+            elif (this.current_token().type == "NAME"){
+                set value_type = this.current_token().value
+            }
+            else{
+                Token current = this.current_token()
+                string pos_info = this.get_position_info(current)
+                throw new CompilerError("Expected value type name after ','" + pos_info + " but found '" + current.value + "'")
+            }
+            this.advance()
+            this.expect("SYMBOL", ">")
+        }
+
+        array result = [base_type, key_type, value_type]
+        return result
+    }
+
+    DictLiteral parse_dict_literal(){
+        this.advance()
+
+        array keys = []
+        array values = []
+        string key_type = null
+        string value_type = null
+
+        if (this.match("SYMBOL", "}") == false){
+            while (true){
+                any key = this.parse_expression()
+                this.expect("SYMBOL", ":")
+                any value = this.parse_expression()
+                keys.append(key)
+                values.append(value)
+
+                if (this.match("SYMBOL", ",") == false){
+                    break
+                }
+                this.advance()
+            }
+        }
+
+        this.expect("SYMBOL", "}")
+
+        return new DictLiteral(keys, values, key_type, value_type)
+    }
+
     Parameter parse_parameter(){
         array<string> type_info = this.parse_type_with_element()
         string base_type = type_info[0]
@@ -690,6 +761,22 @@ class Parser{
         array<string> type_info = this.parse_type_with_element()
         string base_type = type_info[0]
         string element_type = type_info[1]
+        
+        if (this.current_token().value == "dict" && this.peek_token(1) != null && this.peek_token(1).value == "<"){
+            set type_info = this.parse_type_with_key_value()
+            set base_type = type_info[0]
+            string key_type = type_info[1]
+            string value_type = type_info[2]
+            string var_name = this.current_token().value
+            this.expect("NAME")
+            any value = null
+            if (this.match("SYMBOL", "=")){
+                this.advance()
+                set value = this.parse_expression()
+            }
+            return new VariableDeclaration(base_type, var_name, value, element_type, key_type, value_type)
+        }
+        
         string var_name = this.current_token().value
         this.expect("NAME")
         any value = null
@@ -702,7 +789,10 @@ class Parser{
 
     func parse_declaration(){
         int offset = 1
-        if (this.current_token().value == "array" && this.peek_token(1) != null && this.peek_token(1).value == "<"){
+        if (this.current_token().value == "dict" && this.peek_token(1) != null && this.peek_token(1).value == "<"){
+            set offset = 6
+        }
+        elif (this.current_token().value == "array" && this.peek_token(1) != null && this.peek_token(1).value == "<"){
             set offset = 4
         }
 

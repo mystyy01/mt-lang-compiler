@@ -46,16 +46,45 @@ class ArrayLiteral:
         self.elements = elements
     def __repr__(self):
         return f"ArrayLiteral({self.elements})"
+
+class DictType:
+    def __init__(self, key_type="any", value_type="any"):
+        self.key_type = key_type
+        self.value_type = value_type
+    def __repr__(self):
+        if self.key_type == "any" and self.value_type == "any":
+            return "dict"
+        return f"dict<{self.key_type}, {self.value_type}>"
+
+class DictLiteral:
+    def __init__(self, keys: list, values: list, key_type=None, value_type=None):
+        self.keys = keys  # list of key expressions
+        self.values = values  # list of value expressions
+        self.key_type = key_type  # explicit key type if specified
+        self.value_type = value_type  # explicit value type if specified
+    def __repr__(self):
+        pairs = []
+        for k, v in zip(self.keys, self.values):
+            pairs.append(f"{k}: {v}")
+        type_str = ""
+        if self.key_type is not None and self.value_type is not None:
+            type_str = f"dict<{self.key_type}, {self.value_type}>"
+        return f"DictLiteral({type_str}, {{{', '.join(pairs)}}})"
+
 class VariableDeclaration:
-    def __init__(self, var_type, name, value = None, element_type=None, line=None, column=None):
+    def __init__(self, var_type, name, value = None, element_type=None, key_type=None, value_type=None, line=None, column=None):
         self.type = var_type
         self.name = name
         self.value = value
         self.element_type = element_type  # For typed arrays: array<int>, array<Token>, etc.
+        self.key_type = key_type  # For typed dicts: dict<KeyType, ValueType>
+        self.value_type = value_type  # For typed dicts: dict<KeyType, ValueType>
         self.line = line
         self.column = column
     def __repr__(self):
         elem_str = f"<{self.element_type}>" if self.element_type else ""
+        if self.type == "dict" and self.key_type and self.value_type:
+            return f"VariableDeclaration(dict<{self.key_type}, {self.value_type}>, {self.name}, {self.value})"
         return f"VariableDeclaration({self.type}{elem_str}, {self.name}, {self.value})"
 class SetStatement:
     def __init__(self, target, value, line=None, column=None):

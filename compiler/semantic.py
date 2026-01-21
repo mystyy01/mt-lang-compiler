@@ -94,6 +94,8 @@ class SemanticAnalyzer:
             return self.analyze_float_literal(node)
         if isinstance(node, ArrayLiteral):
             return self.analyze_array_literal(node)
+        if isinstance(node, DictLiteral):
+            return self.analyze_dict_literal(node)
         if isinstance(node, StringLiteral):
             return self.analyze_string_literal(node)
         if isinstance(node, NullLiteral):
@@ -257,9 +259,20 @@ class SemanticAnalyzer:
         if not obj_type:
             return None
 
-        # Analyze the index - should be int
+        # Analyze the index
         index_type = self.analyze(node.index)
-        if index_type != "int":
+
+        # Dict indexing - keys should be string (or any for dynamic keys)
+        if obj_type == "dict" or (obj_type and obj_type.startswith("dict<")):
+            # Dict keys can be strings or any type (for dynamic access)
+            if index_type not in ["string", "any", "int"]:
+                pos_info = self.get_position_info(node)
+                self.add_error(f"Dict key must be a valid type, got {index_type}{pos_info}")
+            # Return "any" for dict value access (could be refined with typed dicts)
+            return "any"
+
+        # Array/string indexing - must be int
+        if index_type != "int" and index_type != "any":
             pos_info = self.get_position_info(node)
             self.add_error(f"Array/string index must be an integer{pos_info}")
             return None
@@ -281,13 +294,13 @@ class SemanticAnalyzer:
                     field_name = node.object.property.name
                 elif isinstance(node.object.property, str):
                     field_name = node.object.property
-                
+
                 if field_name:
                     symbol = self.symbol_table.lookup(field_name)
                     if symbol and symbol.get("element_type"):
                         return symbol["element_type"]
-            # Default to int for untyped arrays
-            return "int"
+            # Default to any for untyped arrays
+            return "any"
         else:
             pos_info = self.get_position_info(node)
             self.add_error(f"Cannot index into type '{obj_type}'{pos_info}")
@@ -347,7 +360,7 @@ class SemanticAnalyzer:
     def analyze_variable_declaration(self, node: VariableDeclaration):
         # Check if the declared type is valid (built-in or user-defined class)
         type_symbol = self.symbol_table.lookup(node.type)
-        if not type_symbol and node.type not in ["int", "float", "string", "bool", "array", "void", "any"]:
+        if not type_symbol and node.type not in ["int", "float", "string", "bool", "array", "dict", "void", "any"]:
             pos_info = self.get_position_info(node)
             self.add_error(f"Unknown type '{node.type}'{pos_info}")
 
@@ -359,20 +372,43 @@ class SemanticAnalyzer:
                 pos_info = self.get_position_info(node)
                 self.add_error(f"Unknown element type '{element_type}'{pos_info}")
 
+        # Validate key_type and value_type for typed dicts
+        key_type = getattr(node, 'key_type', None)
+        value_type = getattr(node, 'value_type', None)
+        if key_type:
+            key_type_symbol = self.symbol_table.lookup(key_type)
+            if not key_type_symbol and key_type not in ["int", "float", "string", "bool"]:
+                pos_info = self.get_position_info(node)
+                self.add_error(f"Unknown dict key type '{key_type}'{pos_info}")
+        if value_type:
+            value_type_symbol = self.symbol_table.lookup(value_type)
+            if not value_type_symbol and value_type not in ["int", "float", "string", "bool", "any"]:
+                pos_info = self.get_position_info(node)
+                self.add_error(f"Unknown dict value type '{value_type}'{pos_info}")
+
         if node.value:
             type_of_node = self.analyze(node.value)
             # "any" is a wildcard that matches any type (both directions)
-            if type_of_node != node.type and type_of_node != "any" and node.type != "any":
+            # Build expected type string for dict
+            expected_type = node.type
+            if node.type == "dict" and key_type and value_type:
+                expected_type = f"dict<{key_type}, {value_type}>"
+            elif node.type == "dict":
+                # If variable is declared as dict without types, accept any dict type
+                # Just set expected_type to type_of_node so comparison passes
+                expected_type = type_of_node
+            
+            if type_of_node != expected_type and type_of_node != "any" and node.type != "any":
                 # Allow assignment if both are user-defined classes or if value is a new expression of the right type
                 # Also allow null to be assigned to any type (null is compatible with all pointer types)
                 if not ((isinstance(node.value, NewExpression) and node.value.class_name == node.type) or
-                        (isinstance(node.value, CallExpression) and type_of_node == node.type)):
+                        (isinstance(node.value, CallExpression) and type_of_node == expected_type)):
                     # null can be assigned to any type
                     if type_of_node != "null":
                         pos_info = self.get_position_info(node)
-                        print(f"DEBUG: Assignment type mismatch: {type_of_node} to {node.type}")
+                        print(f"DEBUG: Assignment type mismatch: {type_of_node} to {expected_type}")
                         print(f"DEBUG: Assignment node: {node}")
-                        self.add_error(f"Type mismatch{pos_info}. Cannot assign type {type_of_node} to {node.type}")
+                        self.add_error(f"Type mismatch{pos_info}. Cannot assign type {type_of_node} to {expected_type}")
         self.symbol_table.declare(node.name, "variable", node.type, element_type=element_type)
     def analyze_function_declaration(self, node: FunctionDeclaration):
         self.symbol_table.declare(node.name, "function", node.return_type, node.parameters)
@@ -620,6 +656,14 @@ class SemanticAnalyzer:
 
     def analyze_call_expression(self, node: CallExpression):
         func_name = None
+        # Handle type conversion calls like string(x), int(x), float(x)
+        if isinstance(node.callee, TypeLiteral):
+            type_name = node.callee.name
+            # Analyze the argument
+            for arg in node.arguments:
+                self.analyze(arg)
+            # Return the target type
+            return type_name
         if isinstance(node.callee, Identifier):
             func_name = node.callee.name
             print(f"DEBUG: Analyzing call to {func_name}")
@@ -764,7 +808,7 @@ class SemanticAnalyzer:
                         # Return "any" for dynamic functions (return_type is None)
                         return method_info["return_type"] or "any"
 
-            # Handle method calls on variables/parameters: str.length()
+            # Handle method calls on variables/parameters: str.length(), arr.length()
             if isinstance(node.callee.object, Identifier):
                 obj_name = node.callee.object.name
                 obj_symbol = self.symbol_table.lookup(obj_name)
@@ -776,6 +820,22 @@ class SemanticAnalyzer:
                         if method_name == "length":
                             return "int"
 
+                    # Array methods (built into the compiler)
+                    if obj_type == "array":
+                        if method_name == "length":
+                            return "int"
+                        elif method_name == "append":
+                            return "void"
+                        elif method_name == "pop":
+                            return "any"
+
+                    # Dict methods
+                    if obj_type == "dict" or (obj_type and obj_type.startswith("dict<")):
+                        if method_name == "keys":
+                            return "array"
+                        elif method_name == "values":
+                            return "array"
+
                     # Look up method return type from class definition
                     if obj_type in self.classes:
                         class_info = self.classes[obj_type]
@@ -783,18 +843,18 @@ class SemanticAnalyzer:
                         if method_name in methods:
                             method_info = methods[method_name]
                             parameters = method_info["params"]
-                            
+
                             # Expand arguments with defaults if needed
                             while len(node.arguments) < len(parameters) and parameters[len(node.arguments)].default_value is not None:
                                 node.arguments.append(parameters[len(node.arguments)].default_value)
-                            
+
                             num_args = len(node.arguments)
                             num_params = len(parameters)
                             min_args = sum(1 for p in parameters if p.default_value is None)
                             if num_args < min_args or num_args > num_params:
                                 pos_info = self.get_position_info(node)
                                 self.add_error(f"Method '{method_name}' expects {min_args} to {num_params} arguments, got {num_args}{pos_info}")
-                            
+
                             # Analyze provided arguments
                             for i, arg in enumerate(node.arguments):
                                 if i < num_params:
@@ -807,6 +867,36 @@ class SemanticAnalyzer:
 
                             # Return "any" for dynamic functions (return_type is None)
                             return method_info["return_type"] or "any"
+
+            # Handle method calls on MemberExpressions: this.scopes.length(), obj.field.method()
+            if isinstance(node.callee.object, MemberExpression):
+                # Analyze the object to get its type
+                obj_type = self.analyze(node.callee.object)
+
+                # Built-in methods for arrays and strings
+                if obj_type == "array":
+                    if method_name == "length":
+                        return "int"
+                    elif method_name == "append":
+                        return "void"
+                    elif method_name == "pop":
+                        return "any"
+                elif obj_type == "string":
+                    if method_name == "length":
+                        return "int"
+                elif obj_type == "dict" or (obj_type and obj_type.startswith("dict<")):
+                    if method_name == "keys":
+                        return "array"
+                    elif method_name == "values":
+                        return "array"
+
+                # Look up method return type from class definition
+                if obj_type in self.classes:
+                    class_info = self.classes[obj_type]
+                    methods = class_info.get("methods", {})
+                    if method_name in methods:
+                        method_info = methods[method_name]
+                        return method_info["return_type"] or "any"
 
         return "unknown"  # We don't know the return type
     def analyze_number_literal(self, node):
@@ -826,6 +916,39 @@ class SemanticAnalyzer:
                 self.add_error(f"Array elements must all be the same type. Expected {first_type}, got {elem_type}")
 
         return "array"
+    def analyze_dict_literal(self, node):
+        """Analyze a dict literal and return its type"""
+        # Build the type string
+        key_type = node.key_type if node.key_type else "any"
+        value_type = node.value_type if node.value_type else "any"
+        
+        # If no explicit types and we have elements, infer from first element
+        if not node.key_type and len(node.keys) > 0:
+            key_type = self.analyze(node.keys[0])
+        if not node.value_type and len(node.values) > 0:
+            value_type = self.analyze(node.values[0])
+        
+        # Validate all key/value pairs
+        if len(node.keys) > 0:
+            first_key_type = self.analyze(node.keys[0])
+            first_value_type = self.analyze(node.values[0])
+            
+            for i, key in enumerate(node.keys):
+                key_type_result = self.analyze(key)
+                value_type_result = self.analyze(node.values[i])
+                
+                # Check key type matches (if explicit)
+                if node.key_type and key_type_result != node.key_type:
+                    self.add_error(f"Dict key type mismatch. Expected {node.key_type}, got {key_type_result}")
+                
+                # Check value type matches (if explicit)
+                if node.value_type and value_type_result != node.value_type:
+                    self.add_error(f"Dict value type mismatch. Expected {node.value_type}, got {value_type_result}")
+        
+        # Return the dict type
+        if key_type == "any" and value_type == "any":
+            return "dict"
+        return f"dict<{key_type}, {value_type}>"
     def analyze_bool_literal(self, node):
         return "bool"
 

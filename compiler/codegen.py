@@ -142,9 +142,23 @@ class CodeGenerator:
         # Exception type: { i32 type_tag, i8* message }
         self.exc_type = llvmlite.ir.LiteralStructType([self.int_type, self.i8_ptr_type])
 
+        # Dynamic dict struct: { i32 length, i32 capacity, i8* keys, i8* values }
+        # Keys and values are serialized arrays
+        self.dict_type = llvmlite.ir.LiteralStructType([
+            self.int_type,      # length
+            self.int_type,      # capacity
+            self.i8_ptr_type,   # keys buffer pointer
+            self.i8_ptr_type    # values buffer pointer
+        ])
+        self.dict_ptr_type = self.dict_type.as_pointer()
+
         # Track global arrays: name -> LLVM GlobalVariable (pointer to dyn_array_ptr)
         self.global_arrays = {}
         self.in_main_function = False  # Track whether we're generating main function code
+        
+        # Track dict key/value types for printing
+        self.dict_key_types = {}  # var_name -> key_type string
+        self.dict_value_types = {}  # var_name -> value_type string
 
     def get_llvm_type(self, type_str: str):
         """Map AST type strings to LLVM types"""
@@ -160,6 +174,11 @@ class CodeGenerator:
             return self.i8_ptr_type
         elif type_str == "array":
             return self.dyn_array_ptr_type
+        elif type_str == "dict":
+            return self.dict_ptr_type
+        elif type_str.startswith("dict<"):
+            # Typed dict - still uses dict_ptr_type but with type info tracked separately
+            return self.dict_ptr_type
         else:
             # For user-defined types (classes), use pointer to byte
             return self.i8_ptr_type
@@ -933,6 +952,314 @@ class CodeGenerator:
 
         return array_ptr, elem_type, elem_size
 
+    def create_empty_dict(self, key_type=None, value_type=None):
+        """Create an empty dict"""
+        # Allocate dict struct on heap
+        struct_size = self.create_int_constant(32)  # 4 + 4 + 8 + 8 + padding
+        dict_mem = self.builder.call(self.malloc, [struct_size], name="dict_mem")
+        dict_ptr = self.builder.bitcast(dict_mem, self.dict_ptr_type, name="dict")
+        
+        # Set length to 0
+        zero = llvmlite.ir.Constant(self.int_type, 0)
+        length_ptr = self.builder.gep(dict_ptr, [zero, zero], name="length_ptr")
+        self.builder.store(zero, length_ptr)
+        
+        # Set capacity to 0
+        capacity_ptr = self.builder.gep(dict_ptr, [zero, llvmlite.ir.Constant(self.int_type, 1)], name="capacity_ptr")
+        self.builder.store(zero, capacity_ptr)
+        
+        # Set keys and values pointers to null
+        null_ptr = llvmlite.ir.Constant(self.i8_ptr_type, None)
+        keys_ptr = self.builder.gep(dict_ptr, [zero, llvmlite.ir.Constant(self.int_type, 2)], name="keys_ptr")
+        self.builder.store(null_ptr, keys_ptr)
+        values_ptr = self.builder.gep(dict_ptr, [zero, llvmlite.ir.Constant(self.int_type, 3)], name="values_ptr")
+        self.builder.store(null_ptr, values_ptr)
+        
+        return dict_ptr
+
+    def create_dict_from_literal(self, key_values, value_values, key_type=None, value_type=None):
+        """Create a dict from literal key-value pairs"""
+        num_pairs = len(key_values)
+        if num_pairs == 0:
+            return self.create_empty_dict(key_type, value_type)
+        
+        # Allocate dict struct on heap
+        struct_size = self.create_int_constant(32)
+        dict_mem = self.builder.call(self.malloc, [struct_size], name="dict_mem")
+        dict_ptr = self.builder.bitcast(dict_mem, self.dict_ptr_type, name="dict")
+        
+        # Set length
+        zero = llvmlite.ir.Constant(self.int_type, 0)
+        length_ptr = self.builder.gep(dict_ptr, [zero, zero], name="length_ptr")
+        self.builder.store(llvmlite.ir.Constant(self.int_type, num_pairs), length_ptr)
+        
+        # Set capacity (same as length for initial)
+        capacity_ptr = self.builder.gep(dict_ptr, [zero, llvmlite.ir.Constant(self.int_type, 1)], name="capacity_ptr")
+        self.builder.store(llvmlite.ir.Constant(self.int_type, num_pairs), capacity_ptr)
+        
+        # Allocate keys buffer (store as i8* pointers)
+        key_ptr_size = self.builder.mul(llvmlite.ir.Constant(self.int_type, num_pairs), llvmlite.ir.Constant(self.int_type, 8), name="key_size")
+        keys_mem = self.builder.call(self.malloc, [key_ptr_size], name="keys_mem")
+        keys_ptr_ptr = self.builder.gep(dict_ptr, [zero, llvmlite.ir.Constant(self.int_type, 2)], name="keys_ptr_ptr")
+        self.builder.store(keys_mem, keys_ptr_ptr)
+        
+        # Allocate values buffer
+        value_ptr_size = self.builder.mul(llvmlite.ir.Constant(self.int_type, num_pairs), llvmlite.ir.Constant(self.int_type, 8), name="value_size")
+        values_mem = self.builder.call(self.malloc, [value_ptr_size], name="values_mem")
+        values_ptr_ptr = self.builder.gep(dict_ptr, [zero, llvmlite.ir.Constant(self.int_type, 3)], name="values_ptr_ptr")
+        self.builder.store(values_mem, values_ptr_ptr)
+        
+        # Store key-value pairs as arrays of pointers
+        # keys_mem and values_mem are i8* from malloc
+        # We need to store i8* pointers at each element position
+        
+        for i in range(num_pairs):
+            key_idx = llvmlite.ir.Constant(self.int_type, i)
+            # Use byte offset: i * 8 (pointer size)
+            key_byte_offset = self.builder.mul(key_idx, self.create_int_constant(8), name=f"key_{i}_offset")
+            value_byte_offset = self.builder.mul(key_idx, self.create_int_constant(8), name=f"value_{i}_offset")
+            
+            # GEP with byte offset on i8* gives i8* pointer to element location
+            # Then bitcast to i8** for storing
+            key_elem_ptr = self.builder.gep(keys_mem, [key_byte_offset], name=f"key_{i}_gep")
+            key_elem_ptr = self.builder.bitcast(key_elem_ptr, self.i8_ptr_type.as_pointer(), name=f"key_{i}")
+            
+            value_elem_ptr = self.builder.gep(values_mem, [value_byte_offset], name=f"value_{i}_gep")
+            value_elem_ptr = self.builder.bitcast(value_elem_ptr, self.i8_ptr_type.as_pointer(), name=f"value_{i}")
+            
+            # Store key - handle primitive types by allocating and converting to pointer
+            key_val = key_values[i]
+            if hasattr(key_val.type, 'pointee'):
+                # Already a pointer, bitcast to i8*
+                key_val = self.builder.bitcast(key_val, self.i8_ptr_type, name=f"key_{i}_cast")
+            else:
+                # Primitive type (int, float) - need to allocate and store
+                if key_val.type == self.int_type:
+                    # Allocate 4 bytes for int, store the value, use pointer
+                    key_alloc = self.builder.call(self.malloc, [self.create_int_constant(4)], name=f"key_{i}_alloc")
+                    key_ptr = self.builder.bitcast(key_alloc, self.int_type.as_pointer(), name=f"key_{i}_typed")
+                    self.builder.store(key_val, key_ptr)
+                    key_val = key_alloc  # Use the allocated pointer
+                elif key_val.type == self.float_type:
+                    key_alloc = self.builder.call(self.malloc, [self.create_int_constant(8)], name=f"key_{i}_alloc")
+                    key_ptr = self.builder.bitcast(key_alloc, self.float_type.as_pointer(), name=f"key_{i}_typed")
+                    self.builder.store(key_val, key_ptr)
+                    key_val = key_alloc
+                elif key_val.type == self.bool_type:
+                    key_alloc = self.builder.call(self.malloc, [self.create_int_constant(1)], name=f"key_{i}_alloc")
+                    key_ptr = self.builder.bitcast(key_alloc, self.bool_type.as_pointer(), name=f"key_{i}_typed")
+                    self.builder.store(key_val, key_ptr)
+                    key_val = key_alloc
+            self.builder.store(key_val, key_elem_ptr)
+            
+            # Store value - same handling
+            value_val = value_values[i]
+            if hasattr(value_val.type, 'pointee'):
+                value_val = self.builder.bitcast(value_val, self.i8_ptr_type, name=f"value_{i}_cast")
+            else:
+                if value_val.type == self.int_type:
+                    val_alloc = self.builder.call(self.malloc, [self.create_int_constant(4)], name=f"value_{i}_alloc")
+                    val_ptr = self.builder.bitcast(val_alloc, self.int_type.as_pointer(), name=f"value_{i}_typed")
+                    self.builder.store(value_val, val_ptr)
+                    value_val = val_alloc
+                elif value_val.type == self.float_type:
+                    val_alloc = self.builder.call(self.malloc, [self.create_int_constant(8)], name=f"value_{i}_alloc")
+                    val_ptr = self.builder.bitcast(val_alloc, self.float_type.as_pointer(), name=f"value_{i}_typed")
+                    self.builder.store(value_val, val_ptr)
+                    value_val = val_alloc
+                elif value_val.type == self.bool_type:
+                    val_alloc = self.builder.call(self.malloc, [self.create_int_constant(1)], name=f"value_{i}_alloc")
+                    val_ptr = self.builder.bitcast(val_alloc, self.bool_type.as_pointer(), name=f"value_{i}_typed")
+                    self.builder.store(value_val, val_ptr)
+                    value_val = val_alloc
+            self.builder.store(value_val, value_elem_ptr)
+        
+        return dict_ptr
+
+    def generate_dict_to_string(self, dict_ptr, key_type=None, value_type=None):
+        """Convert a dict to string format: {key1: value1, key2: value2, ...}
+        
+        Args:
+            dict_ptr: Pointer to the dict struct
+            key_type: Type string for keys ('int', 'string', etc.) or None for pointer
+            value_type: Type string for values ('int', 'string', 'float', etc.) or None for pointer
+        """
+        zero = llvmlite.ir.Constant(self.int_type, 0)
+        
+        # Get dict length
+        length_ptr = self.builder.gep(dict_ptr, [zero, zero], name="dict_len_ptr")
+        length = self.builder.load(length_ptr, name="dict_length")
+        
+        # Estimate size: 64 bytes per pair + overhead
+        alloc_size = self.builder.mul(length, self.create_int_constant(64), name="est_size")
+        alloc_size = self.builder.add(alloc_size, self.create_int_constant(16), name="alloc_size")
+        result_buffer = self.builder.call(self.malloc, [alloc_size], name="dict_str_result")
+        
+        # Store opening brace
+        self.builder.store(self.i8_type(ord('{')), self.builder.gep(result_buffer, [zero], name="p_open"))
+        
+        result_len = self.builder.alloca(self.int_type, name="result_len")
+        self.builder.store(self.create_int_constant(1), result_len)
+        
+        func = self.builder.block.parent
+        
+        loop_block = func.append_basic_block(name="dict_str_loop")
+        body_block = func.append_basic_block(name="dict_str_body")
+        done_block = func.append_basic_block(name="dict_str_done")
+        
+        counter_ptr = self.builder.alloca(self.int_type, name="dict_str_i")
+        self.builder.store(zero, counter_ptr)
+        self.builder.branch(loop_block)
+        
+        self.builder.position_at_end(loop_block)
+        counter = self.builder.load(counter_ptr, name="i")
+        cond = self.builder.icmp_signed("<", counter, length, name="dict_str_cond")
+        self.builder.cbranch(cond, body_block, done_block)
+        
+        self.builder.position_at_end(body_block)
+        current_i = self.builder.load(counter_ptr, name="curr_i")
+        
+        # Add comma and space if not first
+        is_not_first = self.builder.icmp_signed(">", current_i, zero, name="is_not_first")
+        with self.builder.if_then(is_not_first):
+            len1 = self.builder.load(result_len, name="len1")
+            p1 = self.builder.gep(result_buffer, [len1], name="p_comma")
+            self.builder.store(self.i8_type(ord(',')), p1)
+            len2 = self.builder.add(len1, self.create_int_constant(1), name="len2")
+            p2 = self.builder.gep(result_buffer, [len2], name="p_space")
+            self.builder.store(self.i8_type(ord(' ')), p2)
+            self.builder.store(self.builder.add(len2, self.create_int_constant(1), name="len3"), result_len)
+        
+        # Get keys buffer and load key pointer (GEP with byte offset, then bitcast)
+        keys_ptr_ptr = self.builder.gep(dict_ptr, [zero, self.create_int_constant(2)], name="keys_ptr_ptr")
+        keys_ptr = self.builder.load(keys_ptr_ptr, name="keys_ptr")
+        # Calculate byte offset and use GEP + bitcast to get i8** pointer for element
+        key_byte_offset = self.builder.mul(current_i, self.create_int_constant(8), name="key_byte_offset")
+        key_elem_ptr = self.builder.gep(keys_ptr, [key_byte_offset], name="key_elem_gep")
+        key_elem_ptr = self.builder.bitcast(key_elem_ptr, self.i8_ptr_type.as_pointer(), name="key_elem_ptr")
+        key_ptr = self.builder.load(key_elem_ptr, name="key_ptr")
+        
+        # Format key based on type
+        if key_type == "int":
+            # Load int from the key pointer
+            key_int_ptr = self.builder.bitcast(key_ptr, self.int_type.as_pointer(), name="key_int_ptr")
+            key_int_val = self.builder.load(key_int_ptr, name="key_int_val")
+            key_format = self.create_string_constant("%d", as_constant=True)
+            key_sprintf_buffer = self.builder.call(self.malloc, [self.create_int_constant(32)], name="key_sprintf_buf")
+            _ = self.builder.call(self.sprintf, [key_sprintf_buffer, key_format, key_int_val], name="key_sprintf")
+        elif key_type == "float":
+            key_float_ptr = self.builder.bitcast(key_ptr, self.float_type.as_pointer(), name="key_float_ptr")
+            key_float_val = self.builder.load(key_float_ptr, name="key_float_val")
+            key_format = self.create_string_constant("%g", as_constant=True)
+            key_sprintf_buffer = self.builder.call(self.malloc, [self.create_int_constant(64)], name="key_sprintf_buf")
+            _ = self.builder.call(self.sprintf, [key_sprintf_buffer, key_format, key_float_val], name="key_sprintf")
+        elif key_type == "string" or key_type is None:
+            # String - allocate buffer with quotes around it
+            key_str_len = self.builder.call(self.strlen, [key_ptr], name="key_str_len")
+            key_buf_size = self.builder.add(key_str_len, self.create_int_constant(3), name="key_buf_size")  # +3 for quotes and null
+            key_sprintf_buffer = self.builder.call(self.malloc, [key_buf_size], name="key_sprintf_buf")
+            # Store opening quote
+            self.builder.store(self.i8_type(ord('"')), self.builder.gep(key_sprintf_buffer, [zero], name="key_quote_open"))
+            # Copy string after opening quote
+            self.builder.call(self.strcpy, [self.builder.gep(key_sprintf_buffer, [self.create_int_constant(1)], name="key_str_start"), key_ptr], name="key_cpy")
+            # Store closing quote and null
+            str_end_pos = self.builder.add(self.create_int_constant(1), key_str_len, name="str_end_pos")
+            self.builder.store(self.i8_type(ord('"')), self.builder.gep(key_sprintf_buffer, [str_end_pos], name="key_quote_close"))
+            null_pos = self.builder.gep(key_sprintf_buffer, [self.builder.add(str_end_pos, self.create_int_constant(1), name="null_pos")], name="key_null")
+            self.builder.store(self.i8_type(0), null_pos)
+        else:
+            # Unknown type - print as pointer
+            key_format = self.create_string_constant("0x%x", as_constant=True)
+            key_int = self.builder.ptrtoint(key_ptr, self.int_type, name="key_int")
+            key_sprintf_buffer = self.builder.call(self.malloc, [self.create_int_constant(32)], name="key_sprintf_buf")
+            _ = self.builder.call(self.sprintf, [key_sprintf_buffer, key_format, key_int], name="key_sprintf")
+        
+        # Copy key to result
+        key_copy_pos = self.builder.load(result_len, name="key_copy_pos")
+        if key_type == "string" or key_type is None:
+            # Direct string copy - just use the pointer
+            self.builder.call(self.strcpy, [self.builder.gep(result_buffer, [key_copy_pos], name="key_dest"), key_sprintf_buffer], name="key_cpy")
+        else:
+            self.builder.call(self.strcpy, [self.builder.gep(result_buffer, [key_copy_pos], name="key_dest"), key_sprintf_buffer], name="key_cpy")
+        key_copy_len = self.builder.call(self.strlen, [key_sprintf_buffer], name="key_copy_len")
+        after_key_pos = self.builder.add(key_copy_pos, key_copy_len, name="after_key_pos")
+        self.builder.store(after_key_pos, result_len)
+        
+        # Add ": "
+        colon_pos = self.builder.load(result_len, name="colon_pos")
+        p_colon = self.builder.gep(result_buffer, [colon_pos], name="p_colon")
+        self.builder.store(self.i8_type(ord(':')), p_colon)
+        space_pos = self.builder.add(colon_pos, self.create_int_constant(1), name="space_pos")
+        p_space2 = self.builder.gep(result_buffer, [space_pos], name="p_space2")
+        self.builder.store(self.i8_type(ord(' ')), p_space2)
+        self.builder.store(self.builder.add(space_pos, self.create_int_constant(1), name="len_after_sep"), result_len)
+        
+        # Get values buffer and load value pointer (GEP with byte offset, then bitcast)
+        values_ptr_ptr = self.builder.gep(dict_ptr, [zero, self.create_int_constant(3)], name="values_ptr_ptr")
+        values_ptr = self.builder.load(values_ptr_ptr, name="values_ptr")
+        # Calculate byte offset and use GEP + bitcast to get i8** pointer for element
+        value_byte_offset = self.builder.mul(current_i, self.create_int_constant(8), name="value_byte_offset")
+        value_elem_ptr = self.builder.gep(values_ptr, [value_byte_offset], name="value_elem_gep")
+        value_elem_ptr = self.builder.bitcast(value_elem_ptr, self.i8_ptr_type.as_pointer(), name="value_elem_ptr")
+        value_ptr = self.builder.load(value_elem_ptr, name="value_ptr")
+        
+        # Format value based on type
+        if value_type == "int":
+            # Load int from the value pointer
+            value_int_ptr = self.builder.bitcast(value_ptr, self.int_type.as_pointer(), name="value_int_ptr")
+            value_int_val = self.builder.load(value_int_ptr, name="value_int_val")
+            value_format = self.create_string_constant("%d", as_constant=True)
+            value_sprintf_buffer = self.builder.call(self.malloc, [self.create_int_constant(32)], name="value_sprintf_buf")
+            _ = self.builder.call(self.sprintf, [value_sprintf_buffer, value_format, value_int_val], name="value_sprintf")
+        elif value_type == "float":
+            value_float_ptr = self.builder.bitcast(value_ptr, self.float_type.as_pointer(), name="value_float_ptr")
+            value_float_val = self.builder.load(value_float_ptr, name="value_float_val")
+            value_format = self.create_string_constant("%g", as_constant=True)
+            value_sprintf_buffer = self.builder.call(self.malloc, [self.create_int_constant(64)], name="value_sprintf_buf")
+            _ = self.builder.call(self.sprintf, [value_sprintf_buffer, value_format, value_float_val], name="value_sprintf")
+        elif value_type == "string" or value_type is None:
+            # String - allocate buffer with quotes around it
+            value_str_len = self.builder.call(self.strlen, [value_ptr], name="value_str_len")
+            value_buf_size = self.builder.add(value_str_len, self.create_int_constant(3), name="value_buf_size")  # +3 for quotes and null
+            value_sprintf_buffer = self.builder.call(self.malloc, [value_buf_size], name="value_sprintf_buf")
+            # Store opening quote
+            self.builder.store(self.i8_type(ord('"')), self.builder.gep(value_sprintf_buffer, [zero], name="value_quote_open"))
+            # Copy string after opening quote
+            self.builder.call(self.strcpy, [self.builder.gep(value_sprintf_buffer, [self.create_int_constant(1)], name="value_str_start"), value_ptr], name="value_cpy")
+            # Store closing quote and null
+            str_end_pos = self.builder.add(self.create_int_constant(1), value_str_len, name="str_end_pos")
+            self.builder.store(self.i8_type(ord('"')), self.builder.gep(value_sprintf_buffer, [str_end_pos], name="value_quote_close"))
+            null_pos = self.builder.gep(value_sprintf_buffer, [self.builder.add(str_end_pos, self.create_int_constant(1), name="null_pos")], name="value_null")
+            self.builder.store(self.i8_type(0), null_pos)
+        else:
+            # Unknown type - print as pointer
+            value_format = self.create_string_constant("0x%x", as_constant=True)
+            value_int = self.builder.ptrtoint(value_ptr, self.int_type, name="value_int")
+            value_sprintf_buffer = self.builder.call(self.malloc, [self.create_int_constant(32)], name="value_sprintf_buf")
+            _ = self.builder.call(self.sprintf, [value_sprintf_buffer, value_format, value_int], name="value_sprintf")
+        
+        # Copy value to result
+        value_copy_pos = self.builder.load(result_len, name="value_copy_pos")
+        self.builder.call(self.strcpy, [self.builder.gep(result_buffer, [value_copy_pos], name="value_dest"), value_sprintf_buffer], name="value_cpy")
+        value_copy_len = self.builder.call(self.strlen, [value_sprintf_buffer], name="value_copy_len")
+        final_pos = self.builder.add(value_copy_pos, value_copy_len, name="final_pos")
+        self.builder.store(final_pos, result_len)
+        
+        # Increment counter
+        next_i = self.builder.add(current_i, llvmlite.ir.Constant(self.int_type, 1), name="next_i")
+        self.builder.store(next_i, counter_ptr)
+        self.builder.branch(loop_block)
+        
+        # Done - add closing brace
+        self.builder.position_at_end(done_block)
+        final_len = self.builder.load(result_len, name="final_len")
+        p_close = self.builder.gep(result_buffer, [final_len], name="p_close")
+        self.builder.store(self.i8_type(ord('}')), p_close)
+        null_pos = self.builder.gep(result_buffer, [self.builder.add(final_len, llvmlite.ir.Constant(self.int_type, 1), name="null_pos")], name="p_null")
+        self.builder.store(self.i8_type(0), null_pos)
+        
+        return result_buffer
+
     def array_append(self, array_ptr, value, elem_type, elem_size):
         """Append an element to a dynamic array"""
         zero = llvmlite.ir.Constant(self.int_type, 0)
@@ -1004,6 +1331,17 @@ class CodeGenerator:
         zero = llvmlite.ir.Constant(self.int_type, 0)
         length_ptr = self.builder.gep(array_ptr, [zero, zero], name="len_ptr")
         return self.builder.load(length_ptr, name="arr_length")
+
+    def array_pop(self, array_ptr):
+        """Pop (remove) the last element from a dynamic array by decrementing length"""
+        zero = llvmlite.ir.Constant(self.int_type, 0)
+        one = llvmlite.ir.Constant(self.int_type, 1)
+        length_ptr = self.builder.gep(array_ptr, [zero, zero], name="len_ptr")
+        length = self.builder.load(length_ptr, name="length")
+        new_length = self.builder.sub(length, one, name="new_length")
+        self.builder.store(new_length, length_ptr)
+        # Return None (void) - we don't return the popped value for now
+        return None
 
     def string_index(self, string_ptr, index):
         """Get character at index from string, return as single-character string"""
@@ -1401,6 +1739,11 @@ class CodeGenerator:
             return llvmlite.ir.Constant(self.int_type, int(node.value))
         if isinstance(node, FloatLiteral):
             return llvmlite.ir.Constant(self.float_type, float(node.value))
+        if isinstance(node, DictLiteral):
+            # Generate dict from literal
+            key_values = [self.generate(key) for key in node.keys]
+            value_values = [self.generate(val) for val in node.values]
+            return self.create_dict_from_literal(key_values, value_values, node.key_type, node.value_type)
         if isinstance(node, NewExpression):
             class_name = node.class_name
             class_info = self.classes.get(class_name)
@@ -1831,6 +2174,45 @@ class CodeGenerator:
 
                     # Default: assume int elements
                     self.array_lengths[node.name] = (self.int_type, 4)
+            elif node.type == "dict" or node.type.startswith("dict<"):
+                # Dict types - store dict pointer
+                explicit_key_type = getattr(node, 'key_type', None)
+                explicit_value_type = getattr(node, 'value_type', None)
+
+                if isinstance(node.value, DictLiteral):
+                    keys = node.value.keys
+                    values = node.value.values
+                    
+                    # Generate key and value arrays
+                    key_values = []
+                    value_values = []
+                    for i, key in enumerate(keys):
+                        key_val = self.generate(key)
+                        val = self.generate(values[i])
+                        key_values.append(key_val)
+                        value_values.append(val)
+                    
+                    # Create dict from literal
+                    dict_ptr = self.create_dict_from_literal(key_values, value_values, explicit_key_type, explicit_value_type)
+                    
+                    self.variables[node.name] = dict_ptr
+                    self.variable_types[node.name] = self.dict_ptr_type
+                    self.dict_key_types[node.name] = explicit_key_type
+                    self.dict_value_types[node.name] = explicit_value_type
+                elif node.value is None:
+                    # Initialize empty dict
+                    dict_ptr = self.create_empty_dict(explicit_key_type, explicit_value_type)
+                    self.variables[node.name] = dict_ptr
+                    self.variable_types[node.name] = self.dict_ptr_type
+                    self.dict_key_types[node.name] = explicit_key_type
+                    self.dict_value_types[node.name] = explicit_value_type
+                else:
+                    # Dict assignment from expression
+                    dict_val = self.generate(node.value)
+                    self.variables[node.name] = dict_val
+                    self.variable_types[node.name] = self.dict_ptr_type
+                    self.dict_key_types[node.name] = explicit_key_type
+                    self.dict_value_types[node.name] = explicit_value_type
             else:
                 # For non-array types
                 if node.type in ('int', 'float', 'string', 'bool'):
@@ -2289,6 +2671,35 @@ class CodeGenerator:
                             return self.builder.call(self.strlen, [obj_value], name="str_len")
                         elif obj_value.type == self.dyn_array_ptr_type:
                             return self.array_length(obj_value)
+                    elif method_name == "append" and obj_value.type == self.dyn_array_ptr_type:
+                        # Handle array.append() on nested MemberExpression (e.g., this.field.append())
+                        if len(node.arguments) != 1:
+                            raise Exception("append() requires exactly one argument")
+                        arg = node.arguments[0]
+                        arg_value = self.generate(arg)
+                        # Determine elem_type and elem_size from the value being appended
+                        if arg_value.type == self.int_type:
+                            elem_type = self.int_type
+                            elem_size = 4
+                        elif arg_value.type == self.float_type:
+                            elem_type = self.float_type
+                            elem_size = 8
+                        elif arg_value.type == self.bool_type:
+                            elem_type = self.bool_type
+                            elem_size = 1
+                        else:
+                            # Pointer type (strings, dicts, class instances, etc.)
+                            elem_type = self.i8_ptr_type
+                            elem_size = 8
+                            # Cast to i8* if needed
+                            if arg_value.type != self.i8_ptr_type:
+                                arg_value = self.builder.bitcast(arg_value, self.i8_ptr_type, name="append_cast")
+                        self.array_append(obj_value, arg_value, elem_type, elem_size)
+                        return None
+                    elif method_name == "pop" and obj_value.type == self.dyn_array_ptr_type:
+                        # Handle array.pop() on nested MemberExpression (e.g., this.field.pop())
+                        self.array_pop(obj_value)
+                        return None
                     # Fall through for other method handling on expressions
                     raise Exception(f"Unsupported method '{method_name}' on expression")
 
@@ -2509,6 +2920,17 @@ class CodeGenerator:
                         format_ptr = self.create_string_constant("%s\n")
                     elif var_type == self.float_type:
                         format_ptr = self.create_string_constant("%f\n")
+                    elif var_type == self.dict_ptr_type:
+                        # For dicts, generate formatted string
+                        dict_ptr = self.variables.get(arg.name)
+                        if dict_ptr:
+                            key_type = self.dict_key_types.get(arg.name)
+                            value_type = self.dict_value_types.get(arg.name)
+                            dict_str = self.generate_dict_to_string(dict_ptr, key_type, value_type)
+                            format_ptr = self.create_string_constant("%s\n")
+                            return self.builder.call(self.printf, [format_ptr, dict_str])
+                        else:
+                            format_ptr = self.create_string_constant("%p\n")
                     else:
                         format_ptr = self.create_string_constant("%d\n")
                 else:
@@ -2518,6 +2940,11 @@ class CodeGenerator:
                         format_ptr = self.create_string_constant("%f\n")
                     elif value.type == self.i8_ptr_type:
                         format_ptr = self.create_string_constant("%s\n")
+                    elif value.type == self.dict_ptr_type:
+                        # Generate dict string representation
+                        dict_str = self.generate_dict_to_string(value, None, None)
+                        format_ptr = self.create_string_constant("%s\n")
+                        return self.builder.call(self.printf, [format_ptr, dict_str])
                     else:
                         format_ptr = self.create_string_constant("%d\n")
                     return self.builder.call(self.printf, [format_ptr, value])

@@ -67,6 +67,18 @@ class ArrayLiteral{
     arg array elements
 }
 
+class DictType{
+    arg string key_type = "any"
+    arg string value_type = "any"
+}
+
+class DictLiteral{
+    arg array keys
+    arg array values
+    arg string key_type = null
+    arg string value_type = null
+}
+
 class CallExpression{
     arg any callee
     arg array arguments
@@ -137,6 +149,8 @@ class VariableDeclaration{
     arg string name
     arg string value = null
     arg string element_type = null
+    arg string key_type = null
+    arg string value_type = null
     arg int line = 0
     arg int column = 0
 }

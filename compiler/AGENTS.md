@@ -36,10 +36,10 @@ mt-lang is a statically-typed programming language that compiles to LLVM IR. The
 
 ### Lexical Structure
 
-- **Keywords**: `from`, `use`, `as`, `int`, `float`, `void`, `array`, `string`, `bool`, `if`, `else`, `for`, `in`, `set`, `return`, `typeof`, `while`, `bool`, `true`, `false`, `func`, `class`, `new`, `this`
+- **Keywords**: `from`, `use`, `as`, `int`, `float`, `void`, `array`, `dict`, `string`, `bool`, `if`, `else`, `for`, `in`, `set`, `return`, `typeof`, `while`, `bool`, `true`, `false`, `func`, `class`, `new`, `this`
 - **Operators**: `+`, `-`, `*`, `/`, `=`, `>`, `<`, `>=`, `<=`, `==`, `!=`, `+=`, `&&`, `||`
-- **Symbols**: `(`, `)`, `[`, `]`, `{`, `}`, `,`, `.`
-- **Literals**: integers, floats (with decimal/exponent), strings (double/single quotes), booleans (`true`/`false`), arrays `[...]`
+- **Symbols**: `(`, `)`, `[`, `]`, `{`, `}`, `,`, `.`, `:`
+- **Literals**: integers, floats (with decimal/exponent), strings (double/single quotes), booleans (`true`/`false`), arrays `[...]`, dicts `{key: value, ...}`
 - **Comments**: C-style single-line comments with `//`
 
 ### Grammar
@@ -121,7 +121,7 @@ arguments ::= expression ("," expression)*
 
 new_expression ::= "new" identifier "(" arguments? ")"
 
-type ::= "int" | "float" | "string" | "bool" | "void" | "array"
+type ::= "int" | "float" | "string" | "bool" | "void" | "array" | "dict" ("<" type "," type ">")?
 
 block ::= "{" statement* "}"
 
@@ -145,6 +145,11 @@ array arr          // auto-initialized to []
 
 string first_char = greeting[0]  // "h"
 string maybe_null = null         // null pointer (falsy in conditions)
+
+// Dict types
+dict my_dict = {"key1": "value1", "key2": "value2"}  // untyped dict
+dict<int, string> ages = {1: "alice", 2: "bob"}      // typed dict with int keys, string values
+dict<string, int> scores = {"alice": 10, "bob": 20}  // typed dict with string keys, int values
 
 class Person {
     string name = "Alice"
@@ -287,6 +292,33 @@ class ClassName:
 - **Variables**: snake_case (`symbol_table`, `current_scope`)
 - **Constants**: ALL_CAPS if any (rare in this codebase)
 - **Files**: snake_case (`semantic.py`, `ast_nodes.py`)
+
+### MT-LANG Specific Syntax
+
+#### The `set` Keyword
+In MT-LANG, all variable assignments require the `set` keyword:
+```mt-lang
+set x = 5
+set this.counter = this.counter + 1
+set arr[0] = new_value
+```
+
+#### The `dict` Type
+MT-LANG supports dictionary/map types with optional generic type parameters:
+```mt-lang
+// Untyped dict (infers types from literal)
+dict my_dict = {"key": "value"}
+
+// Typed dict with key and value types
+dict<int, string> ages = {1: "alice", 2: "bob"}
+dict<string, int> scores = {"alice": 10, "bob": 20}
+
+// Empty dict
+dict empty = {}
+
+// Dict literal syntax
+dict colors = {"red": 1, "green": 2, "blue": 3}
+```
 
 ### Type Hints
 - **Optional but inconsistent**: Some classes use type hints, others don't
