@@ -3,12 +3,13 @@ from parser use Parser
 from stdlib.io use File
 from ast_nodes use Program
 
-File source_file = new File("./tokenizer.mtc", "r")
+File source_file = new File("./bootstrap/tokenizer.mtc", "r")
 string source = source_file.read()
 
-Tokenizer tokens_class = new Tokenizer(source, "fp")
+Tokenizer tokens_class = new Tokenizer(source, "./bootstrap/tokenizer.mtc")
 array tokens = tokens_class.tokenize()
 print("Tokenization complete. Total tokens: " + str(tokens.length()))
-Parser parser = new Parser(tokens, "./tokenizer.mtc")
+
+Parser parser = new Parser(tokens, "./bootstrap/tokenizer.mtc")
 Program ast = parser.parse_program()
 print("Parsing complete. Total AST: " + str(ast.statements.length()))

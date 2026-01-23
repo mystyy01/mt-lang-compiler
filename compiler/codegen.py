@@ -162,6 +162,9 @@ class CodeGenerator:
 
     def get_llvm_type(self, type_str: str):
         """Map AST type strings to LLVM types"""
+        if type_str is None:
+            # Dynamic/untyped - use i8* (any type)
+            return self.i8_ptr_type
         if type_str == "int":
             return self.int_type
         elif type_str == "float":
@@ -252,10 +255,30 @@ class CodeGenerator:
             self.classes[class_name]['llvm_struct'] = struct_type
             self.classes[class_name]['ordered_fields'] = ordered_fields
 
-    def get_common_type(self, left_type, right_type):
+    def get_common_type(self, left_type, right_type, operator=None):
         """Get common type for binary operations with promotion rules"""
         if left_type == self.i8_ptr_type or right_type == self.i8_ptr_type:
-            raise Exception("Invalid binary operation on strings")
+            # Build a descriptive error message
+            left_name = "string" if left_type == self.i8_ptr_type else self._get_type_name(left_type)
+            right_name = "string" if right_type == self.i8_ptr_type else self._get_type_name(right_type)
+
+            if operator:
+                op_str = operator.value
+                pos_info = ""
+                if hasattr(operator, 'line') and operator.line is not None:
+                    pos_info = f" at line {operator.line}"
+                    if hasattr(operator, 'column') and operator.column is not None:
+                        pos_info += f", column {operator.column}"
+
+                if left_type == self.i8_ptr_type and right_type == self.i8_ptr_type:
+                    raise Exception(f"Cannot use '{op_str}' operator on two strings{pos_info}. "
+                                    f"Only '+' (concatenation) and comparison operators (==, !=, <, >, <=, >=) are supported for strings.")
+                else:
+                    raise Exception(f"Cannot use '{op_str}' operator between {left_name} and {right_name}{pos_info}. "
+                                    f"Strings can only be concatenated with other strings using '+', or compared using comparison operators.")
+            else:
+                raise Exception(f"Invalid binary operation between {left_name} and {right_name}. "
+                                f"Strings only support '+' (concatenation) and comparison operators.")
         # Type precedence: float > int > bool
         if left_type == self.float_type or right_type == self.float_type:
             return self.float_type
@@ -263,6 +286,65 @@ class CodeGenerator:
             return self.int_type
         else:
             return self.bool_type
+
+    def _get_type_name(self, llvm_type):
+        """Get a human-readable name for an LLVM type"""
+        if llvm_type == self.i8_ptr_type:
+            return "string"
+        elif llvm_type == self.int_type:
+            return "int"
+        elif llvm_type == self.float_type:
+            return "float"
+        elif llvm_type == self.bool_type:
+            return "bool"
+        elif hasattr(llvm_type, 'pointee'):
+            return "pointer"
+        else:
+            return str(llvm_type)
+
+    def _is_string_expression(self, node):
+        """Check if an AST node expression is known to be a string type (not 'any' type)"""
+        # Check if it's a variable with known string type
+        if isinstance(node, Identifier):
+            if node.name in self.variable_types:
+                var_type = self.variable_types[node.name]
+                # Check if it's a string but NOT an array or dict
+                if var_type == self.i8_ptr_type:
+                    # If it's not in array_lengths, it's likely a real string
+                    return node.name not in self.array_lengths
+            return False
+
+        # Check if it's a member expression like this.field
+        if isinstance(node, MemberExpression):
+            if isinstance(node.object, ThisExpression):
+                # Look up field type in current class
+                if hasattr(self, 'current_class') and self.current_class in self.classes:
+                    fields = self.classes[self.current_class].get('ordered_fields', [])
+                    for field in fields:
+                        if field['name'] == node.property:
+                            return field['type'] == 'string'
+            # For other member expressions, check if we can determine the object's class
+            elif isinstance(node.object, Identifier):
+                obj_name = node.object.name
+                if obj_name in self.variable_classes:
+                    class_name = self.variable_classes[obj_name]
+                    if class_name in self.classes:
+                        fields = self.classes[class_name].get('ordered_fields', [])
+                        for field in fields:
+                            if field['name'] == node.property:
+                                return field['type'] == 'string'
+            return False
+
+        # Check if it's a string literal
+        if isinstance(node, StringLiteral):
+            return True
+
+        # Check if it's a call expression that returns a string
+        if isinstance(node, CallExpression):
+            # Could be enhanced to check function return types
+            return False
+
+        return False
 
     def promote_to_common_type(self, value, target_type):
         """Promote a value to target type"""
@@ -1778,11 +1860,10 @@ class CodeGenerator:
 
         elem_ptr = self.builder.gep(typed_ptr, [index], name="elem_ptr")
 
-        # For pointer types, return the pointer directly; for primitives, load the value
-        if elem_type is None or hasattr(elem_type, 'pointee'):
-            return elem_ptr
-        else:
-            return self.builder.load(elem_ptr, name="elem_val")
+        # Always load the value from the array slot
+        # For pointer types, we load the pointer value (i8*)
+        # For primitives, we load the primitive value
+        return self.builder.load(elem_ptr, name="elem_val")
 
     def string_split(self, string_ptr, delimiter_ptr):
         """
@@ -2278,7 +2359,7 @@ class CodeGenerator:
                     return self.builder.icmp_signed(">=", cmp_result, zero, name="strge")
             
             # Determine common type and promote operands
-            common_type = self.get_common_type(left.type, right.type)
+            common_type = self.get_common_type(left.type, right.type, node.operator)
             left_promoted = self.promote_to_common_type(left, common_type)
             right_promoted = self.promote_to_common_type(right, common_type)
             
@@ -2584,13 +2665,19 @@ class CodeGenerator:
                     dict_obj = self.builder.bitcast(obj, self.dict_ptr_type, name="dict_cast")
                     return self.dict_get(dict_obj, index)
                 else:
-                    # Int index on 'any' - assume array
-                    array_obj = self.builder.bitcast(obj, self.dyn_array_ptr_type, name="array_cast")
-                    elem_type = self.i8_ptr_type  # Default
-                    if isinstance(node.object, Identifier):
-                        if node.object.name in self.array_lengths:
-                            elem_type, _ = self.array_lengths[node.object.name]
-                    return self.array_get(array_obj, index, elem_type)
+                    # Int index - could be string indexing or array access
+                    # Check if this is a known string expression (not 'any' type)
+                    if self._is_string_expression(node.object):
+                        # String character indexing
+                        return self.string_index(obj, index)
+                    else:
+                        # 'any' type - assume array
+                        array_obj = self.builder.bitcast(obj, self.dyn_array_ptr_type, name="array_cast")
+                        elem_type = self.i8_ptr_type  # Default
+                        if isinstance(node.object, Identifier):
+                            if node.object.name in self.array_lengths:
+                                elem_type, _ = self.array_lengths[node.object.name]
+                        return self.array_get(array_obj, index, elem_type)
 
             # Check if the object is a dict
             if obj.type == self.dict_ptr_type:
@@ -2867,8 +2954,12 @@ class CodeGenerator:
                 if expected_type == self.dyn_array_ptr_type:
                     # For arrays, we store the pointer directly
                     if value.type != self.dyn_array_ptr_type:
-                        raise TypeError(f"Cannot assign {value.type} to array variable '{name}': expected {self.dyn_array_ptr_type}")
-                    
+                        # Allow casting from i8* (any type) to array pointer
+                        if value.type == self.i8_ptr_type:
+                            value = self.builder.bitcast(value, self.dyn_array_ptr_type, name="any_to_array")
+                        else:
+                            raise TypeError(f"Cannot assign {value.type} to array variable '{name}': expected {self.dyn_array_ptr_type}")
+
                     # For arrays, replace the pointer in variables dict
                     self.variables[name] = value
                     return None  # No store operation needed for arrays
@@ -4348,9 +4439,38 @@ class CodeGenerator:
             jmp_buf_void_ptr = self.builder.bitcast(jmp_buf_ptr, self.i8_ptr_type, name="jmp_buf_void_ptr")
             self.builder.call(self.longjmp, [jmp_buf_void_ptr, self.create_int_constant(1)], name="longjmp_throw")
 
-        # If not in try block or no global_jmp_buf, print error and exit
-        error_msg = self.create_string_constant("Uncaught exception\n")
-        self.builder.call(self.printf, [error_msg], name="print_uncaught")
+        # If not in try block or no global_jmp_buf, print error and exit with details
+        # Print "Uncaught <ClassName>: <message>"
+        uncaught_prefix = self.create_string_constant("Uncaught ")
+        self.builder.call(self.printf, [uncaught_prefix], name="print_uncaught_prefix")
+
+        # Print the exception class name
+        class_name_str = self.create_string_constant(f"{class_name}: ")
+        self.builder.call(self.printf, [class_name_str], name="print_exc_class")
+
+        # Get the message field from the exception object (first field is usually 'message')
+        # Exception classes have 'message' as their first field
+        if class_name in self.classes:
+            fields = self.classes[class_name].get('ordered_fields', [])
+            message_idx = None
+            for i, field in enumerate(fields):
+                if field['name'] == 'message':
+                    message_idx = i
+                    break
+
+            if message_idx is not None:
+                struct_type = self.classes[class_name]['llvm_struct']
+                typed_ptr = self.builder.bitcast(exc_obj_ptr, struct_type.as_pointer(), name="exc_typed_ptr")
+                msg_ptr = self.builder.gep(typed_ptr,
+                    [self.create_int_constant(0), self.create_int_constant(message_idx)],
+                    name="exc_msg_ptr")
+                msg_value = self.builder.load(msg_ptr, name="exc_msg")
+                self.builder.call(self.printf, [msg_value], name="print_exc_msg")
+
+        # Print newline
+        newline = self.create_string_constant("\n")
+        self.builder.call(self.printf, [newline], name="print_newline")
+
         self.builder.call(self.exit, [llvmlite.ir.Constant(self.int_type, 1)], name="exit_on_exception")
         self.builder.unreachable()
 
@@ -4378,6 +4498,7 @@ class CodeGenerator:
             found_block = func.append_basic_block(name="in_found")
             not_found_block = func.append_basic_block(name="in_not_found")
             continue_block = func.append_basic_block(name="in_continue")
+            exit_block = func.append_basic_block(name="in_exit")
 
             # Get array length
             len_ptr = self.builder.gep(collection, [self.create_int_constant(0), self.create_int_constant(0)], name="len_ptr")
@@ -4418,26 +4539,25 @@ class CodeGenerator:
                 # For non-string elements, assume not equal
                 self.builder.branch(continue_block)
 
-            # Continue block - increment index
+            # Continue block - increment index and loop back
             self.builder.position_at_end(continue_block)
             next_index = self.builder.add(index, self.create_int_constant(1), name="next_index")
             self.builder.store(next_index, index_ptr)
             self.builder.branch(loop_block)
 
-            # Found block
+            # Found block - set result true and exit
             self.builder.position_at_end(found_block)
-            self.builder.branch(continue_block)
+            self.builder.branch(exit_block)
 
-            # Not found block
+            # Not found block - set result false and exit
             self.builder.position_at_end(not_found_block)
-            self.builder.branch(continue_block)
+            self.builder.branch(exit_block)
 
-            # Continue block (phi for result)
-            self.builder.position_at_end(continue_block)
+            # Exit block (phi for result) - receives control from found and not_found
+            self.builder.position_at_end(exit_block)
             phi = self.builder.phi(llvmlite.ir.IntType(1), name="in_result")
             phi.add_incoming(llvmlite.ir.Constant(llvmlite.ir.IntType(1), 1), found_block)
             phi.add_incoming(llvmlite.ir.Constant(llvmlite.ir.IntType(1), 0), not_found_block)
-            phi.add_incoming(llvmlite.ir.Constant(llvmlite.ir.IntType(1), 0), loop_block)  # From continue
             return phi
         else:
             # Unsupported type

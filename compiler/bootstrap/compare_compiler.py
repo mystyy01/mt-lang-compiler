@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from tokenizer import Tokenizer
 from parser import Parser
 
-SOURCE_FILE = "/home/juxtaa/coding/mt-lang/compiler/bootstrap/tokenizer.mtc"
+SOURCE_FILE = "/mnt/ssd/Coding/mt-lang/compiler/bootstrap/tokenizer.mtc"
 
 def get_mtc_token_count():
     proc = subprocess.run(

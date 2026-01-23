@@ -366,7 +366,8 @@ class Tokenizer{
                     tokens.append(this.read_symbol())
                 }
             }
-            elif (this.current_char() in SINGLE_CHAR_SYMBOLS){
+            elif (this.current_char() in SINGLE_CHAR_SYMBOLS || this.current_char() == "|" || this.current_char() == "&"){
+                // Handle all symbols: single-char, double-char (&&, ||), and comments
                 Token symbol_token = this.read_symbol()
                 if (symbol_token != null){
                     tokens.append(symbol_token)
@@ -380,20 +381,6 @@ class Tokenizer{
             }
             elif (isdigit(this.current_char())){
                 tokens.append(this.read_number())
-            }
-            elif (this.current_char() == "|"){
-                // Handle || operator
-                Token symbol_token = this.read_symbol()
-                if (symbol_token != null){
-                    tokens.append(symbol_token)
-                }
-            }
-            elif (this.current_char() == "&"){
-                // Handle && operator
-                Token symbol_token = this.read_symbol()
-                if (symbol_token != null){
-                    tokens.append(symbol_token)
-                }
             }
             else{
                 string char = ""
