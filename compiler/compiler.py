@@ -7,13 +7,23 @@ import sys
 import os
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    # Parse arguments
+    object_only = False
+    args = sys.argv[1:]
+
+    if "-o" in args:
+        object_only = True
+        args.remove("-o")
+
+    if len(args) != 2:
         print("Provide source code and outfile")
-        print("Example usage:\npython compiler.py source.mtc executable")
+        print("Example usage:")
+        print("  mtc source.mtc executable     # compile and link")
+        print("  mtc -o source.mtc output.o    # object file only")
         exit(1)
-    else:
-        source_file = sys.argv[1]
-        out = sys.argv[2]
+
+    source_file = args[0]
+    out = args[1]
 
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
@@ -140,12 +150,16 @@ if __name__ == "__main__":
     target_machine = target.create_target_machine()
 
     # Write object file
-    with open(f"{out}.o", "wb") as f:
+    obj_file = out if object_only else f"{out}.o"
+    with open(obj_file, "wb") as f:
         f.write(target_machine.emit_object(mod))
 
-    print(f"\n=== Compiled to {out}.o ===")
+    print(f"\n=== Compiled to {obj_file} ===")
+
+    if object_only:
+        exit(0)
+
     print("\n=== Compiling to binary ===")
-    import os
     os.system(f"clang {out}.o -o {out} -lm")
     os.system(f"rm {out}.o")
     print(f"\n=== Compiled to {out} ===")
