@@ -8,8 +8,6 @@ import os
 
 if __name__ == "__main__":
     # Silence all normal output; errors should go to stderr.
-    sys.stdout = open(os.devnull, "w")
-
     # Parse arguments
     object_only = False
     lib_file = False
