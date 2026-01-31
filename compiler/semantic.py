@@ -71,7 +71,7 @@ class SemanticAnalyzer:
             full_message = message
         self.errors.append(full_message)
     def analyze(self, node):
-        print(f"DEBUG: Analyzing {node.__class__.__name__}: {node}")
+        # print(f"DEBUG: Analyzing {node.__class__.__name__}: {node}")
         if isinstance(node, Program):
             return self.analyze_program(node)
         if isinstance(node, ClassDeclaration):
@@ -200,7 +200,7 @@ class SemanticAnalyzer:
         self.current_class = old_current_class
 
         # Debug: Print class info
-        print(f"DEBUG: Analyzing class '{node.name}' with {len(node.fields)} fields and {len(node.methods)} methods")
+        # print(f"DEBUG: Analyzing class '{node.name}' with {len(node.fields)} fields and {len(node.methods)} methods")
 
         self.symbol_table.exit_scope()
 
@@ -411,8 +411,8 @@ class SemanticAnalyzer:
                     # null can be assigned to any type
                     if type_of_node != "null":
                         pos_info = self.get_position_info(node)
-                        print(f"DEBUG: Assignment type mismatch: {type_of_node} to {expected_type}")
-                        print(f"DEBUG: Assignment node: {node}")
+                        # print(f"DEBUG: Assignment type mismatch: {type_of_node} to {expected_type}")
+                        # print(f"DEBUG: Assignment node: {node}")
                         self.add_error(f"Type mismatch{pos_info}. Cannot assign type {type_of_node} to {expected_type}")
         self.symbol_table.declare(node.name, "variable", node.type, element_type=element_type)
     def analyze_function_declaration(self, node: FunctionDeclaration):
@@ -456,9 +456,9 @@ class SemanticAnalyzer:
     def analyze_binary_expression(self, node: BinaryExpression):
         left_type = self.analyze(node.left)
         right_type = self.analyze(node.right)
-        print(f"DEBUG: Binary op {node.operator.value}: {left_type} + {right_type}")
-        print(f"DEBUG: Left node: {node.left}")
-        print(f"DEBUG: Right node: {node.right}")
+        # print(f"DEBUG: Binary op {node.operator.value}: {left_type} + {right_type}")
+        # print(f"DEBUG: Left node: {node.left}")
+        # print(f"DEBUG: Right node: {node.right}")
         
         # Comparison operators always return bool
         if node.operator.value in ["==", "!=", ">", "<", ">=", "<="]:
@@ -538,22 +538,23 @@ class SemanticAnalyzer:
         # Load the module and analyze it to find classes and functions
         module_path = node.module_path
 
-        if isinstance(module_path, Identifier):
-            module_name = module_path.name
-        elif isinstance(module_path, MemberExpression):
-            # Handle module paths like stdlib.io
-            if isinstance(module_path.object, Identifier) and isinstance(module_path.property, str):
-                if module_path.object.name == "stdlib":
-                    module_name = module_path.property
-                else:
-                    return
-            else:
-                return
-        else:
-            # Handle more complex module paths if needed
-            return
+        # Flatten module path to parts                                                                                                                                                          
+        if isinstance(module_path, Identifier):                                                                                                                                                 
+            parts = [module_path.name]                                                                                                                                                          
+        elif isinstance(module_path, MemberExpression):                                                                                                                                         
+            parts = []                                                                                                                                                                          
+            current = module_path                                                                                                                                                                  
+            while isinstance(current, MemberExpression):                                                                                                                                           
+                parts.append(current.property)                                                                                                                                                     
+                current = current.object                                                                                                                                                              
+            parts.append(current.name)                                                                                                                                                             
+            parts.reverse()                                                                                                                                                                     
+        else:                                                                                                                                                                                   
+            return    
+                                                                                                                                                                                  
+        rel_path = os.path.join(*parts) + ".mtc"     
 
-        print(f"module_name = {module_name}")
+        # print(f"module_name = {rel_path}")
         # Try to load the module
         try:
             # Check multiple paths for the module
@@ -561,29 +562,21 @@ class SemanticAnalyzer:
             module_file_path = None
             
             # 1. Check current directory
-            local_path = os.path.join(os.path.dirname(self.file_path), module_name + ".mtc")
+            local_path = rel_path
             if os.path.exists(local_path):
                 with open(local_path, "r") as f:
                     module_source = f.read()
                 module_file_path = local_path
             
-            # 2. Check bootstrap directory if current file is in bootstrap
-            if module_source is None and "bootstrap" in self.file_path:
-                bootstrap_path = os.path.join(os.path.dirname(self.file_path), module_name + ".mtc")
-                if os.path.exists(bootstrap_path):
-                    with open(bootstrap_path, "r") as f:
-                        module_source = f.read()
-                    module_file_path = bootstrap_path
-            
-            # 3. Check stdlib directory
+            # 2. Check stdlib directory
             if module_source is None:
-                module_file_path = os.path.join(os.path.dirname(__file__), "stdlib", module_name + ".mtc")
+                module_file_path = os.path.join(os.path.dirname(__file__), rel_path)
                 if os.path.exists(module_file_path):
                     with open(module_file_path, "r") as f:
                         module_source = f.read()
             
             if module_source is None:
-                print(f"DEBUG: Could not find module '{module_name}'")
+                # print(f"DEBUG: Could not find module '{rel_path}'")
                 return
 
             # Parse and analyze the module
@@ -604,10 +597,11 @@ class SemanticAnalyzer:
                 self.classes.update(module_analyzer.classes)
 
             # Debug: Print all symbols found in module
-            print(f"DEBUG: Module symbol table contains:")
+            # print(f"DEBUG: Module symbol table contains:")
             for scope in module_analyzer.symbol_table.scopes:
                 for name, info in scope.items():
-                    print(f"  {name}: {info}")
+                    pass
+                    # print(f"  {name}: {info}")
             
             # Determine which symbols to import
             if node.is_wildcard:
@@ -643,18 +637,18 @@ class SemanticAnalyzer:
                     # Copy class information from module
                     module_class_info = module_analyzer.classes.get(symbol_name, {})
                     self.classes[symbol_name] = module_class_info
-                    print(f"DEBUG: Registered class '{symbol_name}' with fields: {module_class_info.get('fields', [])}")
+                    # print(f"DEBUG: Registered class '{symbol_name}' with fields: {module_class_info.get('fields', [])}")
                 else:
                     # It's a function - use its actual return type from the module analysis
                     self.symbol_table.declare(symbol_name, "function", symbol_info["data_type"], symbol_info.get("parameters"))
-                    print(f"DEBUG: Registered function '{symbol_name}' with type: {symbol_info['data_type']}")
+                    # print(f"DEBUG: Registered function '{symbol_name}' with type: {symbol_info['data_type']}")
 
         except Exception as e:
             # If we can't load the module, just declare as function for now
-            print(f"DEBUG: Exception loading module '{module_name}': {e}")
+            # print(f"DEBUG: Exception loading module '{rel_path}': {e}")
             if node.is_wildcard:
                 # For wildcard, we can't declare fallback symbols since we don't know what they are
-                self.add_error(f"Could not load module '{module_name}' for wildcard import")
+                self.add_error(f"Could not load module '{rel_path}' for wildcard import")
             else:
                 for symbol in node.symbols:
                     self.symbol_table.declare(symbol, "function", "any")
@@ -671,7 +665,7 @@ class SemanticAnalyzer:
             return type_name
         if isinstance(node.callee, Identifier):
             func_name = node.callee.name
-            print(f"DEBUG: Analyzing call to {func_name}")
+            # print(f"DEBUG: Analyzing call to {func_name}")
             # Check for built-in libc functions
             libc_functions = {
                 "fopen": ("i8*", ["i8*", "i8*"]),  # FILE*
@@ -693,7 +687,7 @@ class SemanticAnalyzer:
             # For built-in functions, return their declared type
             if func_symbol.get("symbol_type") == "builtin":
                 result = func_symbol.get("data_type", "unknown")
-                print(f"DEBUG: Builtin {func_name} returns {result}")
+                # print(f"DEBUG: Builtin {func_name} returns {result}")
                 return result
             else:
                 # For user-defined functions, check parameters
@@ -722,7 +716,7 @@ class SemanticAnalyzer:
                                 self.add_error(f"Argument {i+1} of '{func_name}' expects {expected_type}, got {arg_type}{pos_info}")
                 
                 result = func_symbol.get("data_type", "unknown")
-                print(f"DEBUG: User function {func_name} returns {result}")
+                # print(f"DEBUG: User function {func_name} returns {result}")
                 return result
                 
                 # Handle built-in function return types
@@ -1016,8 +1010,8 @@ class SemanticAnalyzer:
                 # null can be assigned to any type
                 if value_type != "null":
                     pos_info = self.get_position_info(node)
-                    print(f"DEBUG: SetStatement type mismatch: {value_type} to {target_type}")
-                    print(f"DEBUG: SetStatement node: {node}")
+                    # print(f"DEBUG: SetStatement type mismatch: {value_type} to {target_type}")
+                    # print(f"DEBUG: SetStatement node: {node}")
                     self.add_error(f"Type mismatch{pos_info}. Cannot assign type {value_type} to {target_type}")
 
     def analyze_return_statement(self, node):
@@ -1033,7 +1027,7 @@ class SemanticAnalyzer:
     
     def analyze_try_statement(self, node):
         """Analyze a try/catch statement"""
-        print(f"DEBUG: Analyzing TryStatement")
+        # print(f"DEBUG: Analyzing TryStatement")
         
         # Analyze try block
         self.symbol_table.enter_scope()
@@ -1084,7 +1078,7 @@ class SemanticAnalyzer:
     
     def analyze_throw_statement(self, node):
         """Analyze a throw statement"""
-        print(f"DEBUG: Analyzing ThrowStatement")
+        # print(f"DEBUG: Analyzing ThrowStatement")
 
         # If no expression, it's a standalone throw - just exits with generic error
         if node.expression is None:

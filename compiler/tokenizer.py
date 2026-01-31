@@ -39,9 +39,9 @@ class Tokenizer:
         if self.position >= len(self.source):
             return True
         return False
-    def peek_next(self):
-        if self.position + 1 < len(self.source):
-            return self.source[self.position+1]
+    def peek_next(self, offset=1):
+        if self.position + offset < len(self.source):
+            return self.source[self.position+offset]
         return None
     def skip_whitespace(self):
         while not self.is_at_end() and self.current_char() in WHITESPACE:
@@ -122,6 +122,7 @@ class Tokenizer:
         start_line = self.line
         start_column = self.column
         self.advance()
+        octal_ints = '01234567'
         while not self.is_at_end() and self.current_char() != quote_char:
             if self.current_char() == '\\' and not self.is_at_end():
                 # Handle escape sequences
@@ -141,8 +142,13 @@ class Tokenizer:
                     string += '"'
                 elif escape_char == "'":
                     string += "'"
-                elif escape_char == '0':
-                    string += '\0'
+                elif escape_char in octal_ints and self.peek_next() in octal_ints and self.peek_next(2) in octal_ints:
+                    escaped_octals = [escape_char, self.peek_next(), self.peek_next(2)]
+                    octal_str = "".join(escaped_octals)
+                    octal_int = int(octal_str, 8)
+                    char = chr(octal_int)
+                    string += char
+                    self.advance(2)
                 else:
                     # Unknown escape, keep as-is
                     string += '\\' + escape_char

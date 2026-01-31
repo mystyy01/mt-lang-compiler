@@ -106,7 +106,7 @@ EXCEPTION_TYPE_TAGS = {
 }
 
 class CodeGenerator:
-    def __init__(self, source_dir=None):
+    def __init__(self, source_dir=None, lib_file=False):
         self.variables = {}
         self.variable_types = {}
         self.functions = {}
@@ -131,6 +131,10 @@ class CodeGenerator:
         self.imported_modules = set()  # Track which modules we've already imported
         self.libc_functions = {}  # Track imported libc functions: name -> llvm_function
 
+        if lib_file:
+            self.builder = None
+            self.create_printf_function()
+            self.create_libc_functions()
         # Dynamic array struct: { i32 length, i32 capacity, i8* data }
         self.dyn_array_type = llvmlite.ir.LiteralStructType([
             self.int_type,      # length
@@ -185,7 +189,17 @@ class CodeGenerator:
         else:
             # For user-defined types (classes), use pointer to byte
             return self.i8_ptr_type
-
+    def get_module_name_string(self, module_path):
+        if isinstance(module_path, Identifier):
+            return module_path.name
+        parts = []
+        node = module_path
+        while isinstance(node, MemberExpression):
+            parts.append(node.property)
+            node = node.object
+        parts.append(node.name)
+        parts.reverse()
+        return "".join(parts)
     def get_element_llvm_type(self, element_type_str):
         """Get LLVM type and size for array element types. Returns (llvm_type, size, class_name)"""
         if element_type_str == "int":
@@ -374,7 +388,7 @@ class CodeGenerator:
 
     def resolve_module_path(self, module_path):
         """Resolve module path to actual file path"""
-        print(f"DEBUG: resolve_module_path called with: {type(module_path).__name__} = {module_path}")
+        # print(f"DEBUG: resolve_module_path called with: {type(module_path).__name__} = {module_path}")
         if isinstance(module_path, MemberExpression):
             # Handle dotted paths like stdlib.math or mypackage.utils
             parts = []
@@ -386,7 +400,7 @@ class CodeGenerator:
                 parts.append(node.name)
             parts.reverse()
 
-            print(f"DEBUG: parts = {parts}")
+            # print(f"DEBUG: parts = {parts}")
             
             # Check if first part is "stdlib" - use stdlib path
             if parts[0] == "stdlib":
@@ -399,7 +413,7 @@ class CodeGenerator:
                 file_path = os.path.join(self.source_dir, rel_path)
         elif isinstance(module_path, Identifier):
             # Simple name like "math" - check local first, then stdlib
-            print(f"DEBUG: Simple identifier: {module_path.name}")
+            # print(f"DEBUG: Simple identifier: {module_path.name}")
             rel_path = module_path.name + ".mtc"
             # Check local source dir first
             file_path = os.path.join(self.source_dir, rel_path)
@@ -414,7 +428,7 @@ class CodeGenerator:
             rel_path = str(module_path) + ".mtc"
             file_path = os.path.join(self.source_dir, rel_path)
 
-        print(f"DEBUG: file_path = {file_path}")
+        # print(f"DEBUG: file_path = {file_path}")
         if os.path.exists(file_path):
             return file_path
 
@@ -431,7 +445,7 @@ class CodeGenerator:
                     return name
             # Fallback to generating module name
             if isinstance(module_path, MemberExpression):
-                return f"{module_path.object.name}.{module_path.property}"
+                return self.get_module_name_string(module_path)
             else:
                 return module_path.name
         
@@ -451,6 +465,8 @@ class CodeGenerator:
         from semantic import SemanticAnalyzer
         module_analyzer = SemanticAnalyzer(file_path)
         module_analyzer.analyze(ast)
+        self.classes.update(module_analyzer.classes)
+        self.create_class_structs()
         if module_analyzer.errors:
             for error in module_analyzer.errors:
                 print(f"Error: {error}")
@@ -502,7 +518,7 @@ class CodeGenerator:
         
         # Register all new items under the module name
         if isinstance(module_path, MemberExpression):
-            module_name = f"{module_path.object.name}.{module_path.property}"
+            module_name = self.get_module_name_string(module_path)
         else:
             module_name = module_path.name
             
@@ -3292,7 +3308,7 @@ class CodeGenerator:
                             except TypeError as e:
                                 raise TypeError(f"Type mismatch in call to '{class_name}.{method_name}'{pos_info}: {e}")
                         else:
-                            print(f"DEBUG: Method {method_func_name} not found")
+                            # print(f"DEBUG: Method {method_func_name} not found")
                             # Unknown method - just evaluate arguments
                             for arg in node.arguments:
                                 self.generate(arg)

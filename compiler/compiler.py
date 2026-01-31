@@ -7,13 +7,20 @@ import sys
 import os
 
 if __name__ == "__main__":
+    # Silence all normal output; errors should go to stderr.
+    sys.stdout = open(os.devnull, "w")
+
     # Parse arguments
     object_only = False
+    lib_file = False
     args = sys.argv[1:]
 
     if "-o" in args:
         object_only = True
         args.remove("-o")
+    if "--lib" in args:
+        lib_file = True
+        args.remove("--lib")
 
     if len(args) != 2:
         print("Provide source code and outfile")
@@ -29,7 +36,7 @@ if __name__ == "__main__":
     llvm.initialize_native_asmprinter()
 
     # Get source directory for module imports
-    source_dir = os.path.dirname(os.path.abspath(source_file))
+    source_dir = os.getcwd()
 
     with open(source_file, "r") as f:
         source_code = f.read()
@@ -60,24 +67,26 @@ if __name__ == "__main__":
         for error in analyzer.errors:
             print(f"Error: {error}")
         exit(1)
-    gen = CodeGenerator(source_dir=source_dir)
+    gen = CodeGenerator(source_dir=source_dir, lib_file=lib_file)
     
     # Pass semantic analyzer to code generator for class info
     if hasattr(analyzer, 'classes'):
         gen.classes = analyzer.classes
-    gen.create_main_function()
+    if not lib_file:
+        gen.create_main_function()
     result = gen.generate(ast)
-    # Only add return if block is not already terminated
-    if not gen.builder.block.is_terminated:
-        # Check if result is None or has void type (void calls return void-typed instruction)
-        if result is None or (hasattr(result, 'type') and result.type == llvmlite.ir.VoidType()):
-            result = llvmlite.ir.Constant(gen.int_type, 0)
-        gen.builder.ret(result)
+    if not lib_file:
+        # Only add return if block is not already terminated
+        if not gen.builder.block.is_terminated:
+            # Check if result is None or has void type (void calls return void-typed instruction)
+            if result is None or (hasattr(result, 'type') and result.type == llvmlite.ir.VoidType()):
+                result = llvmlite.ir.Constant(gen.int_type, 0)
+            gen.builder.ret(result)
 
 
     # Compile to machine code
     llvm_ir = str(gen.module)
-    print(llvm_ir)
+    # print(llvm_ir)  # Debug: uncomment to see generated IR
     
     # Wrap LLVM parsing with detailed error information
     try:
@@ -149,21 +158,21 @@ if __name__ == "__main__":
     target = llvm.Target.from_default_triple()
     target_machine = target.create_target_machine()
 
-    # Write object file
+    # Write object 
     obj_file = out if object_only else f"{out}.o"
     with open(obj_file, "wb") as f:
         f.write(target_machine.emit_object(mod))
 
-    print(f"\n=== Compiled to {obj_file} ===")
+    # print(f"\n=== Compiled to {obj_file} ===")
 
     if object_only:
         exit(0)
 
-    print("\n=== Compiling to binary ===")
+    # print("\n=== Compiling to binary ===")
     os.system(f"clang {out}.o -o {out} -lm")
     os.system(f"rm {out}.o")
-    print(f"\n=== Compiled to {out} ===")
-    print("\n=== Running now ===")
+    # print(f"\n=== Compiled to {out} ===")
+    # print("\n=== Running now ===")
 
     out_path = os.path.abspath(out)
     out_dir = os.path.dirname(out_path)
