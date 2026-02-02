@@ -80,6 +80,8 @@ class SemanticAnalyzer:
             return self.analyze_variable_declaration(node)
         if isinstance(node, FunctionDeclaration):
             return self.analyze_function_declaration(node)
+        if isinstance(node, ExternalDeclaration):
+            return self.analyze_external_declaration(node)
         if isinstance(node, DynamicFunctionDeclaration):
             return self.analyze_dynamic_function_declaration(node)
         if isinstance(node, FromImportStatement):
@@ -423,7 +425,8 @@ class SemanticAnalyzer:
         for statement in node.body.statements:
             self.analyze(statement)
         self.symbol_table.exit_scope()
-    
+    def analyze_external_declaration(self, node: ExternalDeclaration):
+        self.symbol_table.declare(node.name, "function", node.return_type, node.parameters)
     def analyze_dynamic_function_declaration(self, node: DynamicFunctionDeclaration):
         # Dynamic function with statically typed parameters and dynamic return
         self.symbol_table.declare(node.name, "function", "any", node.parameters)

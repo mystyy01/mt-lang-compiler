@@ -8,33 +8,62 @@ import os
 
 if __name__ == "__main__":
     # Silence all normal output; errors should go to stderr.
-    # Parse arguments
+    # Parse arguments - flags can appear anywhere
     object_only = False
     lib_file = False
+    no_runtime = False
+    no_libc = False
+    o_files = []
+    positional = []
+
     args = sys.argv[1:]
 
-    if "-o" in args:
-        object_only = True
-        args.remove("-o")
-    if "--lib" in args:
-        lib_file = True
-        args.remove("--lib")
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--obj":
+            if i + 1 >= len(args):
+                print("Error: --obj requires a file path")
+                exit(1)
+            o_files.append(args[i + 1])
+            i += 2
+        elif arg == "--no-runtime":
+            no_runtime = True
+            i += 1
+        elif arg == "--no-libc":
+            no_libc = True
+            i += 1
+        elif arg == "-o":
+            object_only = True
+            i += 1
+        elif arg == "--lib":
+            lib_file = True
+            i += 1
+        elif arg.startswith("-"):
+            print(f"Error: Unknown flag '{arg}'")
+            exit(1)
+        else:
+            positional.append(arg)
+            i += 1
 
-    if len(args) != 2:
+    if len(positional) != 2:
         print("Provide source code and outfile")
         print("Example usage:")
-        print("  mtc source.mtc executable     # compile and link")
+        print("  mtc source.mtc executable     # compile and link (runtime + main)")
+        print("  mtc --no-runtime source.mtc executable  # omit runtime/main")
+        print("  mtc --no-libc source.mtc executable     # omit libc declarations")
         print("  mtc -o source.mtc output.o    # object file only")
+        print("  mtc source.mtc --obj lib.o executable   # link with external object")
         exit(1)
 
-    source_file = args[0]
-    out = args[1]
+    source_file = positional[0]
+    out = positional[1]
 
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
 
-    # Get source directory for module imports
-    source_dir = os.getcwd()
+    # Get source directory for module imports (relative to the source file, like C's #include "...")
+    source_dir = os.path.dirname(os.path.abspath(source_file)) or os.getcwd()
 
     with open(source_file, "r") as f:
         source_code = f.read()
@@ -44,19 +73,20 @@ if __name__ == "__main__":
     tokens = Tokenizer(source_code, abs_source_file).tokenize()
     ast = Parser(tokens, abs_source_file).parse_program()
     
-    # Prepend exception imports to enable try/catch/throw
+    # Prepend exception imports to enable try/catch/throw unless runtime is skipped
     from tokenizer import Tokenizer as ExTokenizer
     from parser import Parser as ExParser
-    stdlib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stdlib")
-    exceptions_path = os.path.join(stdlib_dir, "exceptions.mtc")
-    if os.path.exists(exceptions_path):
-        with open(exceptions_path, "r") as f:
-            exceptions_code = f.read()
-        exc_tokens = ExTokenizer(exceptions_code, exceptions_path).tokenize()
-        exc_ast = ExParser(exc_tokens, exceptions_path).parse_program()
-        
-        # Prepend exception classes to the program
-        ast.statements = exc_ast.statements + ast.statements
+    if not no_runtime:
+        stdlib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stdlib")
+        exceptions_path = os.path.join(stdlib_dir, "exceptions.mtc")
+        if os.path.exists(exceptions_path):
+            with open(exceptions_path, "r") as f:
+                exceptions_code = f.read()
+            exc_tokens = ExTokenizer(exceptions_code, exceptions_path).tokenize()
+            exc_ast = ExParser(exc_tokens, exceptions_path).parse_program()
+            
+            # Prepend exception classes to the program
+            ast.statements = exc_ast.statements + ast.statements
     
     from semantic import SemanticAnalyzer
     analyzer = SemanticAnalyzer(abs_source_file)
@@ -65,15 +95,15 @@ if __name__ == "__main__":
         for error in analyzer.errors:
             print(f"Error: {error}")
         exit(1)
-    gen = CodeGenerator(source_dir=source_dir, lib_file=lib_file)
+    gen = CodeGenerator(source_dir=source_dir, lib_file=lib_file, no_runtime=no_runtime, no_libc=no_libc)
     
     # Pass semantic analyzer to code generator for class info
     if hasattr(analyzer, 'classes'):
         gen.classes = analyzer.classes
-    if not lib_file:
+    if not lib_file and not no_runtime:
         gen.create_main_function()
     result = gen.generate(ast)
-    if not lib_file:
+    if not lib_file and not no_runtime:
         # Only add return if block is not already terminated
         if not gen.builder.block.is_terminated:
             # Check if result is None or has void type (void calls return void-typed instruction)
@@ -167,7 +197,8 @@ if __name__ == "__main__":
         exit(0)
 
     # print("\n=== Compiling to binary ===")
-    os.system(f"clang {out}.o -o {out} -lm")
+    extra_objs = " ".join(o_files)  # join paths
+    os.system(f"clang {out}.o {extra_objs} -o {out} -lm")
     os.system(f"rm {out}.o")
     # print(f"\n=== Compiled to {out} ===")
     # print("\n=== Running now ===")

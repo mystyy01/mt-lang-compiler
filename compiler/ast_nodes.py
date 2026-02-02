@@ -179,6 +179,13 @@ class FunctionDeclaration:
         self.body = body
     def __repr__(self):
         return f"FunctionDeclaration({self.return_type}, {self.name}, {self.parameters}, {self.body})"
+class ExternalDeclaration:
+    def __init__(self, return_type, name, parameters: list):
+        self.return_type = return_type
+        self.name = name
+        self.parameters = parameters
+    def __repr__(self):
+        return f"ExternalDeclaration({self.return_type}, {self.name}, {self.parameters})"
 class DynamicFunctionDeclaration:
     def __init__(self, name, parameters: list, body: Block):
         self.name = name

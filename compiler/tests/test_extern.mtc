@@ -1,0 +1,4 @@
+external int add(int num1, int num2)
+
+int result = add(1, 2)
+print(str(result))

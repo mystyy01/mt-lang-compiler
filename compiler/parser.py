@@ -299,6 +299,25 @@ class Parser:
         return left
     def parse_expression(self):
         return self.parse_or()
+
+    def parse_external(self):
+        self.advance() # skip external keyword
+        return_type = self.current_token().value
+        self.advance()
+        func_name = self.current_token().value
+        self.expect("NAME")
+        self.expect("SYMBOL", "(")
+        params = []
+        if not self.match("SYMBOL", ")"):
+            param = self.parse_parameter()
+            params.append(param)
+            while self.match("SYMBOL", ","):
+                self.advance()
+                param = self.parse_parameter()
+                params.append(param)
+        self.expect("SYMBOL", ")")
+        return ExternalDeclaration(return_type, func_name, params)
+    
     def parse_statement(self):
         if self.match("KEYWORD", "set"):
             return self.parse_set_statement()
@@ -310,6 +329,8 @@ class Parser:
             return self.parse_for_statement()
         elif self.match("KEYWORD", "func"):
             return self.parse_dynamic_function()
+        elif self.match("KEYWORD", "external"):
+            return self.parse_external()
         elif (self.match("KEYWORD", "int") or self.match("KEYWORD", "float") or self.match("KEYWORD", "void") or
               self.match("KEYWORD", "array") or self.match("KEYWORD", "dict") or self.match("KEYWORD", "string") or self.match("KEYWORD", "bool")):
             # Check if this is a builtin function call like int(x) or a declaration like int foo = ...

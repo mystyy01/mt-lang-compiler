@@ -106,7 +106,7 @@ EXCEPTION_TYPE_TAGS = {
 }
 
 class CodeGenerator:
-    def __init__(self, source_dir=None, lib_file=False):
+    def __init__(self, source_dir=None, lib_file=False, no_runtime=False, no_libc=False):
         self.variables = {}
         self.variable_types = {}
         self.functions = {}
@@ -130,11 +130,16 @@ class CodeGenerator:
         self.stdlib_path = os.path.join(os.path.dirname(__file__), "stdlib")
         self.imported_modules = set()  # Track which modules we've already imported
         self.libc_functions = {}  # Track imported libc functions: name -> llvm_function
+        self.no_runtime = no_runtime
+        self.no_libc = no_libc
+        self.builder = None
 
         if lib_file:
             self.builder = None
-            self.create_printf_function()
-            self.create_libc_functions()
+            if not self.no_libc:
+                # Always declare libc function signatures - with --no-libc, user provides implementations via external .o files
+                self.create_printf_function()
+                self.create_libc_functions()
         # Dynamic array struct: { i32 length, i32 capacity, i8* data }
         self.dyn_array_type = llvmlite.ir.LiteralStructType([
             self.int_type,      # length
@@ -163,6 +168,7 @@ class CodeGenerator:
         # Track dict key/value types for printing
         self.dict_key_types = {}  # var_name -> key_type string
         self.dict_value_types = {}  # var_name -> value_type string
+        self.exc_type_tags = {}  # Exception type tag globals (populated when runtime enabled)
 
     def get_llvm_type(self, type_str: str):
         """Map AST type strings to LLVM types"""
@@ -189,6 +195,20 @@ class CodeGenerator:
         else:
             # For user-defined types (classes), use pointer to byte
             return self.i8_ptr_type
+    def __getattr__(self, name):
+        if name in LIBC_FUNCTIONS:
+            return self._resolve_libc_function(name)
+        raise AttributeError(f"'CodeGenerator' object has no attribute '{name}'")
+
+    def _resolve_libc_function(self, func_name):
+        """Locate or declare a libc helper, respecting --no-libc."""
+        func = self.libc_functions.get(func_name)
+        if func is None:
+            func = self.module.globals.get(func_name)
+            if func is None:
+                func = self.declare_libc_function(func_name)
+        setattr(self, func_name, func)
+        return func
     def get_module_name_string(self, module_path):
         if isinstance(module_path, Identifier):
             return module_path.name
@@ -460,7 +480,7 @@ class CodeGenerator:
 
         tokens = Tokenizer(source, file_path).tokenize()
         ast = Parser(tokens, file_path).parse_program()
-        
+
         # Run semantic analysis on the module
         from semantic import SemanticAnalyzer
         module_analyzer = SemanticAnalyzer(file_path)
@@ -476,14 +496,21 @@ class CodeGenerator:
         before_funcs = set(self.functions.keys())
         before_classes = set(self.classes.keys())
         before_vars = set(self.variables.keys())
-        
+
         # Save and set in_main_function to True so module-level variables are global
         old_in_main_function = self.in_main_function
         self.in_main_function = True
+
+        # Temporarily change source_dir to the imported file's directory for nested imports
+        old_source_dir = self.source_dir
+        self.source_dir = os.path.dirname(file_path) or self.source_dir
         
         # Generate code for all statements in module
         for statement in ast.statements:
-            if isinstance(statement, LibcImportStatement):
+            if isinstance(statement, ExternalDeclaration):
+                # Process external declarations first to declare functions from .o files
+                self.generate(statement)
+            elif isinstance(statement, LibcImportStatement):
                 # Process libc imports first to declare functions
                 self.generate(statement)
             elif isinstance(statement, FromImportStatement):
@@ -505,9 +532,10 @@ class CodeGenerator:
                 # Load and generate code for the entire module
                 self.generate(statement)
         
-        # Restore in_main_function
+        # Restore in_main_function and source_dir
         self.in_main_function = old_in_main_function
-        
+        self.source_dir = old_source_dir
+
         after_funcs = set(self.functions.keys())
         after_classes = set(self.classes.keys())
         after_vars = set(self.variables.keys())
@@ -663,13 +691,19 @@ class CodeGenerator:
         block = func.append_basic_block(name="entry")
         self.builder = llvmlite.ir.IRBuilder(block)
         self.in_main_function = True
-        self.create_printf_function()
-        self.create_libc_functions()
+        if not self.no_libc:
+            # Always declare libc function signatures - with --no-libc, user provides implementations via external .o files
+            self.create_printf_function()
+            self.create_libc_functions()
     def create_printf_function(self):
+        if hasattr(self, 'printf'):
+            return  # Already created
         printf_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type], var_arg=True)
         self.printf = llvmlite.ir.Function(self.module, printf_type, "printf")
 
     def create_libc_functions(self):
+        if hasattr(self, 'malloc'):
+            return  # Already created
         # malloc(size_t size) -> void*
         malloc_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.int_type])
         self.malloc = llvmlite.ir.Function(self.module, malloc_type, "malloc")
@@ -779,12 +813,18 @@ class CodeGenerator:
         exit_type = llvmlite.ir.FunctionType(self.void_type, [self.int_type], var_arg=False)
         self.exit = llvmlite.ir.Function(self.module, exit_type, "exit")
         
+        # Create runtime globals only if not in no_runtime mode
+        if not self.no_runtime:
+            self.create_runtime_globals()
+
+    def create_runtime_globals(self):
+        """Create global variables for exception handling runtime."""
         # Global jump buffer for exception handling
         # This is a single global buffer that gets reused for each try/catch
         self.global_jmp_buf = llvmlite.ir.GlobalVariable(self.module, self.jmp_buf_type, "__mt_exception_jmp_buf")
         zero_i64 = llvmlite.ir.Constant(llvmlite.ir.IntType(64), 0)
         self.global_jmp_buf.initializer = llvmlite.ir.Constant(self.jmp_buf_type, [zero_i64] * 64)
-        
+
         # Exception depth counter to track nested try blocks
         self.global_exception_depth = llvmlite.ir.GlobalVariable(self.module, self.int_type, "__mt_exception_depth")
         self.global_exception_depth.initializer = llvmlite.ir.Constant(self.int_type, 0)
@@ -796,13 +836,13 @@ class CodeGenerator:
         self.global_exception_message = llvmlite.ir.GlobalVariable(self.module, self.i8_ptr_type, "__mt_exception_message")
         self.global_exception_message.initializer = llvmlite.ir.Constant(self.i8_ptr_type, None)
 
-        # Create exception handling runtime
+        # Create exception type tags
         self.create_exception_runtime()
-    
+
     def create_exception_runtime(self):
         # Exception type: { i32 type_tag, i8* message }
         self.exc_type = llvmlite.ir.LiteralStructType([self.int_type, self.i8_ptr_type])
-        
+
         # Exception type tag constants
         self.exc_type_tags = {}
         for exc_name, tag in EXCEPTION_TYPE_TAGS.items():
@@ -865,6 +905,7 @@ class CodeGenerator:
         # Check if already declared in module globals (e.g., malloc, free, etc.)
         if func_name in self.module.globals:
             self.libc_functions[func_name] = self.module.globals[func_name]
+            setattr(self, func_name, self.libc_functions[func_name])
             return self.libc_functions[func_name]
 
         if func_name not in LIBC_FUNCTIONS:
@@ -879,6 +920,7 @@ class CodeGenerator:
         llvm_func = llvmlite.ir.Function(self.module, func_type, func_name)
 
         self.libc_functions[func_name] = llvm_func
+        setattr(self, func_name, llvm_func)
         return llvm_func
 
     def generate_array_to_string(self, array_ptr, elem_type=None):
@@ -3714,6 +3756,24 @@ class CodeGenerator:
                 return self.create_string_constant("unknown")
         if isinstance(node, StringLiteral):
             return self.create_string_constant(node.value)
+        if isinstance(node, ExternalDeclaration):
+            # Check if function already exists (e.g., from libc declarations)
+            existing_func = self.module.globals.get(node.name)
+            if existing_func is not None:
+                # Function already declared, just store reference
+                self.functions[node.name] = existing_func
+            else:
+                # Compute LLVM types for return and parameters
+                param_types = [self.get_llvm_type(p.param_type) for p in node.parameters]
+                return_type = self.get_llvm_type(node.return_type)
+
+                # Create the function in the module, no body
+                func_type = llvmlite.ir.FunctionType(return_type, param_types)
+                func = llvmlite.ir.Function(self.module, func_type, name=node.name)
+
+                # Store in functions table for later calls
+                self.functions[node.name] = func
+
         if isinstance(node, FunctionDeclaration):
             old_builder = self.builder
             old_variables = self.variables
