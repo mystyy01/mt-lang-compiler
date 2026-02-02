@@ -136,10 +136,14 @@ class CodeGenerator:
 
         if lib_file:
             self.builder = None
-            if not self.no_libc:
-                # Always declare libc function signatures - with --no-libc, user provides implementations via external .o files
-                self.create_printf_function()
-                self.create_libc_functions()
+            # Always declare libc function signatures - with --no-libc, user provides implementations via external .o files
+            # The declarations are still needed so LLVM knows the function signatures
+            self.create_printf_function()
+            self.create_libc_functions()
+            # Create runtime globals (exception handling) - must be called separately since
+            # create_libc_functions() may return early if functions were auto-declared via __getattr__
+            if not self.no_runtime and not self.exc_type_tags:
+                self.create_runtime_globals()
         # Dynamic array struct: { i32 length, i32 capacity, i8* data }
         self.dyn_array_type = llvmlite.ir.LiteralStructType([
             self.int_type,      # length
@@ -691,136 +695,146 @@ class CodeGenerator:
         block = func.append_basic_block(name="entry")
         self.builder = llvmlite.ir.IRBuilder(block)
         self.in_main_function = True
-        if not self.no_libc:
-            # Always declare libc function signatures - with --no-libc, user provides implementations via external .o files
-            self.create_printf_function()
-            self.create_libc_functions()
+        # Always declare libc function signatures - with --no-libc, user provides implementations via external .o files
+        # The declarations are still needed so LLVM knows the function signatures
+        self.create_printf_function()
+        self.create_libc_functions()
+        # Create runtime globals (exception handling) - must be called separately since
+        # create_libc_functions() may return early if functions were auto-declared via __getattr__
+        if not self.no_runtime and not self.exc_type_tags:
+            self.create_runtime_globals()
     def create_printf_function(self):
         if hasattr(self, 'printf'):
             return  # Already created
         printf_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type], var_arg=True)
         self.printf = llvmlite.ir.Function(self.module, printf_type, "printf")
 
-    def create_libc_functions(self):
-        if hasattr(self, 'malloc'):
+    def create_exception_types(self):
+        """Create types needed for exception handling. Safe to call multiple times."""
+        if hasattr(self, 'jmp_buf_type'):
             return  # Already created
-        # malloc(size_t size) -> void*
-        malloc_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.int_type])
-        self.malloc = llvmlite.ir.Function(self.module, malloc_type, "malloc")
 
-        # realloc(void* ptr, size_t size) -> void*
-        realloc_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.int_type])
-        self.realloc = llvmlite.ir.Function(self.module, realloc_type, "realloc")
-
-        # free(void* ptr)
-        free_type = llvmlite.ir.FunctionType(self.void_type, [self.i8_ptr_type])
-        self.free = llvmlite.ir.Function(self.module, free_type, "free")
-
-        # String functions
-        strlen_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type])
-        self.strlen = llvmlite.ir.Function(self.module, strlen_type, "strlen")
-
-        strcpy_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type])
-        self.strcpy = llvmlite.ir.Function(self.module, strcpy_type, "strcpy")
-
-        strcat_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type])
-        self.strcat = llvmlite.ir.Function(self.module, strcat_type, "strcat")
-
-        strcmp_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.i8_ptr_type])
-        self.strcmp = llvmlite.ir.Function(self.module, strcmp_type, "strcmp")
-
-        sprintf_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.i8_ptr_type], var_arg=True)
-        self.sprintf = llvmlite.ir.Function(self.module, sprintf_type, "sprintf")
-
-        # File I/O functions
-        # fopen(const char* filename, const char* mode) -> FILE*
-        fopen_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type])
-        self.fopen = llvmlite.ir.Function(self.module, fopen_type, "fopen")
-
-        # fclose(FILE* stream) -> int
-        fclose_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type])
-        self.fclose = llvmlite.ir.Function(self.module, fclose_type, "fclose")
-
-        # fread(void* buffer, size_t size, size_t count, FILE* stream) -> size_t
-        fread_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.int_type, self.int_type, self.i8_ptr_type])
-        self.fread = llvmlite.ir.Function(self.module, fread_type, "fread")
-
-        # fwrite(const void* ptr, size_t size, size_t count, FILE* stream) -> size_t
-        fwrite_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.int_type, self.int_type, self.i8_ptr_type])
-        self.fwrite = llvmlite.ir.Function(self.module, fwrite_type, "fwrite")
-
-        # fputs(const char* s, FILE* stream) -> int
-        fputs_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.i8_ptr_type])
-        self.fputs = llvmlite.ir.Function(self.module, fputs_type, "fputs")
-
-        # fseek(FILE* stream, long offset, int whence) -> int
-        fseek_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.int_type, self.int_type])
-        self.fseek = llvmlite.ir.Function(self.module, fseek_type, "fseek")
-
-        # ftell(FILE* stream) -> long
-        ftell_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type])
-        self.ftell = llvmlite.ir.Function(self.module, ftell_type, "ftell")
-
-        # fgets(char* buffer, int size, FILE* stream) -> char*
-        fgets_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.int_type, self.i8_ptr_type])
-        self.fgets = llvmlite.ir.Function(self.module, fgets_type, "fgets")
-
-        # stdin
-        self.stdin = llvmlite.ir.GlobalVariable(self.module, self.i8_ptr_type, "stdin")
-        self.stdin.linkage = 'external'
-
-        # strstr(const char* haystack, const char* needle) -> char*
-        strstr_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type])
-        self.strstr = llvmlite.ir.Function(self.module, strstr_type, "strstr")
-        
-        # setjmp/longjmp for exception handling
-        # jmp_buf is typically an array of ints (size varies by platform, use 16 for x86-64)
-        # On x86-64 Linux, jmp_buf is typically [8 x i64] but we'll use i8* for compatibility
-        # The actual structure is platform-specific and handled by libc
         # jmp_buf needs to be large enough for the platform
         # On x86_64 Linux, jmp_buf is about 200 bytes, so use 64 x i64 (512 bytes) to be safe
         self.jmp_buf_type = llvmlite.ir.ArrayType(llvmlite.ir.IntType(64), 64)
         self.jmp_buf_ptr_type = llvmlite.ir.PointerType(self.jmp_buf_type)
-        
-        # Use i8* (void*) for setjmp/longjmp since jmp_buf is opaque to us
-        # The actual layout is platform-specific and handled by libc
+
+    def _declare_function(self, name, func_type):
+        """Declare a function, reusing existing declaration if present."""
+        if name in self.module.globals:
+            func = self.module.globals[name]
+            setattr(self, name, func)
+            return func
+        func = llvmlite.ir.Function(self.module, func_type, name)
+        setattr(self, name, func)
+        return func
+
+    def create_libc_functions(self):
+        # Always create exception types first (needed for runtime globals)
+        self.create_exception_types()
+
+        # malloc(size_t size) -> void*
+        malloc_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.int_type])
+        self._declare_function("malloc", malloc_type)
+
+        # realloc(void* ptr, size_t size) -> void*
+        realloc_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.int_type])
+        self._declare_function("realloc", realloc_type)
+
+        # free(void* ptr)
+        free_type = llvmlite.ir.FunctionType(self.void_type, [self.i8_ptr_type])
+        self._declare_function("free", free_type)
+
+        # String functions
+        strlen_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type])
+        self._declare_function("strlen", strlen_type)
+
+        strcpy_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type])
+        self._declare_function("strcpy", strcpy_type)
+
+        strcat_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type])
+        self._declare_function("strcat", strcat_type)
+
+        strcmp_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.i8_ptr_type])
+        self._declare_function("strcmp", strcmp_type)
+
+        sprintf_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.i8_ptr_type], var_arg=True)
+        self._declare_function("sprintf", sprintf_type)
+
+        # File I/O functions
+        fopen_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type])
+        self._declare_function("fopen", fopen_type)
+
+        fclose_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type])
+        self._declare_function("fclose", fclose_type)
+
+        fread_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.int_type, self.int_type, self.i8_ptr_type])
+        self._declare_function("fread", fread_type)
+
+        fwrite_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.int_type, self.int_type, self.i8_ptr_type])
+        self._declare_function("fwrite", fwrite_type)
+
+        fputs_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.i8_ptr_type])
+        self._declare_function("fputs", fputs_type)
+
+        fseek_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.int_type, self.int_type])
+        self._declare_function("fseek", fseek_type)
+
+        ftell_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type])
+        self._declare_function("ftell", ftell_type)
+
+        fgets_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.int_type, self.i8_ptr_type])
+        self._declare_function("fgets", fgets_type)
+
+        # stdin global
+        if "stdin" not in self.module.globals:
+            self.stdin = llvmlite.ir.GlobalVariable(self.module, self.i8_ptr_type, "stdin")
+            self.stdin.linkage = 'external'
+        else:
+            self.stdin = self.module.globals["stdin"]
+
+        strstr_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type])
+        self._declare_function("strstr", strstr_type)
+
+        # setjmp/longjmp for exception handling
         setjmp_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type], var_arg=False)
-        self.setjmp = llvmlite.ir.Function(self.module, setjmp_type, "setjmp")
-        
+        self._declare_function("setjmp", setjmp_type)
+
         longjmp_type = llvmlite.ir.FunctionType(self.void_type, [self.i8_ptr_type, self.int_type], var_arg=False)
-        self.longjmp = llvmlite.ir.Function(self.module, longjmp_type, "longjmp")
-        
-        # memcpy for clearing jump buffer
+        self._declare_function("longjmp", longjmp_type)
+
         memcpy_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.i8_ptr_type, self.int_type], var_arg=False)
-        self.memcpy = llvmlite.ir.Function(self.module, memcpy_type, "memcpy")
-        
-        # memset for initializing jump buffer
+        self._declare_function("memcpy", memcpy_type)
+
         memset_type = llvmlite.ir.FunctionType(self.i8_ptr_type, [self.i8_ptr_type, self.int_type, self.int_type], var_arg=False)
-        self.memset = llvmlite.ir.Function(self.module, memset_type, "memset")
-        
-        # memcmp for checking if jump buffer is set
+        self._declare_function("memset", memset_type)
+
         memcmp_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type, self.i8_ptr_type, self.int_type], var_arg=False)
-        self.memcmp = llvmlite.ir.Function(self.module, memcmp_type, "memcmp")
-        
-        # atoi and atof for string-to-number conversion with exception throwing
+        self._declare_function("memcmp", memcmp_type)
+
         atoi_type = llvmlite.ir.FunctionType(self.int_type, [self.i8_ptr_type], var_arg=False)
-        self.atoi = llvmlite.ir.Function(self.module, atoi_type, "atoi")
-        
+        self._declare_function("atoi", atoi_type)
+
         atof_type = llvmlite.ir.FunctionType(self.float_type, [self.i8_ptr_type], var_arg=False)
-        self.atof = llvmlite.ir.Function(self.module, atof_type, "atof")
-        
-        # exit for uncaught exceptions
+        self._declare_function("atof", atof_type)
+
         exit_type = llvmlite.ir.FunctionType(self.void_type, [self.int_type], var_arg=False)
-        self.exit = llvmlite.ir.Function(self.module, exit_type, "exit")
+        self._declare_function("exit", exit_type)
         
         # Create runtime globals only if not in no_runtime mode
         if not self.no_runtime:
             self.create_runtime_globals()
 
     def create_runtime_globals(self):
-        """Create global variables for exception handling runtime."""
+        """Create global variables for exception handling runtime. Safe to call multiple times."""
+        # Ensure exception types are created first
+        self.create_exception_types()
+
+        # Skip if already created
+        if hasattr(self, 'global_jmp_buf'):
+            return
+
         # Global jump buffer for exception handling
-        # This is a single global buffer that gets reused for each try/catch
         self.global_jmp_buf = llvmlite.ir.GlobalVariable(self.module, self.jmp_buf_type, "__mt_exception_jmp_buf")
         zero_i64 = llvmlite.ir.Constant(llvmlite.ir.IntType(64), 0)
         self.global_jmp_buf.initializer = llvmlite.ir.Constant(self.jmp_buf_type, [zero_i64] * 64)
@@ -1038,6 +1052,62 @@ class CodeGenerator:
         self.builder.store(self.i8_type(0), null_ptr)
 
         return result_buffer
+
+    def create_static_global_array(self, name, elements, elem_type, elem_size):
+        """Create a static global array for module-level constant arrays.
+
+        This creates a global constant structure that mimics the dynamic array layout
+        but is statically initialized at compile time (no malloc required).
+
+        Returns a tuple of (struct_ptr, ptr_global):
+        - struct_ptr: direct pointer to the array struct (for use in variables)
+        - ptr_global: global variable containing the pointer (for use in global_arrays)
+        """
+        # Generate constant values for all elements
+        elem_values = []
+        for i, element in enumerate(elements):
+            if isinstance(element, StringLiteral):
+                # Create a constant string
+                elem_val = self.create_string_constant(element.value, as_constant=True)
+            elif isinstance(element, NumberLiteral):
+                elem_val = llvmlite.ir.Constant(self.int_type, element.value)
+            else:
+                raise Exception(f"Static global array only supports string and number literals, got {type(element)}")
+            elem_values.append(elem_val)
+
+        # Create a global array for the data
+        if elem_type == self.i8_ptr_type:
+            data_array_type = llvmlite.ir.ArrayType(self.i8_ptr_type, len(elements))
+        else:
+            data_array_type = llvmlite.ir.ArrayType(self.int_type, len(elements))
+
+        data_global = llvmlite.ir.GlobalVariable(self.module, data_array_type, name=f"__static_array_data_{name}")
+        data_global.global_constant = True
+        data_global.initializer = llvmlite.ir.Constant(data_array_type, elem_values)
+
+        # Create a global struct for the array metadata: { i32 length, i32 capacity, i8* data }
+        zero = llvmlite.ir.Constant(llvmlite.ir.IntType(32), 0)
+        data_ptr = data_global.gep([zero, zero])
+        data_ptr_cast = data_ptr.bitcast(self.i8_ptr_type)
+
+        struct_global = llvmlite.ir.GlobalVariable(self.module, self.dyn_array_type, name=f"__static_array_struct_{name}")
+        struct_global.initializer = llvmlite.ir.Constant(self.dyn_array_type, [
+            llvmlite.ir.Constant(self.int_type, len(elements)),  # length
+            llvmlite.ir.Constant(self.int_type, len(elements)),  # capacity
+            data_ptr_cast,  # data pointer
+        ])
+
+        # struct_global IS the pointer to the struct (GlobalVariable is implicitly a pointer to its contents)
+        # This is used directly in variables
+
+        # Create a global pointer variable for global_arrays (used when accessing from methods)
+        # This holds a pointer that when loaded gives the struct pointer
+        ptr_global = llvmlite.ir.GlobalVariable(self.module, self.dyn_array_ptr_type, name=f"__static_array_ptr_{name}")
+        struct_ptr = struct_global.gep([zero])
+        ptr_global.initializer = struct_ptr
+
+        # Return struct_global for variables, ptr_global for global_arrays
+        return struct_global, ptr_global
 
     def create_dynamic_array(self, elements, elem_type, on_heap=False):
         """Create a new dynamic array with initial elements.
@@ -1494,6 +1564,10 @@ class CodeGenerator:
 
     def string_index(self, string_ptr, index):
         """Get character at index from string, return as single-character string"""
+        # Ensure exception infrastructure exists for bounds checking errors
+        if not self.no_runtime:
+            self.create_runtime_globals()
+
         func = self.builder.block.parent
 
         # Get string length for bounds checking
@@ -1520,29 +1594,33 @@ class CodeGenerator:
         # Error block - throw IndexError (use longjmp if in try block)
         self.builder.position_at_end(error_block)
 
-        # Store exception type for catch block
-        index_error_tag = self.builder.load(self.get_exception_type_tag("IndexError"), name="index_error_tag")
-        self.builder.store(index_error_tag, self.global_exception_type)
+        # Check if exception runtime is available
+        if hasattr(self, 'global_jmp_buf'):
+            # Store exception type for catch block
+            index_error_tag = self.builder.load(self.get_exception_type_tag("IndexError"), name="index_error_tag")
+            self.builder.store(index_error_tag, self.global_exception_type)
 
-        # Check at RUNTIME if we're in a try block by checking exception depth > 0
-        exc_depth = self.builder.load(self.global_exception_depth, name="exc_depth_check")
-        is_in_try = self.builder.icmp_signed(">", exc_depth, self.create_int_constant(0), name="is_in_try")
+            # Check at RUNTIME if we're in a try block by checking exception depth > 0
+            exc_depth = self.builder.load(self.global_exception_depth, name="exc_depth_check")
+            is_in_try = self.builder.icmp_signed(">", exc_depth, self.create_int_constant(0), name="is_in_try")
 
-        # Create blocks for try/no-try paths
-        throw_block = func.append_basic_block(name=f"str_idx_throw_{bc_id}")
-        exit_block = func.append_basic_block(name=f"str_idx_exit_{bc_id}")
+            # Create blocks for try/no-try paths
+            throw_block = func.append_basic_block(name=f"str_idx_throw_{bc_id}")
+            exit_block = func.append_basic_block(name=f"str_idx_exit_{bc_id}")
 
-        self.builder.cbranch(is_in_try, throw_block, exit_block)
+            self.builder.cbranch(is_in_try, throw_block, exit_block)
 
-        # Throw block - use longjmp to jump to catch handler
-        self.builder.position_at_end(throw_block)
-        jmp_buf_ptr = self.builder.gep(self.global_jmp_buf, [self.create_int_constant(0), self.create_int_constant(0)], name="jmp_buf_for_index_error")
-        jmp_buf_void_ptr = self.builder.bitcast(jmp_buf_ptr, self.i8_ptr_type, name="jmp_buf_void_ptr")
-        self.builder.call(self.longjmp, [jmp_buf_void_ptr, self.create_int_constant(1)], name="longjmp_index_error")
-        self.builder.unreachable()
+            # Throw block - use longjmp to jump to catch handler
+            self.builder.position_at_end(throw_block)
+            jmp_buf_ptr = self.builder.gep(self.global_jmp_buf, [self.create_int_constant(0), self.create_int_constant(0)], name="jmp_buf_for_index_error")
+            jmp_buf_void_ptr = self.builder.bitcast(jmp_buf_ptr, self.i8_ptr_type, name="jmp_buf_void_ptr")
+            self.builder.call(self.longjmp, [jmp_buf_void_ptr, self.create_int_constant(1)], name="longjmp_index_error")
+            self.builder.unreachable()
 
-        # Exit block - print error and exit (no try block)
-        self.builder.position_at_end(exit_block)
+            # Exit block - print error and exit (no try block)
+            self.builder.position_at_end(exit_block)
+
+        # Print error and exit
         error_msg = self.create_string_constant("IndexError: string index out of bounds\n")
         self.builder.call(self.printf, [error_msg], name="print_index_error")
         self.builder.call(self.exit, [self.create_int_constant(1)], name="exit_on_index_error")
@@ -1780,27 +1858,32 @@ class CodeGenerator:
 
         # Error block - throw IndexError
         self.builder.position_at_end(error_block)
-        index_error_tag = self.builder.load(self.get_exception_type_tag("IndexError"), name="arr_set_index_error_tag")
-        self.builder.store(index_error_tag, self.global_exception_type)
 
-        # Check if in try block
-        exc_depth = self.builder.load(self.global_exception_depth, name="arr_set_exc_depth_check")
-        is_in_try = self.builder.icmp_signed(">", exc_depth, self.create_int_constant(0), name="arr_set_is_in_try")
+        # Check if exception runtime is available
+        if hasattr(self, 'global_jmp_buf'):
+            index_error_tag = self.builder.load(self.get_exception_type_tag("IndexError"), name="arr_set_index_error_tag")
+            self.builder.store(index_error_tag, self.global_exception_type)
 
-        throw_block = func.append_basic_block(name=f"arr_set_idx_throw_{bc_id}")
-        exit_block = func.append_basic_block(name=f"arr_set_idx_exit_{bc_id}")
+            # Check if in try block
+            exc_depth = self.builder.load(self.global_exception_depth, name="arr_set_exc_depth_check")
+            is_in_try = self.builder.icmp_signed(">", exc_depth, self.create_int_constant(0), name="arr_set_is_in_try")
 
-        self.builder.cbranch(is_in_try, throw_block, exit_block)
+            throw_block = func.append_basic_block(name=f"arr_set_idx_throw_{bc_id}")
+            exit_block = func.append_basic_block(name=f"arr_set_idx_exit_{bc_id}")
 
-        # Throw block
-        self.builder.position_at_end(throw_block)
-        jmp_buf_ptr = self.builder.gep(self.global_jmp_buf, [self.create_int_constant(0), self.create_int_constant(0)], name="jmp_buf_for_arr_set_index_error")
-        jmp_buf_void_ptr = self.builder.bitcast(jmp_buf_ptr, self.i8_ptr_type, name="jmp_buf_void_ptr")
-        self.builder.call(self.longjmp, [jmp_buf_void_ptr, self.create_int_constant(1)], name="longjmp_arr_set_index_error")
-        self.builder.unreachable()
+            self.builder.cbranch(is_in_try, throw_block, exit_block)
 
-        # Exit block
-        self.builder.position_at_end(exit_block)
+            # Throw block
+            self.builder.position_at_end(throw_block)
+            jmp_buf_ptr = self.builder.gep(self.global_jmp_buf, [self.create_int_constant(0), self.create_int_constant(0)], name="jmp_buf_for_arr_set_index_error")
+            jmp_buf_void_ptr = self.builder.bitcast(jmp_buf_ptr, self.i8_ptr_type, name="jmp_buf_void_ptr")
+            self.builder.call(self.longjmp, [jmp_buf_void_ptr, self.create_int_constant(1)], name="longjmp_arr_set_index_error")
+            self.builder.unreachable()
+
+            # Exit block
+            self.builder.position_at_end(exit_block)
+
+        # Print error and exit
         error_msg = self.create_string_constant("IndexError: array index out of bounds\n")
         self.builder.call(self.printf, [error_msg], name="print_arr_set_index_error")
         self.builder.call(self.exit, [self.create_int_constant(1)], name="exit_on_arr_set_index_error")
@@ -1871,29 +1954,33 @@ class CodeGenerator:
         # Error block - throw IndexError (use longjmp if in try block)
         self.builder.position_at_end(error_block)
 
-        # Store exception type for catch block
-        index_error_tag = self.builder.load(self.get_exception_type_tag("IndexError"), name="arr_index_error_tag")
-        self.builder.store(index_error_tag, self.global_exception_type)
+        # Check if exception runtime is available
+        if hasattr(self, 'global_jmp_buf'):
+            # Store exception type for catch block
+            index_error_tag = self.builder.load(self.get_exception_type_tag("IndexError"), name="arr_index_error_tag")
+            self.builder.store(index_error_tag, self.global_exception_type)
 
-        # Check at RUNTIME if we're in a try block by checking exception depth > 0
-        exc_depth = self.builder.load(self.global_exception_depth, name="arr_exc_depth_check")
-        is_in_try = self.builder.icmp_signed(">", exc_depth, self.create_int_constant(0), name="arr_is_in_try")
+            # Check at RUNTIME if we're in a try block by checking exception depth > 0
+            exc_depth = self.builder.load(self.global_exception_depth, name="arr_exc_depth_check")
+            is_in_try = self.builder.icmp_signed(">", exc_depth, self.create_int_constant(0), name="arr_is_in_try")
 
-        # Create blocks for try/no-try paths
-        throw_block = func.append_basic_block(name=f"arr_idx_throw_{bc_id}")
-        exit_block = func.append_basic_block(name=f"arr_idx_exit_{bc_id}")
+            # Create blocks for try/no-try paths
+            throw_block = func.append_basic_block(name=f"arr_idx_throw_{bc_id}")
+            exit_block = func.append_basic_block(name=f"arr_idx_exit_{bc_id}")
 
-        self.builder.cbranch(is_in_try, throw_block, exit_block)
+            self.builder.cbranch(is_in_try, throw_block, exit_block)
 
-        # Throw block - use longjmp to jump to catch handler
-        self.builder.position_at_end(throw_block)
-        jmp_buf_ptr = self.builder.gep(self.global_jmp_buf, [self.create_int_constant(0), self.create_int_constant(0)], name="jmp_buf_for_arr_index_error")
-        jmp_buf_void_ptr = self.builder.bitcast(jmp_buf_ptr, self.i8_ptr_type, name="jmp_buf_void_ptr")
-        self.builder.call(self.longjmp, [jmp_buf_void_ptr, self.create_int_constant(1)], name="longjmp_arr_index_error")
-        self.builder.unreachable()
+            # Throw block - use longjmp to jump to catch handler
+            self.builder.position_at_end(throw_block)
+            jmp_buf_ptr = self.builder.gep(self.global_jmp_buf, [self.create_int_constant(0), self.create_int_constant(0)], name="jmp_buf_for_arr_index_error")
+            jmp_buf_void_ptr = self.builder.bitcast(jmp_buf_ptr, self.i8_ptr_type, name="jmp_buf_void_ptr")
+            self.builder.call(self.longjmp, [jmp_buf_void_ptr, self.create_int_constant(1)], name="longjmp_arr_index_error")
+            self.builder.unreachable()
 
-        # Exit block - print error and exit (no try block)
-        self.builder.position_at_end(exit_block)
+            # Exit block - print error and exit (no try block)
+            self.builder.position_at_end(exit_block)
+
+        # Print error and exit
         error_msg = self.create_string_constant("IndexError: array index out of bounds\n")
         self.builder.call(self.printf, [error_msg], name="print_arr_index_error")
         self.builder.call(self.exit, [self.create_int_constant(1)], name="exit_on_arr_index_error")
@@ -2035,8 +2122,8 @@ class CodeGenerator:
             self._string_cache[cache_key] = global_var
         
         zero = llvmlite.ir.Constant(llvmlite.ir.IntType(32), 0)
-        if as_constant:
-            # Return constant GEP for use in global initializers
+        if as_constant or not hasattr(self, 'builder') or self.builder is None:
+            # Return constant GEP for use in global initializers or when no builder
             return global_var.gep([zero, zero])
         else:
             # Return instruction GEP for use in function body
@@ -2517,34 +2604,43 @@ class CodeGenerator:
                         elem_type = self.i8_ptr_type
                         elem_size = 8
 
-                    # Generate values for all elements
-                    elem_values = []
-                    for i, element in enumerate(elements):
-                        try:
-                            elem_value = self._generate_with_location(element, f"array element {i}")
-                            if elem_value is None:
-                                raise Exception(f"Array element {i} evaluated to None")
-                            elem_values.append(elem_value)
-                        except Exception as e:
-                            line = getattr(node.value, 'line', None)
-                            column = getattr(node.value, 'column', None)
-                            pos_info = f" at line {line}, column {column}" if line is not None else ""
-                            raise Exception(f"Failed to generate array element at index {i}{pos_info}: {e}")
+                    # Check if we're at module level (no builder) - create static global array
+                    if not hasattr(self, 'builder') or self.builder is None:
+                        # Create a static global constant array for module-level arrays
+                        # Returns (struct_ptr for variables, ptr_global for global_arrays)
+                        struct_ptr, ptr_global = self.create_static_global_array(node.name, elements, elem_type, elem_size)
+                        self.variables[node.name] = struct_ptr
+                        self.array_lengths[node.name] = (elem_type, elem_size)
+                        self.global_arrays[node.name] = ptr_global
+                    else:
+                        # Generate values for all elements
+                        elem_values = []
+                        for i, element in enumerate(elements):
+                            try:
+                                elem_value = self._generate_with_location(element, f"array element {i}")
+                                if elem_value is None:
+                                    raise Exception(f"Array element {i} evaluated to None")
+                                elem_values.append(elem_value)
+                            except Exception as e:
+                                line = getattr(node.value, 'line', None)
+                                column = getattr(node.value, 'column', None)
+                                pos_info = f" at line {line}, column {column}" if line is not None else ""
+                                raise Exception(f"Failed to generate array element at index {i}{pos_info}: {e}")
 
-                    # Create dynamic array - returns pointer to struct
-                    # Always use on_heap=True to ensure array survives function returns
-                    array_ptr, _, _ = self.create_dynamic_array(elem_values, elem_type, on_heap=True)
+                        # Create dynamic array - returns pointer to struct
+                        # Always use on_heap=True to ensure array survives function returns
+                        array_ptr, _, _ = self.create_dynamic_array(elem_values, elem_type, on_heap=True)
 
-                    # If in main function, create a global variable to store the pointer
-                    # so it can be accessed from methods
-                    if self.in_main_function:
-                        global_var = llvmlite.ir.GlobalVariable(self.module, self.dyn_array_ptr_type, name=f"global_{node.name}")
-                        global_var.initializer = llvmlite.ir.Constant(self.dyn_array_ptr_type, None)
-                        self.builder.store(array_ptr, global_var)
-                        self.global_arrays[node.name] = global_var
+                        # If in main function, create a global variable to store the pointer
+                        # so it can be accessed from methods
+                        if self.in_main_function:
+                            global_var = llvmlite.ir.GlobalVariable(self.module, self.dyn_array_ptr_type, name=f"global_{node.name}")
+                            global_var.initializer = llvmlite.ir.Constant(self.dyn_array_ptr_type, None)
+                            self.builder.store(array_ptr, global_var)
+                            self.global_arrays[node.name] = global_var
 
-                    self.variables[node.name] = array_ptr  # Store pointer directly
-                    self.array_lengths[node.name] = (elem_type, elem_size)
+                        self.variables[node.name] = array_ptr  # Store pointer directly
+                        self.array_lengths[node.name] = (elem_type, elem_size)
                 elif node.value is None:
                     # Initialize empty array - use explicit element type or default to int
                     # Always use on_heap=True to ensure array survives function returns
@@ -4489,31 +4585,33 @@ class CodeGenerator:
             self.builder.unreachable()
             return None
 
-        # Store exception type tag in global variable
-        tag_global = self.get_exception_type_tag(class_name)
-        tag_value = self.builder.load(tag_global, name=f"tag_{class_name}")
-        self.builder.store(tag_value, self.global_exception_type)
-
-        # Allocate exception object on heap (must persist across longjmp)
-        struct_type = self.classes[class_name]['llvm_struct']
-        struct_size = self.get_type_size(struct_type)
-        heap_ptr = self.builder.call(self.malloc, [struct_size], name="exc_heap_ptr")
-        heap_ptr_typed = self.builder.bitcast(heap_ptr, struct_type.as_pointer(), name="exc_heap_typed")
-
-        # Copy exception object to heap (use i8* for memcpy)
-        exc_obj_i8ptr = self.builder.bitcast(exc_obj_ptr, self.i8_ptr_type, name="exc_obj_i8ptr")
-        self.builder.call(self.memcpy, [heap_ptr, exc_obj_i8ptr, struct_size, self.create_int_constant(0)], name="exc_copy")
-
-        # Store heap pointer (cast to i8*) in global variable
-        exc_obj_i8ptr = self.builder.bitcast(heap_ptr_typed, self.i8_ptr_type, name="exc_obj_i8ptr")
-        self.builder.store(exc_obj_i8ptr, self.global_exception_message)
-
-        # Check if we're in a try block and use longjmp
+        # Check if exception runtime is available
         in_try = self.variables.get("_in_try_block", False)
-        if in_try and hasattr(self, 'global_jmp_buf'):
-            jmp_buf_ptr = self.builder.gep(self.global_jmp_buf, [self.create_int_constant(0), self.create_int_constant(0)], name="jmp_buf_for_longjmp")
-            jmp_buf_void_ptr = self.builder.bitcast(jmp_buf_ptr, self.i8_ptr_type, name="jmp_buf_void_ptr")
-            self.builder.call(self.longjmp, [jmp_buf_void_ptr, self.create_int_constant(1)], name="longjmp_throw")
+        if hasattr(self, 'global_jmp_buf'):
+            # Store exception type tag in global variable
+            tag_global = self.get_exception_type_tag(class_name)
+            tag_value = self.builder.load(tag_global, name=f"tag_{class_name}")
+            self.builder.store(tag_value, self.global_exception_type)
+
+            # Allocate exception object on heap (must persist across longjmp)
+            struct_type = self.classes[class_name]['llvm_struct']
+            struct_size = self.get_type_size(struct_type)
+            heap_ptr = self.builder.call(self.malloc, [struct_size], name="exc_heap_ptr")
+            heap_ptr_typed = self.builder.bitcast(heap_ptr, struct_type.as_pointer(), name="exc_heap_typed")
+
+            # Copy exception object to heap (use i8* for memcpy)
+            exc_obj_i8ptr = self.builder.bitcast(exc_obj_ptr, self.i8_ptr_type, name="exc_obj_i8ptr")
+            self.builder.call(self.memcpy, [heap_ptr, exc_obj_i8ptr, struct_size, self.create_int_constant(0)], name="exc_copy")
+
+            # Store heap pointer (cast to i8*) in global variable
+            exc_obj_i8ptr = self.builder.bitcast(heap_ptr_typed, self.i8_ptr_type, name="exc_obj_i8ptr")
+            self.builder.store(exc_obj_i8ptr, self.global_exception_message)
+
+            # Check if we're in a try block and use longjmp
+            if in_try:
+                jmp_buf_ptr = self.builder.gep(self.global_jmp_buf, [self.create_int_constant(0), self.create_int_constant(0)], name="jmp_buf_for_longjmp")
+                jmp_buf_void_ptr = self.builder.bitcast(jmp_buf_ptr, self.i8_ptr_type, name="jmp_buf_void_ptr")
+                self.builder.call(self.longjmp, [jmp_buf_void_ptr, self.create_int_constant(1)], name="longjmp_throw")
 
         # If not in try block or no global_jmp_buf, print error and exit with details
         # Print "Uncaught <ClassName>: <message>"
