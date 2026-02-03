@@ -555,11 +555,14 @@ class Parser:
         return DynamicFunctionDeclaration(func_name, params, body)
     
     def parse_type_with_element(self):
-        """Parse type that may include element type: array<int>, array<Token>"""
+        """Parse type that may include element type: array<int>, array<Token>, int[], string[]"""
         base_type = self.current_token().value
+        original_type = base_type  # Save for bracket notation
         self.advance()
 
         element_type = None
+
+        # Handle array<Type> syntax
         if base_type == "array" and self.match("SYMBOL", "<"):
             self.advance()  # consume '<'
             if self.current_token().type == "KEYWORD":
@@ -572,6 +575,18 @@ class Parser:
                 raise CompilerError(f"Expected type name after '<'{pos_info} but found '{current.value}'", "ERROR", self.file_path)
             self.advance()
             self.expect("SYMBOL", ">")
+
+        # Handle Type[] syntax (e.g., string[], int[])
+        elif self.match("SYMBOL", "["):
+            self.advance()  # consume '['
+            if not self.match("SYMBOL", "]"):
+                current = self.current_token()
+                pos_info = self.get_position_info(current)
+                raise CompilerError(f"Expected ']' for array type{pos_info} but found '{current.value}'", "ERROR", self.file_path)
+            self.advance()  # consume ']'
+            # Convert Type[] to array<Type>
+            element_type = original_type
+            base_type = "array"
 
         return base_type, element_type
 
