@@ -917,7 +917,7 @@ Parameter Parser::parse_parameter() {
     };
 }
 
-ASTNode Parser::parse_variable_declaration() {
+ASTNode Parser::parse_variable_declaration(bool is_dynamic) {
     if (current_token().value == "dict" && peek_token(1) && peek_token(1)->value == "<") {
         TypeWithKeyValue dict_type = parse_type_with_key_value();
 
@@ -937,6 +937,7 @@ ASTNode Parser::parse_variable_declaration() {
             std::move(value),
             "",
             -1,
+            false,
             dict_type.key_type.value_or(""),
             dict_type.value_type.value_or(""),
             var_name_token.line,
@@ -962,6 +963,7 @@ ASTNode Parser::parse_variable_declaration() {
         std::move(value),
         type_info.element_type.value_or(""),
         type_info.fixed_size.value_or(-1),
+        is_dynamic,
         "",
         "",
         var_name_token.line,
@@ -982,7 +984,7 @@ ASTNode Parser::parse_declaration() {
     if (next_token && next_token->type == T_SYMBOL && next_token->value == "(") {
         return parse_function_declaration();
     }
-    return parse_variable_declaration();
+    return parse_variable_declaration(false);
 }
 
 ASTNode Parser::parse_dynamic_declaration() {
@@ -997,7 +999,7 @@ ASTNode Parser::parse_dynamic_declaration() {
             "ERROR", file_path);
     }
 
-    ASTNode declaration = parse_variable_declaration();
+    ASTNode declaration = parse_variable_declaration(true);
     if (!declaration || !is_node<VariableDeclaration>(declaration)) {
         throw CompilerError(
             "Invalid dynamic declaration" + get_position_info(&start),
@@ -1015,6 +1017,7 @@ ASTNode Parser::parse_dynamic_declaration() {
             "dynamic array cannot have fixed stack size" + get_position_info(&start),
             "ERROR", file_path);
     }
+    variable.is_dynamic = true;
 
     return declaration;
 }

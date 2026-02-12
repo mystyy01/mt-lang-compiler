@@ -107,16 +107,24 @@ void test_fixed_size_array_declaration() {
 }
 
 void test_dynamic_array_keyword_declaration() {
-    ASTNode root = parse_source("dynamic array ints = [0, 1, 2]\n");
+    ASTNode root = parse_source(
+        "array<int> fixedish = [1, 2]\n"
+        "dynamic array ints = [0, 1, 2]\n");
 
     const auto& program = get_node<Program>(root);
-    expect(program.statements.size() == 1, "expected one dynamic declaration");
+    expect(program.statements.size() == 2, "expected one regular and one dynamic declaration");
     expect(is_node<VariableDeclaration>(program.statements[0]),
+           "expected first declaration to produce VariableDeclaration");
+    expect(is_node<VariableDeclaration>(program.statements[1]),
            "expected dynamic declaration to produce VariableDeclaration");
 
-    const auto& decl = get_node<VariableDeclaration>(program.statements[0]);
+    const auto& regular_decl = get_node<VariableDeclaration>(program.statements[0]);
+    expect(!regular_decl.is_dynamic, "expected regular array declaration to be non-dynamic");
+
+    const auto& decl = get_node<VariableDeclaration>(program.statements[1]);
     expect(decl.type == "array", "expected dynamic array declaration type");
     expect(decl.fixed_size == -1, "expected dynamic array to avoid fixed stack size");
+    expect(decl.is_dynamic, "expected dynamic array declaration to set is_dynamic");
 }
 
 void test_class_declaration() {

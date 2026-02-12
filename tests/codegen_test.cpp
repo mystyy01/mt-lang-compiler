@@ -127,6 +127,19 @@ void test_fixed_stack_array_codegen() {
     verify_ir_syntax(ir, "fixed_stack_array");
 }
 
+void test_default_array_literal_is_stack_codegen() {
+    const std::string ir = generate_ir(
+        "array<int> nums = [1, 2, 3]\n"
+        "print(nums[1])\n");
+
+    expect(ir.find("alloca [3 x i32]") != std::string::npos,
+           "expected non-dynamic array literal declaration to be stack allocated");
+    expect(ir.find("call i8* @malloc(i64 24)") == std::string::npos,
+           "expected non-dynamic array literal declaration to avoid heap header allocation");
+
+    verify_ir_syntax(ir, "default_array_stack");
+}
+
 void test_dynamic_array_keyword_codegen() {
     const std::string ir = generate_ir(
         "dynamic array nums = [0, 1, 2, 3]\n"
@@ -177,6 +190,7 @@ int main() {
     test_control_flow_codegen();
     test_conversion_codegen();
     test_fixed_stack_array_codegen();
+    test_default_array_literal_is_stack_codegen();
     test_dynamic_array_keyword_codegen();
     test_class_codegen();
     std::cout << "All codegen tests passed\n";

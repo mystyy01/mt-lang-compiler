@@ -87,6 +87,7 @@ struct VariableDeclaration {
     ASTNode value;
     std::string element_type;
     int fixed_size = -1;  // For C-style stack arrays: int[16] buf
+    bool is_dynamic = false;
     std::string key_type;
     std::string value_type;
     int line = -1;
@@ -394,6 +395,7 @@ inline ASTNode clone_node(const ASTNode& node) {
                 clone_node(n.value),
                 n.element_type,
                 n.fixed_size,
+                n.is_dynamic,
                 n.key_type,
                 n.value_type,
                 n.line,

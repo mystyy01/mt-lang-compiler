@@ -793,7 +793,20 @@ void CodeGenerator::begin_function(const CodegenFunctionInfo& info) {
             class_name = param.mt_type;
         }
         declare_variable(param.name, VariableInfo{
-            param.llvm_type, ptr, false, "", 0, false, "", class_name});
+            param.llvm_type,
+            ptr,
+            false,
+            "",
+            0,
+            false,
+            "",
+            class_name,
+            false,
+            "",
+            "",
+            "",
+            "",
+        });
     }
 }
 
@@ -1240,7 +1253,20 @@ void CodeGenerator::generate_statement(ASTNode& node) {
 
                 push_scope();
                 declare_variable(for_node.variable, VariableInfo{
-                    "i32", loop_ptr, false, "", 0, false, "", ""});
+                    "i32",
+                    loop_ptr,
+                    false,
+                    "",
+                    0,
+                    false,
+                    "",
+                    "",
+                    false,
+                    "",
+                    "",
+                    "",
+                    "",
+                });
 
                 emit_line("br label %" + cond_label);
                 emit_label(cond_label);
@@ -1289,7 +1315,20 @@ void CodeGenerator::generate_statement(ASTNode& node) {
             emit_line(iterable_ptr + " = alloca i8*");
             emit_line("store i8* " + iterable_value.value + ", i8** " + iterable_ptr);
             iterable_temp = VariableInfo{
-                "i8*", iterable_ptr, false, "", 0, true, "i8*", ""};
+                "i8*",
+                iterable_ptr,
+                false,
+                "",
+                0,
+                true,
+                "i8*",
+                "",
+                false,
+                "",
+                "",
+                "",
+                "",
+            };
             iterable_var = &iterable_temp;
         }
 
@@ -1311,7 +1350,20 @@ void CodeGenerator::generate_statement(ASTNode& node) {
 
         push_scope();
         declare_variable(for_node.variable, VariableInfo{
-            elem_type, loop_var_ptr, false, "", 0, false, "", ""});
+            elem_type,
+            loop_var_ptr,
+            false,
+            "",
+            0,
+            false,
+            "",
+            "",
+            false,
+            "",
+            "",
+            "",
+            "",
+        });
 
         emit_line("br label %" + cond_label);
         emit_label(cond_label);
@@ -1512,7 +1564,20 @@ void CodeGenerator::generate_statement(ASTNode& node) {
                     catch_class_name = catch_type_name;
                 }
                 declare_variable(catch_block.identifier, VariableInfo{
-                    catch_llvm_type, catch_var_addr, false, "", 0, false, "", catch_class_name});
+                    catch_llvm_type,
+                    catch_var_addr,
+                    false,
+                    "",
+                    0,
+                    false,
+                    "",
+                    catch_class_name,
+                    false,
+                    "",
+                    "",
+                    "",
+                    "",
+                });
             }
 
             emit_line("store i8* null, i8** @__mt_exc_obj");
@@ -2639,12 +2704,25 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
                 throw std::runtime_error("Internal error: expected dynamic array variable");
             }
 
+            std::size_t elem_size = 8;
+            if (var->dynamic_array_elem_llvm_type == "i1") {
+                elem_size = 1;
+            } else if (var->dynamic_array_elem_llvm_type == "i32") {
+                elem_size = 4;
+            } else if (var->dynamic_array_elem_llvm_type == "double") {
+                elem_size = 8;
+            }
+
             const std::string header = next_register(object_name + "_hdr");
             emit_line(header + " = load i8*, i8** " + var->ptr_value);
             const std::string len_slot = next_register(object_name + "_len_slot");
             emit_line(len_slot + " = bitcast i8* " + header + " to i64*");
+            const std::string cap_slot = next_register(object_name + "_cap_slot");
+            emit_line(cap_slot + " = getelementptr inbounds i64, i64* " + len_slot + ", i64 1");
             const std::string len = next_register(object_name + "_len");
             emit_line(len + " = load i64, i64* " + len_slot);
+            const std::string cap = next_register(object_name + "_cap");
+            emit_line(cap + " = load i64, i64* " + cap_slot);
 
             const std::string pop_tmp = next_register(object_name + "_pop_tmp");
             emit_line(pop_tmp + " = alloca " + var->dynamic_array_elem_llvm_type);
@@ -2677,6 +2755,39 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
             emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 16");
             const std::string data_slot = next_register(object_name + "_data_slot");
             emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
+
+            const std::string can_shrink = next_register(object_name + "_can_shrink");
+            emit_line(can_shrink + " = icmp sgt i64 " + cap + ", 8");
+            const std::string utilization4 = next_register(object_name + "_util4");
+            emit_line(utilization4 + " = mul i64 " + new_len + ", 4");
+            const std::string underutilized = next_register(object_name + "_underutilized");
+            emit_line(underutilized + " = icmp ule i64 " + utilization4 + ", " + cap);
+            const std::string should_shrink = next_register(object_name + "_should_shrink");
+            emit_line(should_shrink + " = and i1 " + can_shrink + ", " + underutilized);
+
+            const std::string shrink_label = next_label("arr_pop_shrink");
+            const std::string load_value_label = next_label("arr_pop_load_value");
+            emit_line("br i1 " + should_shrink + ", label %" + shrink_label + ", label %" + load_value_label);
+
+            emit_label(shrink_label);
+            const std::string half_cap = next_register(object_name + "_half_cap");
+            emit_line(half_cap + " = lshr i64 " + cap + ", 1");
+            const std::string half_cap_small = next_register(object_name + "_half_cap_small");
+            emit_line(half_cap_small + " = icmp ult i64 " + half_cap + ", 4");
+            const std::string new_cap = next_register(object_name + "_new_cap");
+            emit_line(new_cap + " = select i1 " + half_cap_small + ", i64 4, i64 " + half_cap);
+
+            const std::string old_data = next_register(object_name + "_old_data");
+            emit_line(old_data + " = load i8*, i8** " + data_slot);
+            const std::string new_bytes = next_register(object_name + "_new_bytes");
+            emit_line(new_bytes + " = mul i64 " + new_cap + ", " + std::to_string(elem_size));
+            const std::string shrunk_data = next_register(object_name + "_shrunk_data");
+            emit_line(shrunk_data + " = call i8* @realloc(i8* " + old_data + ", i64 " + new_bytes + ")");
+            emit_line("store i8* " + shrunk_data + ", i8** " + data_slot);
+            emit_line("store i64 " + new_cap + ", i64* " + cap_slot);
+            emit_line("br label %" + load_value_label);
+
+            emit_label(load_value_label);
             const std::string data_raw = next_register(object_name + "_data_raw");
             emit_line(data_raw + " = load i8*, i8** " + data_slot);
             const std::string typed_data = next_register(object_name + "_typed_data");
@@ -2975,7 +3086,21 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
                 const std::string tmp_ptr = next_register("member_obj_addr");
                 emit_line(tmp_ptr + " = alloca i8*");
                 emit_line("store i8* " + object_value.value + ", i8** " + tmp_ptr);
-                VariableInfo temp_var{"i8*", tmp_ptr, false, "", 0, true, "i8*", ""};
+                VariableInfo temp_var{
+                    "i8*",
+                    tmp_ptr,
+                    false,
+                    "",
+                    0,
+                    true,
+                    "i8*",
+                    "",
+                    false,
+                    "",
+                    "",
+                    "",
+                    "",
+                };
                 return emit_dynamic_array_length(object_name.empty() ? "arr" : object_name, &temp_var);
             }
 
@@ -2998,7 +3123,21 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
                 const std::string tmp_ptr = next_register("member_obj_addr");
                 emit_line(tmp_ptr + " = alloca i8*");
                 emit_line("store i8* " + object_value.value + ", i8** " + tmp_ptr);
-                VariableInfo temp_var{"i8*", tmp_ptr, false, "", 0, true, "i8*", ""};
+                VariableInfo temp_var{
+                    "i8*",
+                    tmp_ptr,
+                    false,
+                    "",
+                    0,
+                    true,
+                    "i8*",
+                    "",
+                    false,
+                    "",
+                    "",
+                    "",
+                    "",
+                };
                 return emit_dynamic_array_append(object_name.empty() ? "arr" : object_name, &temp_var,
                                                  node.arguments[0]);
             }
@@ -3017,7 +3156,21 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
                 const std::string tmp_ptr = next_register("member_obj_addr");
                 emit_line(tmp_ptr + " = alloca i8*");
                 emit_line("store i8* " + object_value.value + ", i8** " + tmp_ptr);
-                VariableInfo temp_var{"i8*", tmp_ptr, false, "", 0, true, "i8*", ""};
+                VariableInfo temp_var{
+                    "i8*",
+                    tmp_ptr,
+                    false,
+                    "",
+                    0,
+                    true,
+                    "i8*",
+                    "",
+                    false,
+                    "",
+                    "",
+                    "",
+                    "",
+                };
                 return emit_dynamic_array_pop(object_name.empty() ? "arr" : object_name, &temp_var);
             }
             return emit_dynamic_array_pop(object_name.empty() ? "arr" : object_name, var);
@@ -3458,11 +3611,10 @@ CodeGenerator::IRValue CodeGenerator::generate_hasattr_expression(HasattrExpress
 
 void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
     if (node.type == "array" &&
+        !node.is_dynamic &&
         node.fixed_size <= 0 &&
         node.value &&
-        is_node<ArrayLiteral>(node.value) &&
-        current_function_name != "main" &&
-        is_top_level_variable_name(node.name)) {
+        is_node<ArrayLiteral>(node.value)) {
         auto& literal = get_node<ArrayLiteral>(node.value);
         if (!literal.elements.empty()) {
             std::string element_type = node.element_type;
@@ -3496,6 +3648,11 @@ void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
                     elem_llvm_type,
                     fixed_size,
                     false,
+                    "",
+                    "",
+                    false,
+                    "",
+                    "",
                     "",
                     "",
                 });
@@ -3535,6 +3692,11 @@ void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
             elem_llvm_type,
             node.fixed_size,
             false,
+            "",
+            "",
+            false,
+            "",
+            "",
             "",
             "",
         });
@@ -3591,6 +3753,11 @@ void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
                 0,
                 true,
                 map_type_to_llvm(inferred_element_type),
+                "",
+                false,
+                "",
+                "",
+                "",
                 "",
             });
             return;
@@ -3673,6 +3840,11 @@ void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
             0,
             true,
             elem_llvm_type,
+            "",
+            false,
+            "",
+            "",
+            "",
             "",
         });
 
@@ -3852,7 +4024,20 @@ void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
     const std::string class_name = (!is_builtin_mt_type(node.type) && classes.find(node.type) != classes.end())
         ? node.type : "";
     declare_variable(node.name, VariableInfo{
-        llvm_type, ptr, false, "", 0, false, "", class_name});
+        llvm_type,
+        ptr,
+        false,
+        "",
+        0,
+        false,
+        "",
+        class_name,
+        false,
+        "",
+        "",
+        "",
+        "",
+    });
 
     IRValue init;
     if (node.value) {

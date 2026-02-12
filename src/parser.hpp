@@ -78,7 +78,7 @@ private:
     ASTNode parse_dict_literal();
     Parameter parse_parameter();
 
-    ASTNode parse_variable_declaration();
+    ASTNode parse_variable_declaration(bool is_dynamic = false);
     ASTNode parse_declaration();
     ASTNode parse_dynamic_declaration();
     ASTNode parse_import_statement();
