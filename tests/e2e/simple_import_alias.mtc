@@ -1,0 +1,3 @@
+use simplemath as sm
+print(sm.twice(6))
+

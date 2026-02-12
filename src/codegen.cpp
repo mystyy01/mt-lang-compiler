@@ -104,6 +104,11 @@ void collect_called_functions(const ASTNode& node, std::unordered_set<std::strin
         const auto& call = get_node<CallExpression>(node);
         if (call.callee && is_node<Identifier>(call.callee)) {
             out->insert(get_node<Identifier>(call.callee).name);
+        } else if (call.callee && is_node<MemberExpression>(call.callee)) {
+            const auto& member = get_node<MemberExpression>(call.callee);
+            if (member.object && is_node<Identifier>(member.object)) {
+                out->insert(member.property);
+            }
         }
         collect_called_functions(call.callee, out);
         for (const auto& arg : call.arguments) {
@@ -2482,6 +2487,49 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
                         member_object_field = &field_it->second;
                     }
                 }
+            }
+        }
+
+        // Support module-style calls from `use module as alias`: alias.func(...)
+        if (!var && member.object && is_node<Identifier>(member.object)) {
+            const auto fn_it = functions.find(method_name);
+            if (fn_it != functions.end()) {
+                const CodegenFunctionInfo& info = fn_it->second;
+
+                std::vector<ASTNode> arg_nodes;
+                arg_nodes.reserve(node.arguments.size());
+                for (const auto& arg : node.arguments) {
+                    arg_nodes.push_back(clone_node(arg));
+                }
+
+                if (!info.is_var_arg) {
+                    while (arg_nodes.size() < info.parameters.size() &&
+                           info.parameters[arg_nodes.size()].default_value) {
+                        arg_nodes.push_back(clone_node(info.parameters[arg_nodes.size()].default_value));
+                    }
+
+                    if (arg_nodes.size() != info.parameters.size()) {
+                        throw std::runtime_error("Function '" + method_name +
+                                                 "' argument count mismatch during codegen");
+                    }
+                } else if (arg_nodes.size() < info.parameters.size()) {
+                    throw std::runtime_error("Function '" + method_name + "' requires at least " +
+                                             std::to_string(info.parameters.size()) + " arguments");
+                }
+
+                std::vector<IRValue> args;
+                args.reserve(arg_nodes.size());
+                for (std::size_t i = 0; i < arg_nodes.size(); ++i) {
+                    IRValue arg_value = generate_expression(arg_nodes[i]);
+                    if (i < info.parameters.size()) {
+                        arg_value = cast_value(arg_value, info.parameters[i].llvm_type);
+                    } else if (arg_value.type == "i1") {
+                        arg_value = cast_value(arg_value, "i32");
+                    }
+                    args.push_back(std::move(arg_value));
+                }
+
+                return emit_call(info.return_type, "@" + method_name, args);
             }
         }
 

@@ -68,6 +68,7 @@ cases=(
   classof_basic
   dict_literal
   imports_and_io
+  simple_import_alias
   string_casts
   try_catch
   try_return_restore

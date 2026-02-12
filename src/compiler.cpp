@@ -158,6 +158,28 @@ std::optional<std::filesystem::path> resolve_module_file(const ASTNode& module_p
     return std::nullopt;
 }
 
+std::optional<std::filesystem::path> resolve_simple_module_file(
+    const std::string& module_name,
+    const std::filesystem::path& current_file) {
+    if (module_name.empty()) {
+        return std::nullopt;
+    }
+
+    const std::filesystem::path rel_path = std::filesystem::path(module_name + ".mtc");
+    const std::vector<std::filesystem::path> candidates = {
+        current_file.parent_path() / rel_path,
+        std::filesystem::current_path() / rel_path,
+        std::filesystem::path("/mnt/ssd/Coding/mt-lang/compiler") / rel_path,
+    };
+
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::exists(candidate)) {
+            return std::filesystem::absolute(candidate);
+        }
+    }
+    return std::nullopt;
+}
+
 void expand_imports_in_program(ASTNode* ast,
                                const std::filesystem::path& current_file,
                                std::unordered_set<std::string>* loaded_modules) {
@@ -202,6 +224,48 @@ void expand_imports_in_program(ASTNode* ast,
 
             expand_imports_in_program(&module_ast, *resolved, loaded_modules);
 
+            if (!is_node<Program>(module_ast)) {
+                continue;
+            }
+
+            auto& module_program = get_node<Program>(module_ast);
+            for (auto& module_stmt : module_program.statements) {
+                if (!module_stmt || is_node<FromImportStatement>(module_stmt) ||
+                    is_node<SimpleImportStatement>(module_stmt)) {
+                    continue;
+                }
+                expanded_statements.push_back(std::move(module_stmt));
+            }
+            continue;
+        }
+
+        if (is_node<SimpleImportStatement>(statement)) {
+            const auto& simple = get_node<SimpleImportStatement>(statement);
+            const auto resolved = resolve_simple_module_file(simple.module_name, current_file);
+            if (!resolved.has_value()) {
+                expanded_statements.push_back(std::move(statement));
+                continue;
+            }
+
+            std::string key;
+            try {
+                key = std::filesystem::weakly_canonical(*resolved).string();
+            } catch (...) {
+                key = resolved->string();
+            }
+            if (loaded_modules->count(key) > 0) {
+                continue;
+            }
+            loaded_modules->insert(key);
+
+            ASTNode module_ast;
+            std::string module_error;
+            if (!parse_file_to_ast(*resolved, &module_ast, &module_error)) {
+                expanded_statements.push_back(std::move(statement));
+                continue;
+            }
+
+            expand_imports_in_program(&module_ast, *resolved, loaded_modules);
             if (!is_node<Program>(module_ast)) {
                 continue;
             }
