@@ -312,6 +312,28 @@ bool contains_call_or_new(const ASTNode& node) {
     return true;
 }
 
+std::string infer_literal_mt_type(const ASTNode& node) {
+    if (!node) {
+        return "";
+    }
+    if (is_node<NumberLiteral>(node)) {
+        return "int";
+    }
+    if (is_node<FloatLiteral>(node)) {
+        return "float";
+    }
+    if (is_node<StringLiteral>(node)) {
+        return "string";
+    }
+    if (is_node<BoolLiteral>(node)) {
+        return "bool";
+    }
+    if (is_node<NullLiteral>(node)) {
+        return "any";
+    }
+    return "any";
+}
+
 }  // namespace
 
 CodeGenerator::CodeGenerator(bool emit_main_function, bool emit_builtin_decls)
@@ -1656,54 +1678,91 @@ CodeGenerator::IRValue CodeGenerator::generate_array_literal(ArrayLiteral& node)
 }
 
 CodeGenerator::IRValue CodeGenerator::generate_dict_literal(DictLiteral& node) {
-    std::string repr = "{";
-    for (std::size_t i = 0; i < node.keys.size() && i < node.values.size(); ++i) {
-        if (i > 0) {
-            repr += ", ";
-        }
-
-        auto append_literal = [&](const ASTNode& expr) {
-            if (!expr) {
-                repr += "null";
-                return;
-            }
-            if (is_node<StringLiteral>(expr)) {
-                repr += "\"";
-                repr += get_node<StringLiteral>(expr).value;
-                repr += "\"";
-                return;
-            }
-            if (is_node<NumberLiteral>(expr)) {
-                repr += std::to_string(get_node<NumberLiteral>(expr).value);
-                return;
-            }
-            if (is_node<FloatLiteral>(expr)) {
-                std::ostringstream out;
-                out << std::setprecision(17) << get_node<FloatLiteral>(expr).value;
-                std::string value = out.str();
-                if (value.find('.') == std::string::npos &&
-                    value.find('e') == std::string::npos &&
-                    value.find('E') == std::string::npos) {
-                    value += ".0";
-                }
-                repr += value;
-                return;
-            }
-            if (is_node<BoolLiteral>(expr)) {
-                repr += get_node<BoolLiteral>(expr).value ? "true" : "false";
-                return;
-            }
-            repr += "?";
-        };
-
-        append_literal(node.keys[i]);
-        repr += ": ";
-        append_literal(node.values[i]);
+    std::string key_mt_type = node.key_type;
+    std::string value_mt_type = node.value_type;
+    if (key_mt_type.empty() && !node.keys.empty()) {
+        key_mt_type = infer_literal_mt_type(node.keys[0]);
     }
-    repr += "}";
+    if (value_mt_type.empty() && !node.values.empty()) {
+        value_mt_type = infer_literal_mt_type(node.values[0]);
+    }
+    if (key_mt_type.empty()) {
+        key_mt_type = "any";
+    }
+    if (value_mt_type.empty()) {
+        value_mt_type = "any";
+    }
 
-    StringConstantInfo info = get_or_create_string_constant(repr);
-    return IRValue{"i8*", string_constant_gep(info), true};
+    std::string key_llvm_type = map_type_to_llvm(key_mt_type);
+    std::string value_llvm_type = map_type_to_llvm(value_mt_type);
+    if (key_llvm_type == "void") {
+        key_llvm_type = "i8*";
+        key_mt_type = "any";
+    }
+    if (value_llvm_type == "void") {
+        value_llvm_type = "i8*";
+        value_mt_type = "any";
+    }
+
+    const std::size_t pair_count = std::min(node.keys.size(), node.values.size());
+    const std::size_t key_size = llvm_type_size(key_llvm_type);
+    const std::size_t value_size = llvm_type_size(value_llvm_type);
+    const std::size_t capacity = std::max<std::size_t>(4, pair_count);
+    const std::size_t key_bytes = std::max<std::size_t>(1, capacity * key_size);
+    const std::size_t value_bytes = std::max<std::size_t>(1, capacity * value_size);
+
+    const std::string header_raw = next_register("dict_lit_hdr_raw");
+    emit_line(header_raw + " = call i8* @malloc(i64 32)");
+
+    const std::string len_slot = next_register("dict_lit_len_slot");
+    emit_line(len_slot + " = bitcast i8* " + header_raw + " to i64*");
+    emit_line("store i64 " + std::to_string(pair_count) + ", i64* " + len_slot);
+
+    const std::string cap_slot = next_register("dict_lit_cap_slot");
+    emit_line(cap_slot + " = getelementptr inbounds i64, i64* " + len_slot + ", i64 1");
+    emit_line("store i64 " + std::to_string(capacity) + ", i64* " + cap_slot);
+
+    const std::string keys_slot_raw = next_register("dict_lit_keys_slot_raw");
+    emit_line(keys_slot_raw + " = getelementptr inbounds i8, i8* " + header_raw + ", i64 16");
+    const std::string keys_slot = next_register("dict_lit_keys_slot");
+    emit_line(keys_slot + " = bitcast i8* " + keys_slot_raw + " to i8**");
+
+    const std::string values_slot_raw = next_register("dict_lit_values_slot_raw");
+    emit_line(values_slot_raw + " = getelementptr inbounds i8, i8* " + header_raw + ", i64 24");
+    const std::string values_slot = next_register("dict_lit_values_slot");
+    emit_line(values_slot + " = bitcast i8* " + values_slot_raw + " to i8**");
+
+    const std::string keys_raw = next_register("dict_lit_keys_raw");
+    emit_line(keys_raw + " = call i8* @malloc(i64 " + std::to_string(key_bytes) + ")");
+    emit_line("store i8* " + keys_raw + ", i8** " + keys_slot);
+
+    const std::string values_raw = next_register("dict_lit_values_raw");
+    emit_line(values_raw + " = call i8* @malloc(i64 " + std::to_string(value_bytes) + ")");
+    emit_line("store i8* " + values_raw + ", i8** " + values_slot);
+
+    const std::string keys_typed = next_register("dict_lit_keys_typed");
+    emit_line(keys_typed + " = bitcast i8* " + keys_raw + " to " + key_llvm_type + "*");
+    const std::string values_typed = next_register("dict_lit_values_typed");
+    emit_line(values_typed + " = bitcast i8* " + values_raw + " to " + value_llvm_type + "*");
+
+    for (std::size_t i = 0; i < pair_count; ++i) {
+        IRValue key_value = cast_value(generate_expression(node.keys[i]), key_llvm_type);
+        IRValue value_value = cast_value(generate_expression(node.values[i]), value_llvm_type);
+
+        const std::string key_ptr = next_register("dict_lit_key_ptr");
+        emit_line(key_ptr + " = getelementptr inbounds " + key_llvm_type + ", " + key_llvm_type +
+                  "* " + keys_typed + ", i64 " + std::to_string(i));
+        emit_line("store " + key_llvm_type + " " + key_value.value + ", " + key_llvm_type +
+                  "* " + key_ptr);
+
+        const std::string value_ptr = next_register("dict_lit_value_ptr");
+        emit_line(value_ptr + " = getelementptr inbounds " + value_llvm_type + ", " +
+                  value_llvm_type + "* " + values_typed + ", i64 " + std::to_string(i));
+        emit_line("store " + value_llvm_type + " " + value_value.value + ", " +
+                  value_llvm_type + "* " + value_ptr);
+    }
+
+    return IRValue{"i8*", header_raw, true};
 }
 
 CodeGenerator::IRValue CodeGenerator::generate_null_literal() {
@@ -1926,9 +1985,110 @@ CodeGenerator::IRValue CodeGenerator::generate_index_expression(IndexExpression&
             return IRValue{var->dynamic_array_elem_llvm_type, loaded, true};
         }
 
-        if (var->llvm_type == "i8*" && raw_index.type == "i8*") {
-            // Dict lookup placeholder for bootstrap parity: unknown keys produce null.
-            return IRValue{"i8*", "null", true};
+        if (var->is_dict) {
+            IRValue key = cast_value(raw_index, var->dict_key_llvm_type.empty() ? "i8*" : var->dict_key_llvm_type);
+
+            const std::string key_type = var->dict_key_llvm_type.empty() ? "i8*" : var->dict_key_llvm_type;
+            const std::string value_type = var->dict_value_llvm_type.empty() ? "i8*" : var->dict_value_llvm_type;
+
+            const std::string header = next_register(object_name + "_dict_hdr");
+            emit_line(header + " = load i8*, i8** " + var->ptr_value);
+
+            const std::string len_slot = next_register(object_name + "_dict_len_slot");
+            emit_line(len_slot + " = bitcast i8* " + header + " to i64*");
+            const std::string len = next_register(object_name + "_dict_len");
+            emit_line(len + " = load i64, i64* " + len_slot);
+
+            const std::string keys_slot_raw = next_register(object_name + "_dict_keys_slot_raw");
+            emit_line(keys_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 16");
+            const std::string keys_slot = next_register(object_name + "_dict_keys_slot");
+            emit_line(keys_slot + " = bitcast i8* " + keys_slot_raw + " to i8**");
+            const std::string keys_raw = next_register(object_name + "_dict_keys_raw");
+            emit_line(keys_raw + " = load i8*, i8** " + keys_slot);
+            const std::string keys_typed = next_register(object_name + "_dict_keys_typed");
+            emit_line(keys_typed + " = bitcast i8* " + keys_raw + " to " + key_type + "*");
+
+            const std::string values_slot_raw = next_register(object_name + "_dict_values_slot_raw");
+            emit_line(values_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 24");
+            const std::string values_slot = next_register(object_name + "_dict_values_slot");
+            emit_line(values_slot + " = bitcast i8* " + values_slot_raw + " to i8**");
+            const std::string values_raw = next_register(object_name + "_dict_values_raw");
+            emit_line(values_raw + " = load i8*, i8** " + values_slot);
+            const std::string values_typed = next_register(object_name + "_dict_values_typed");
+            emit_line(values_typed + " = bitcast i8* " + values_raw + " to " + value_type + "*");
+
+            const std::string idx_ptr = next_register(object_name + "_dict_idx_ptr");
+            emit_line(idx_ptr + " = alloca i64");
+            emit_line("store i64 0, i64* " + idx_ptr);
+            const std::string found_ptr = next_register(object_name + "_dict_found_ptr");
+            emit_line(found_ptr + " = alloca i1");
+            emit_line("store i1 0, i1* " + found_ptr);
+            const std::string result_ptr = next_register(object_name + "_dict_result_ptr");
+            emit_line(result_ptr + " = alloca " + value_type);
+            std::string default_value = "0";
+            if (value_type == "double") {
+                default_value = "0.0";
+            } else if (is_pointer_type(value_type)) {
+                default_value = "null";
+            }
+            emit_line("store " + value_type + " " + default_value + ", " + value_type + "* " + result_ptr);
+
+            const std::string cond_label = next_label("dict_get_cond");
+            const std::string body_label = next_label("dict_get_body");
+            const std::string hit_label = next_label("dict_get_hit");
+            const std::string next_label_name = next_label("dict_get_next");
+            const std::string end_label = next_label("dict_get_end");
+
+            emit_line("br label %" + cond_label);
+            emit_label(cond_label);
+            const std::string idx = next_register(object_name + "_dict_idx");
+            emit_line(idx + " = load i64, i64* " + idx_ptr);
+            const std::string cond = next_register(object_name + "_dict_cond");
+            emit_line(cond + " = icmp slt i64 " + idx + ", " + len);
+            emit_line("br i1 " + cond + ", label %" + body_label + ", label %" + end_label);
+
+            emit_label(body_label);
+            const std::string key_ptr = next_register(object_name + "_dict_key_ptr");
+            emit_line(key_ptr + " = getelementptr inbounds " + key_type + ", " + key_type + "* " +
+                      keys_typed + ", i64 " + idx);
+            const std::string key_loaded = next_register(object_name + "_dict_key_loaded");
+            emit_line(key_loaded + " = load " + key_type + ", " + key_type + "* " + key_ptr);
+
+            std::string key_match;
+            if (key_type == "i8*") {
+                const std::string cmp = next_register("dict_key_cmp");
+                emit_line(cmp + " = call i32 @strcmp(i8* " + key_loaded + ", i8* " + key.value + ")");
+                key_match = next_register("dict_key_match");
+                emit_line(key_match + " = icmp eq i32 " + cmp + ", 0");
+            } else if (key_type == "double") {
+                key_match = next_register("dict_key_match");
+                emit_line(key_match + " = fcmp oeq double " + key_loaded + ", " + key.value);
+            } else {
+                key_match = next_register("dict_key_match");
+                emit_line(key_match + " = icmp eq " + key_type + " " + key_loaded + ", " + key.value);
+            }
+            emit_line("br i1 " + key_match + ", label %" + hit_label + ", label %" + next_label_name);
+
+            emit_label(hit_label);
+            const std::string value_ptr = next_register(object_name + "_dict_value_ptr");
+            emit_line(value_ptr + " = getelementptr inbounds " + value_type + ", " + value_type + "* " +
+                      values_typed + ", i64 " + idx);
+            const std::string value_loaded = next_register(object_name + "_dict_value_loaded");
+            emit_line(value_loaded + " = load " + value_type + ", " + value_type + "* " + value_ptr);
+            emit_line("store " + value_type + " " + value_loaded + ", " + value_type + "* " + result_ptr);
+            emit_line("store i1 1, i1* " + found_ptr);
+            emit_line("br label %" + end_label);
+
+            emit_label(next_label_name);
+            const std::string next_idx = next_register(object_name + "_dict_next_idx");
+            emit_line(next_idx + " = add i64 " + idx + ", 1");
+            emit_line("store i64 " + next_idx + ", i64* " + idx_ptr);
+            emit_line("br label %" + cond_label);
+
+            emit_label(end_label);
+            const std::string result = next_register(object_name + "_dict_result");
+            emit_line(result + " = load " + value_type + ", " + value_type + "* " + result_ptr);
+            return IRValue{value_type, result, true};
         }
 
         if (var->llvm_type == "i8*" && var->class_name.empty()) {
@@ -2257,6 +2417,86 @@ CodeGenerator::IRValue CodeGenerator::generate_in_expression(InExpression& node)
         return IRValue{"i1", result, true};
     }
 
+    if (var && var->is_dict) {
+        const std::string key_type = var->dict_key_llvm_type.empty() ? "i8*" : var->dict_key_llvm_type;
+        IRValue key = cast_value(item, key_type);
+
+        const std::string header = next_register(container_name + "_dict_hdr");
+        emit_line(header + " = load i8*, i8** " + var->ptr_value);
+        const std::string len_slot = next_register(container_name + "_dict_len_slot");
+        emit_line(len_slot + " = bitcast i8* " + header + " to i64*");
+        const std::string len = next_register(container_name + "_dict_len");
+        emit_line(len + " = load i64, i64* " + len_slot);
+
+        const std::string keys_slot_raw = next_register(container_name + "_dict_keys_slot_raw");
+        emit_line(keys_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 16");
+        const std::string keys_slot = next_register(container_name + "_dict_keys_slot");
+        emit_line(keys_slot + " = bitcast i8* " + keys_slot_raw + " to i8**");
+        const std::string keys_raw = next_register(container_name + "_dict_keys_raw");
+        emit_line(keys_raw + " = load i8*, i8** " + keys_slot);
+        const std::string keys_typed = next_register(container_name + "_dict_keys_typed");
+        emit_line(keys_typed + " = bitcast i8* " + keys_raw + " to " + key_type + "*");
+
+        const std::string idx_ptr = next_register("in_dict_idx_addr");
+        emit_line(idx_ptr + " = alloca i64");
+        emit_line("store i64 0, i64* " + idx_ptr);
+
+        const std::string result_ptr = next_register("in_dict_result_addr");
+        emit_line(result_ptr + " = alloca i1");
+        emit_line("store i1 0, i1* " + result_ptr);
+
+        const std::string cond_label = next_label("in_dict_cond");
+        const std::string body_label = next_label("in_dict_body");
+        const std::string next_label_name = next_label("in_dict_next");
+        const std::string found_label = next_label("in_dict_found");
+        const std::string end_label = next_label("in_dict_end");
+
+        emit_line("br label %" + cond_label);
+        emit_label(cond_label);
+        const std::string idx = next_register("in_dict_idx");
+        emit_line(idx + " = load i64, i64* " + idx_ptr);
+        const std::string cond = next_register("in_dict_cmp");
+        emit_line(cond + " = icmp slt i64 " + idx + ", " + len);
+        emit_line("br i1 " + cond + ", label %" + body_label + ", label %" + end_label);
+
+        emit_label(body_label);
+        const std::string elem_ptr = next_register("in_dict_key_ptr");
+        emit_line(elem_ptr + " = getelementptr inbounds " + key_type + ", " + key_type + "* " +
+                  keys_typed + ", i64 " + idx);
+        const std::string elem = next_register("in_dict_key");
+        emit_line(elem + " = load " + key_type + ", " + key_type + "* " + elem_ptr);
+
+        std::string is_eq;
+        if (key_type == "i8*") {
+            const std::string cmp = next_register("in_dict_key_cmp");
+            emit_line(cmp + " = call i32 @strcmp(i8* " + elem + ", i8* " + key.value + ")");
+            is_eq = next_register("in_dict_key_eq");
+            emit_line(is_eq + " = icmp eq i32 " + cmp + ", 0");
+        } else if (key_type == "double") {
+            is_eq = next_register("in_dict_key_eq");
+            emit_line(is_eq + " = fcmp oeq double " + elem + ", " + key.value);
+        } else {
+            is_eq = next_register("in_dict_key_eq");
+            emit_line(is_eq + " = icmp eq " + key_type + " " + elem + ", " + key.value);
+        }
+        emit_line("br i1 " + is_eq + ", label %" + found_label + ", label %" + next_label_name);
+
+        emit_label(next_label_name);
+        const std::string next_idx = next_register("in_dict_next_idx");
+        emit_line(next_idx + " = add i64 " + idx + ", 1");
+        emit_line("store i64 " + next_idx + ", i64* " + idx_ptr);
+        emit_line("br label %" + cond_label);
+
+        emit_label(found_label);
+        emit_line("store i1 1, i1* " + result_ptr);
+        emit_line("br label %" + end_label);
+
+        emit_label(end_label);
+        const std::string result = next_register("in_dict_result");
+        emit_line(result + " = load i1, i1* " + result_ptr);
+        return IRValue{"i1", result, true};
+    }
+
     IRValue container = generate_expression(node.container);
     if (container.type == "i8*" && item.type == "i8*") {
         IRValue found = emit_call("i8*", "@strstr", {container, item});
@@ -2459,6 +2699,181 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
             return IRValue{var->dynamic_array_elem_llvm_type, pop_result, true};
         };
 
+    auto emit_scalar_to_string =
+        [this](const std::string& llvm_type, const std::string& value_reg,
+               const std::string& prefix) -> std::string {
+            if (llvm_type == "i8*") {
+                StringConstantInfo null_str = get_or_create_string_constant("null");
+                const std::string is_null = next_register(prefix + "_is_null");
+                emit_line(is_null + " = icmp eq i8* " + value_reg + ", null");
+                const std::string selected = next_register(prefix + "_str");
+                emit_line(selected + " = select i1 " + is_null + ", i8* " +
+                          string_constant_gep(null_str) + ", i8* " + value_reg);
+                return selected;
+            }
+            if (llvm_type == "i1") {
+                StringConstantInfo true_str = get_or_create_string_constant("true");
+                StringConstantInfo false_str = get_or_create_string_constant("false");
+                const std::string selected = next_register(prefix + "_str");
+                emit_line(selected + " = select i1 " + value_reg + ", i8* " +
+                          string_constant_gep(true_str) + ", i8* " + string_constant_gep(false_str));
+                return selected;
+            }
+
+            std::string fmt = "%d";
+            std::string scalar_value = value_reg;
+            if (llvm_type == "double") {
+                fmt = "%g";
+            } else if (llvm_type != "i32") {
+                if (llvm_type == "i64") {
+                    const std::string narrowed = next_register(prefix + "_narrow");
+                    emit_line(narrowed + " = trunc i64 " + value_reg + " to i32");
+                    scalar_value = narrowed;
+                } else {
+                    const std::string as_i32 = next_register(prefix + "_as_i32");
+                    emit_line(as_i32 + " = zext " + llvm_type + " " + value_reg + " to i32");
+                    scalar_value = as_i32;
+                }
+            }
+
+            const std::string buf_size = (llvm_type == "double") ? "64" : "32";
+            const std::string buf = next_register(prefix + "_buf");
+            emit_line(buf + " = call i8* @malloc(i64 " + buf_size + ")");
+            StringConstantInfo fmt_const = get_or_create_string_constant(fmt);
+            IRValue fmt_ptr{"i8*", string_constant_gep(fmt_const), true};
+            IRValue buf_arg{"i8*", buf, true};
+            IRValue value_arg{llvm_type == "double" ? "double" : "i32", scalar_value, true};
+            (void)emit_call("i32", "@sprintf", {buf_arg, fmt_ptr, value_arg}, true);
+            return buf;
+        };
+
+    auto emit_dict_to_string =
+        [this, &emit_scalar_to_string](const std::string& object_name, const VariableInfo* var) -> IRValue {
+            if (!var || !var->is_dict) {
+                return IRValue{"i8*", "null", true};
+            }
+
+            const std::string key_type = var->dict_key_llvm_type.empty() ? "i8*" : var->dict_key_llvm_type;
+            const std::string value_type = var->dict_value_llvm_type.empty() ? "i8*" : var->dict_value_llvm_type;
+
+            const std::string header = next_register(object_name + "_dict_hdr");
+            emit_line(header + " = load i8*, i8** " + var->ptr_value);
+            const std::string len_slot = next_register(object_name + "_dict_len_slot");
+            emit_line(len_slot + " = bitcast i8* " + header + " to i64*");
+            const std::string len = next_register(object_name + "_dict_len");
+            emit_line(len + " = load i64, i64* " + len_slot);
+
+            const std::string keys_slot_raw = next_register(object_name + "_dict_keys_slot_raw");
+            emit_line(keys_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 16");
+            const std::string keys_slot = next_register(object_name + "_dict_keys_slot");
+            emit_line(keys_slot + " = bitcast i8* " + keys_slot_raw + " to i8**");
+            const std::string keys_raw = next_register(object_name + "_dict_keys_raw");
+            emit_line(keys_raw + " = load i8*, i8** " + keys_slot);
+            const std::string keys_typed = next_register(object_name + "_dict_keys_typed");
+            emit_line(keys_typed + " = bitcast i8* " + keys_raw + " to " + key_type + "*");
+
+            const std::string values_slot_raw = next_register(object_name + "_dict_values_slot_raw");
+            emit_line(values_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 24");
+            const std::string values_slot = next_register(object_name + "_dict_values_slot");
+            emit_line(values_slot + " = bitcast i8* " + values_slot_raw + " to i8**");
+            const std::string values_raw = next_register(object_name + "_dict_values_raw");
+            emit_line(values_raw + " = load i8*, i8** " + values_slot);
+            const std::string values_typed = next_register(object_name + "_dict_values_typed");
+            emit_line(values_typed + " = bitcast i8* " + values_raw + " to " + value_type + "*");
+
+            const std::string est_body = next_register(object_name + "_dict_est_body");
+            emit_line(est_body + " = mul i64 " + len + ", 64");
+            const std::string est_total = next_register(object_name + "_dict_est_total");
+            emit_line(est_total + " = add i64 " + est_body + ", 4");
+            const std::string out_buf = next_register(object_name + "_dict_out");
+            emit_line(out_buf + " = call i8* @malloc(i64 " + est_total + ")");
+
+            emit_line("store i8 123, i8* " + out_buf);
+            const std::string nul_ptr = next_register(object_name + "_dict_nul_ptr");
+            emit_line(nul_ptr + " = getelementptr inbounds i8, i8* " + out_buf + ", i64 1");
+            emit_line("store i8 0, i8* " + nul_ptr);
+
+            const std::string idx_ptr = next_register(object_name + "_dict_fmt_idx");
+            emit_line(idx_ptr + " = alloca i64");
+            emit_line("store i64 0, i64* " + idx_ptr);
+
+            StringConstantInfo comma = get_or_create_string_constant(", ");
+            StringConstantInfo colon = get_or_create_string_constant(": ");
+            StringConstantInfo close_brace = get_or_create_string_constant("}");
+            StringConstantInfo quote = get_or_create_string_constant("\"");
+
+            const std::string cond_label = next_label("dict_fmt_cond");
+            const std::string body_label = next_label("dict_fmt_body");
+            const std::string first_label = next_label("dict_fmt_first");
+            const std::string sep_label = next_label("dict_fmt_sep");
+            const std::string end_label = next_label("dict_fmt_end");
+
+            emit_line("br label %" + cond_label);
+            emit_label(cond_label);
+            const std::string idx = next_register(object_name + "_dict_fmt_i");
+            emit_line(idx + " = load i64, i64* " + idx_ptr);
+            const std::string cond = next_register(object_name + "_dict_fmt_cmp");
+            emit_line(cond + " = icmp slt i64 " + idx + ", " + len);
+            emit_line("br i1 " + cond + ", label %" + body_label + ", label %" + end_label);
+
+            emit_label(body_label);
+            const std::string is_first = next_register(object_name + "_dict_fmt_first");
+            emit_line(is_first + " = icmp eq i64 " + idx + ", 0");
+            emit_line("br i1 " + is_first + ", label %" + first_label + ", label %" + sep_label);
+
+            emit_label(sep_label);
+            (void)emit_call("i8*", "@strcat",
+                            {IRValue{"i8*", out_buf, true}, IRValue{"i8*", string_constant_gep(comma), true}});
+            emit_line("br label %" + first_label);
+
+            emit_label(first_label);
+            const std::string key_ptr = next_register(object_name + "_dict_fmt_key_ptr");
+            emit_line(key_ptr + " = getelementptr inbounds " + key_type + ", " + key_type + "* " +
+                      keys_typed + ", i64 " + idx);
+            const std::string key_val = next_register(object_name + "_dict_fmt_key_val");
+            emit_line(key_val + " = load " + key_type + ", " + key_type + "* " + key_ptr);
+            const std::string key_str = emit_scalar_to_string(key_type, key_val, object_name + "_dict_key");
+            if (key_type == "i8*") {
+                (void)emit_call("i8*", "@strcat",
+                                {IRValue{"i8*", out_buf, true}, IRValue{"i8*", string_constant_gep(quote), true}});
+            }
+            (void)emit_call("i8*", "@strcat", {IRValue{"i8*", out_buf, true}, IRValue{"i8*", key_str, true}});
+            if (key_type == "i8*") {
+                (void)emit_call("i8*", "@strcat",
+                                {IRValue{"i8*", out_buf, true}, IRValue{"i8*", string_constant_gep(quote), true}});
+            }
+            (void)emit_call("i8*", "@strcat",
+                            {IRValue{"i8*", out_buf, true}, IRValue{"i8*", string_constant_gep(colon), true}});
+
+            const std::string value_ptr = next_register(object_name + "_dict_fmt_value_ptr");
+            emit_line(value_ptr + " = getelementptr inbounds " + value_type + ", " + value_type + "* " +
+                      values_typed + ", i64 " + idx);
+            const std::string value_val = next_register(object_name + "_dict_fmt_value_val");
+            emit_line(value_val + " = load " + value_type + ", " + value_type + "* " + value_ptr);
+            const std::string value_str =
+                emit_scalar_to_string(value_type, value_val, object_name + "_dict_value");
+            if (value_type == "i8*") {
+                (void)emit_call("i8*", "@strcat",
+                                {IRValue{"i8*", out_buf, true}, IRValue{"i8*", string_constant_gep(quote), true}});
+            }
+            (void)emit_call("i8*", "@strcat",
+                            {IRValue{"i8*", out_buf, true}, IRValue{"i8*", value_str, true}});
+            if (value_type == "i8*") {
+                (void)emit_call("i8*", "@strcat",
+                                {IRValue{"i8*", out_buf, true}, IRValue{"i8*", string_constant_gep(quote), true}});
+            }
+
+            const std::string next_idx = next_register(object_name + "_dict_fmt_next");
+            emit_line(next_idx + " = add i64 " + idx + ", 1");
+            emit_line("store i64 " + next_idx + ", i64* " + idx_ptr);
+            emit_line("br label %" + cond_label);
+
+            emit_label(end_label);
+            (void)emit_call("i8*", "@strcat", {IRValue{"i8*", out_buf, true},
+                                               IRValue{"i8*", string_constant_gep(close_brace), true}});
+            return IRValue{"i8*", out_buf, true};
+        };
+
     if (node.callee && is_node<MemberExpression>(node.callee)) {
         auto& member = get_node<MemberExpression>(node.callee);
         const std::string method_name = member.property;
@@ -2543,6 +2958,17 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
             }
             if (var && var->is_dynamic_array) {
                 return emit_dynamic_array_length(object_name.empty() ? "arr" : object_name, var);
+            }
+            if (var && var->is_dict) {
+                const std::string header = next_register(object_name + "_dict_hdr");
+                emit_line(header + " = load i8*, i8** " + var->ptr_value);
+                const std::string len_slot = next_register(object_name + "_dict_len_slot");
+                emit_line(len_slot + " = bitcast i8* " + header + " to i64*");
+                const std::string len_i64 = next_register(object_name + "_dict_len_i64");
+                emit_line(len_i64 + " = load i64, i64* " + len_slot);
+                const std::string len_i32 = next_register(object_name + "_dict_len_i32");
+                emit_line(len_i32 + " = trunc i64 " + len_i64 + " to i32");
+                return IRValue{"i32", len_i32, true};
             }
             if (member_object_field && member_object_field->mt_type == "array") {
                 IRValue object_value = cast_value(generate_expression(member.object), "i8*");
@@ -2662,7 +3088,19 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
             throw std::runtime_error("print() requires one argument");
         }
 
-        IRValue arg = generate_expression(node.arguments[0]);
+        IRValue arg;
+        bool handled_dict = false;
+        if (node.arguments[0] && is_node<Identifier>(node.arguments[0])) {
+            const std::string object_name = get_node<Identifier>(node.arguments[0]).name;
+            const VariableInfo* var = resolve_variable(object_name);
+            if (var && var->is_dict) {
+                arg = emit_dict_to_string(object_name, var);
+                handled_dict = true;
+            }
+        }
+        if (!handled_dict) {
+            arg = generate_expression(node.arguments[0]);
+        }
         std::string fmt = "%d\n";
 
         if (arg.type == "double") {
@@ -2915,13 +3353,24 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
             if (var && var->is_dynamic_array) {
                 return emit_dynamic_array_length(object_name, var);
             }
+            if (var && var->is_dict) {
+                const std::string header = next_register(object_name + "_dict_hdr");
+                emit_line(header + " = load i8*, i8** " + var->ptr_value);
+                const std::string len_slot = next_register(object_name + "_dict_len_slot");
+                emit_line(len_slot + " = bitcast i8* " + header + " to i64*");
+                const std::string len_i64 = next_register(object_name + "_dict_len_i64");
+                emit_line(len_i64 + " = load i64, i64* " + len_slot);
+                const std::string len_i32 = next_register(object_name + "_dict_len_i32");
+                emit_line(len_i32 + " = trunc i64 " + len_i64 + " to i32");
+                return IRValue{"i32", len_i32, true};
+            }
         }
 
         IRValue arg = generate_expression(node.arguments[0]);
         if (arg.type == "i8*") {
             return emit_strlen_for_string(arg);
         }
-        throw std::runtime_error("length() supports strings and arrays");
+        throw std::runtime_error("length() supports strings, arrays, and dicts");
     }
 
     if (callee_name == "append") {
@@ -3245,6 +3694,154 @@ void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
         return;
     }
 
+    if (node.type == "dict") {
+        std::string key_mt_type = node.key_type;
+        std::string value_mt_type = node.value_type;
+
+        if (node.value && !is_node<DictLiteral>(node.value)) {
+            IRValue existing = cast_value(generate_expression(node.value), "i8*");
+            if (key_mt_type.empty()) {
+                key_mt_type = "any";
+            }
+            if (value_mt_type.empty()) {
+                value_mt_type = "any";
+            }
+
+            const std::string ptr = next_register(node.name + "_addr");
+            emit_line(ptr + " = alloca i8*");
+            emit_line("store i8* " + existing.value + ", i8** " + ptr);
+            declare_variable(node.name, VariableInfo{
+                "i8*",
+                ptr,
+                false,
+                "",
+                0,
+                false,
+                "",
+                "",
+                true,
+                map_type_to_llvm(key_mt_type),
+                map_type_to_llvm(value_mt_type),
+                key_mt_type,
+                value_mt_type,
+            });
+            return;
+        }
+
+        std::size_t initial_len = 0;
+        if (node.value && is_node<DictLiteral>(node.value)) {
+            auto& literal = get_node<DictLiteral>(node.value);
+            initial_len = std::min(literal.keys.size(), literal.values.size());
+            if (key_mt_type.empty() && !literal.keys.empty()) {
+                key_mt_type = infer_literal_mt_type(literal.keys[0]);
+            }
+            if (value_mt_type.empty() && !literal.values.empty()) {
+                value_mt_type = infer_literal_mt_type(literal.values[0]);
+            }
+        }
+
+        if (key_mt_type.empty()) {
+            key_mt_type = "any";
+        }
+        if (value_mt_type.empty()) {
+            value_mt_type = "any";
+        }
+
+        std::string key_llvm_type = map_type_to_llvm(key_mt_type);
+        std::string value_llvm_type = map_type_to_llvm(value_mt_type);
+        if (key_llvm_type == "void") {
+            key_llvm_type = "i8*";
+            key_mt_type = "any";
+        }
+        if (value_llvm_type == "void") {
+            value_llvm_type = "i8*";
+            value_mt_type = "any";
+        }
+
+        const std::size_t key_size = llvm_type_size(key_llvm_type);
+        const std::size_t value_size = llvm_type_size(value_llvm_type);
+        const std::size_t capacity = std::max<std::size_t>(4, initial_len);
+        const std::size_t key_bytes = std::max<std::size_t>(1, capacity * key_size);
+        const std::size_t value_bytes = std::max<std::size_t>(1, capacity * value_size);
+
+        const std::string header_raw = next_register(node.name + "_dict_hdr_raw");
+        emit_line(header_raw + " = call i8* @malloc(i64 32)");
+
+        const std::string len_slot = next_register(node.name + "_dict_len_slot");
+        emit_line(len_slot + " = bitcast i8* " + header_raw + " to i64*");
+        emit_line("store i64 " + std::to_string(initial_len) + ", i64* " + len_slot);
+
+        const std::string cap_slot = next_register(node.name + "_dict_cap_slot");
+        emit_line(cap_slot + " = getelementptr inbounds i64, i64* " + len_slot + ", i64 1");
+        emit_line("store i64 " + std::to_string(capacity) + ", i64* " + cap_slot);
+
+        const std::string keys_slot_raw = next_register(node.name + "_dict_keys_slot_raw");
+        emit_line(keys_slot_raw + " = getelementptr inbounds i8, i8* " + header_raw + ", i64 16");
+        const std::string keys_slot = next_register(node.name + "_dict_keys_slot");
+        emit_line(keys_slot + " = bitcast i8* " + keys_slot_raw + " to i8**");
+
+        const std::string values_slot_raw = next_register(node.name + "_dict_values_slot_raw");
+        emit_line(values_slot_raw + " = getelementptr inbounds i8, i8* " + header_raw + ", i64 24");
+        const std::string values_slot = next_register(node.name + "_dict_values_slot");
+        emit_line(values_slot + " = bitcast i8* " + values_slot_raw + " to i8**");
+
+        const std::string keys_raw = next_register(node.name + "_dict_keys_raw");
+        emit_line(keys_raw + " = call i8* @malloc(i64 " + std::to_string(key_bytes) + ")");
+        emit_line("store i8* " + keys_raw + ", i8** " + keys_slot);
+
+        const std::string values_raw = next_register(node.name + "_dict_values_raw");
+        emit_line(values_raw + " = call i8* @malloc(i64 " + std::to_string(value_bytes) + ")");
+        emit_line("store i8* " + values_raw + ", i8** " + values_slot);
+
+        const std::string ptr = next_register(node.name + "_addr");
+        emit_line(ptr + " = alloca i8*");
+        emit_line("store i8* " + header_raw + ", i8** " + ptr);
+
+        declare_variable(node.name, VariableInfo{
+            "i8*",
+            ptr,
+            false,
+            "",
+            0,
+            false,
+            "",
+            "",
+            true,
+            key_llvm_type,
+            value_llvm_type,
+            key_mt_type,
+            value_mt_type,
+        });
+
+        if (node.value && is_node<DictLiteral>(node.value)) {
+            auto& literal = get_node<DictLiteral>(node.value);
+            const std::string keys_typed = next_register(node.name + "_dict_keys_typed");
+            emit_line(keys_typed + " = bitcast i8* " + keys_raw + " to " + key_llvm_type + "*");
+            const std::string values_typed = next_register(node.name + "_dict_values_typed");
+            emit_line(values_typed + " = bitcast i8* " + values_raw + " to " + value_llvm_type + "*");
+
+            const std::size_t pair_count = std::min(literal.keys.size(), literal.values.size());
+            for (std::size_t i = 0; i < pair_count; ++i) {
+                IRValue key_value = cast_value(generate_expression(literal.keys[i]), key_llvm_type);
+                IRValue value_value = cast_value(generate_expression(literal.values[i]), value_llvm_type);
+
+                const std::string key_ptr = next_register(node.name + "_dict_key_ptr");
+                emit_line(key_ptr + " = getelementptr inbounds " + key_llvm_type + ", " +
+                          key_llvm_type + "* " + keys_typed + ", i64 " + std::to_string(i));
+                emit_line("store " + key_llvm_type + " " + key_value.value + ", " +
+                          key_llvm_type + "* " + key_ptr);
+
+                const std::string value_ptr = next_register(node.name + "_dict_value_ptr");
+                emit_line(value_ptr + " = getelementptr inbounds " + value_llvm_type + ", " +
+                          value_llvm_type + "* " + values_typed + ", i64 " + std::to_string(i));
+                emit_line("store " + value_llvm_type + " " + value_value.value + ", " +
+                          value_llvm_type + "* " + value_ptr);
+            }
+        }
+
+        return;
+    }
+
     const std::string llvm_type = map_type_to_llvm(node.type);
     if (llvm_type == "void") {
         throw std::runtime_error("Cannot declare variable of type void");
@@ -3350,9 +3947,181 @@ void CodeGenerator::generate_set_statement(SetStatement& node) {
             return;
         }
 
-        if (var->llvm_type == "i8*" && raw_index.type == "i8*") {
-            // Dict set placeholder for bootstrap parity: mutate is currently ignored.
-            (void)generate_expression(node.value);
+        if (var->is_dict) {
+            const std::string key_type = var->dict_key_llvm_type.empty() ? "i8*" : var->dict_key_llvm_type;
+            const std::string value_type = var->dict_value_llvm_type.empty() ? "i8*" : var->dict_value_llvm_type;
+            IRValue key = cast_value(raw_index, key_type);
+            IRValue value = cast_value(generate_expression(node.value), value_type);
+
+            const std::string header = next_register(object_name + "_dict_hdr");
+            emit_line(header + " = load i8*, i8** " + var->ptr_value);
+
+            const std::string len_slot = next_register(object_name + "_dict_len_slot");
+            emit_line(len_slot + " = bitcast i8* " + header + " to i64*");
+            const std::string len = next_register(object_name + "_dict_len");
+            emit_line(len + " = load i64, i64* " + len_slot);
+
+            const std::string cap_slot = next_register(object_name + "_dict_cap_slot");
+            emit_line(cap_slot + " = getelementptr inbounds i64, i64* " + len_slot + ", i64 1");
+            const std::string cap = next_register(object_name + "_dict_cap");
+            emit_line(cap + " = load i64, i64* " + cap_slot);
+
+            const std::string keys_slot_raw = next_register(object_name + "_dict_keys_slot_raw");
+            emit_line(keys_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 16");
+            const std::string keys_slot = next_register(object_name + "_dict_keys_slot");
+            emit_line(keys_slot + " = bitcast i8* " + keys_slot_raw + " to i8**");
+            const std::string keys_raw = next_register(object_name + "_dict_keys_raw");
+            emit_line(keys_raw + " = load i8*, i8** " + keys_slot);
+            const std::string keys_typed = next_register(object_name + "_dict_keys_typed");
+            emit_line(keys_typed + " = bitcast i8* " + keys_raw + " to " + key_type + "*");
+
+            const std::string values_slot_raw = next_register(object_name + "_dict_values_slot_raw");
+            emit_line(values_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 24");
+            const std::string values_slot = next_register(object_name + "_dict_values_slot");
+            emit_line(values_slot + " = bitcast i8* " + values_slot_raw + " to i8**");
+            const std::string values_raw = next_register(object_name + "_dict_values_raw");
+            emit_line(values_raw + " = load i8*, i8** " + values_slot);
+            const std::string values_typed = next_register(object_name + "_dict_values_typed");
+            emit_line(values_typed + " = bitcast i8* " + values_raw + " to " + value_type + "*");
+
+            const std::string idx_ptr = next_register(object_name + "_dict_idx_ptr");
+            emit_line(idx_ptr + " = alloca i64");
+            emit_line("store i64 0, i64* " + idx_ptr);
+            const std::string found_ptr = next_register(object_name + "_dict_found_ptr");
+            emit_line(found_ptr + " = alloca i1");
+            emit_line("store i1 0, i1* " + found_ptr);
+            const std::string found_idx_ptr = next_register(object_name + "_dict_found_idx_ptr");
+            emit_line(found_idx_ptr + " = alloca i64");
+            emit_line("store i64 0, i64* " + found_idx_ptr);
+
+            const std::string cond_label = next_label("dict_set_cond");
+            const std::string body_label = next_label("dict_set_body");
+            const std::string hit_label = next_label("dict_set_hit");
+            const std::string next_label_name = next_label("dict_set_next");
+            const std::string after_search_label = next_label("dict_set_after_search");
+            const std::string update_label = next_label("dict_set_update");
+            const std::string insert_label = next_label("dict_set_insert");
+            const std::string grow_check_label = next_label("dict_set_grow_check");
+            const std::string grow_label = next_label("dict_set_grow");
+            const std::string append_label = next_label("dict_set_append");
+            const std::string end_label = next_label("dict_set_end");
+
+            emit_line("br label %" + cond_label);
+            emit_label(cond_label);
+            const std::string idx = next_register(object_name + "_dict_idx");
+            emit_line(idx + " = load i64, i64* " + idx_ptr);
+            const std::string cond = next_register(object_name + "_dict_cond");
+            emit_line(cond + " = icmp slt i64 " + idx + ", " + len);
+            emit_line("br i1 " + cond + ", label %" + body_label + ", label %" + after_search_label);
+
+            emit_label(body_label);
+            const std::string key_ptr = next_register(object_name + "_dict_key_ptr");
+            emit_line(key_ptr + " = getelementptr inbounds " + key_type + ", " + key_type + "* " +
+                      keys_typed + ", i64 " + idx);
+            const std::string key_loaded = next_register(object_name + "_dict_key_loaded");
+            emit_line(key_loaded + " = load " + key_type + ", " + key_type + "* " + key_ptr);
+
+            std::string key_match;
+            if (key_type == "i8*") {
+                const std::string cmp = next_register("dict_set_key_cmp");
+                emit_line(cmp + " = call i32 @strcmp(i8* " + key_loaded + ", i8* " + key.value + ")");
+                key_match = next_register("dict_set_key_match");
+                emit_line(key_match + " = icmp eq i32 " + cmp + ", 0");
+            } else if (key_type == "double") {
+                key_match = next_register("dict_set_key_match");
+                emit_line(key_match + " = fcmp oeq double " + key_loaded + ", " + key.value);
+            } else {
+                key_match = next_register("dict_set_key_match");
+                emit_line(key_match + " = icmp eq " + key_type + " " + key_loaded + ", " + key.value);
+            }
+
+            emit_line("br i1 " + key_match + ", label %" + hit_label + ", label %" + next_label_name);
+
+            emit_label(hit_label);
+            emit_line("store i1 1, i1* " + found_ptr);
+            emit_line("store i64 " + idx + ", i64* " + found_idx_ptr);
+            emit_line("br label %" + after_search_label);
+
+            emit_label(next_label_name);
+            const std::string next_idx = next_register(object_name + "_dict_next_idx");
+            emit_line(next_idx + " = add i64 " + idx + ", 1");
+            emit_line("store i64 " + next_idx + ", i64* " + idx_ptr);
+            emit_line("br label %" + cond_label);
+
+            emit_label(after_search_label);
+            const std::string found = next_register(object_name + "_dict_found");
+            emit_line(found + " = load i1, i1* " + found_ptr);
+            emit_line("br i1 " + found + ", label %" + update_label + ", label %" + insert_label);
+
+            emit_label(update_label);
+            const std::string found_idx = next_register(object_name + "_dict_found_idx");
+            emit_line(found_idx + " = load i64, i64* " + found_idx_ptr);
+            const std::string update_value_ptr = next_register(object_name + "_dict_update_value_ptr");
+            emit_line(update_value_ptr + " = getelementptr inbounds " + value_type + ", " + value_type +
+                      "* " + values_typed + ", i64 " + found_idx);
+            emit_line("store " + value_type + " " + value.value + ", " + value_type + "* " + update_value_ptr);
+            emit_line("br label %" + end_label);
+
+            emit_label(insert_label);
+            emit_line("br label %" + grow_check_label);
+
+            emit_label(grow_check_label);
+            const std::string needs_grow = next_register(object_name + "_dict_needs_grow");
+            emit_line(needs_grow + " = icmp eq i64 " + len + ", " + cap);
+            emit_line("br i1 " + needs_grow + ", label %" + grow_label + ", label %" + append_label);
+
+            emit_label(grow_label);
+            const std::string cap_is_zero = next_register(object_name + "_dict_cap_zero");
+            emit_line(cap_is_zero + " = icmp eq i64 " + cap + ", 0");
+            const std::string doubled_cap = next_register(object_name + "_dict_doubled_cap");
+            emit_line(doubled_cap + " = mul i64 " + cap + ", 2");
+            const std::string new_cap = next_register(object_name + "_dict_new_cap");
+            emit_line(new_cap + " = select i1 " + cap_is_zero + ", i64 4, i64 " + doubled_cap);
+
+            const std::string key_bytes = next_register(object_name + "_dict_key_bytes");
+            emit_line(key_bytes + " = mul i64 " + new_cap + ", " + std::to_string(llvm_type_size(key_type)));
+            const std::string value_bytes = next_register(object_name + "_dict_value_bytes");
+            emit_line(value_bytes + " = mul i64 " + new_cap + ", " + std::to_string(llvm_type_size(value_type)));
+
+            const std::string grown_keys = next_register(object_name + "_dict_grown_keys");
+            emit_line(grown_keys + " = call i8* @realloc(i8* " + keys_raw + ", i64 " + key_bytes + ")");
+            emit_line("store i8* " + grown_keys + ", i8** " + keys_slot);
+
+            const std::string grown_values = next_register(object_name + "_dict_grown_values");
+            emit_line(grown_values + " = call i8* @realloc(i8* " + values_raw + ", i64 " + value_bytes + ")");
+            emit_line("store i8* " + grown_values + ", i8** " + values_slot);
+
+            emit_line("store i64 " + new_cap + ", i64* " + cap_slot);
+            emit_line("br label %" + append_label);
+
+            emit_label(append_label);
+            const std::string latest_len = next_register(object_name + "_dict_latest_len");
+            emit_line(latest_len + " = load i64, i64* " + len_slot);
+            const std::string latest_keys_raw = next_register(object_name + "_dict_latest_keys_raw");
+            emit_line(latest_keys_raw + " = load i8*, i8** " + keys_slot);
+            const std::string latest_values_raw = next_register(object_name + "_dict_latest_values_raw");
+            emit_line(latest_values_raw + " = load i8*, i8** " + values_slot);
+            const std::string latest_keys_typed = next_register(object_name + "_dict_latest_keys_typed");
+            emit_line(latest_keys_typed + " = bitcast i8* " + latest_keys_raw + " to " + key_type + "*");
+            const std::string latest_values_typed = next_register(object_name + "_dict_latest_values_typed");
+            emit_line(latest_values_typed + " = bitcast i8* " + latest_values_raw + " to " + value_type + "*");
+
+            const std::string append_key_ptr = next_register(object_name + "_dict_append_key_ptr");
+            emit_line(append_key_ptr + " = getelementptr inbounds " + key_type + ", " + key_type + "* " +
+                      latest_keys_typed + ", i64 " + latest_len);
+            emit_line("store " + key_type + " " + key.value + ", " + key_type + "* " + append_key_ptr);
+
+            const std::string append_value_ptr = next_register(object_name + "_dict_append_value_ptr");
+            emit_line(append_value_ptr + " = getelementptr inbounds " + value_type + ", " + value_type + "* " +
+                      latest_values_typed + ", i64 " + latest_len);
+            emit_line("store " + value_type + " " + value.value + ", " + value_type + "* " + append_value_ptr);
+
+            const std::string new_len = next_register(object_name + "_dict_new_len");
+            emit_line(new_len + " = add i64 " + latest_len + ", 1");
+            emit_line("store i64 " + new_len + ", i64* " + len_slot);
+            emit_line("br label %" + end_label);
+
+            emit_label(end_label);
             return;
         }
 

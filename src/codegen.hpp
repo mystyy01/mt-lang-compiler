@@ -102,6 +102,11 @@ private:
         bool is_dynamic_array = false;
         std::string dynamic_array_elem_llvm_type;
         std::string class_name;
+        bool is_dict = false;
+        std::string dict_key_llvm_type;
+        std::string dict_value_llvm_type;
+        std::string dict_key_mt_type;
+        std::string dict_value_mt_type;
     };
 
     struct StringConstantInfo {

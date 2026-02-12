@@ -66,6 +66,7 @@ cases=(
   arrays_fixed_dynamic
   class_and_hasattr
   classof_basic
+  dict_ops
   dict_literal
   imports_and_io
   simple_import_alias

@@ -1,0 +1,15 @@
+dict<string, int> scores = {"alice": 10, "bob": 20}
+print(scores["alice"])
+set scores["alice"] = 15
+print(scores["alice"])
+set scores["carol"] = 7
+print(scores["carol"])
+print(length(scores))
+print("bob" in scores)
+print("nobody" in scores)
+
+dict<int, string> labels = {1: "one"}
+set labels[2] = "two"
+print(labels[2])
+print(length(labels))
+
