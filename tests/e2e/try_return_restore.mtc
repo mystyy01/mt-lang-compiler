@@ -1,0 +1,18 @@
+bool is_digit_char(string ch) {
+    try {
+        int(ch)
+        return true
+    } catch {
+        return false
+    }
+}
+
+print(is_digit_char("7"))
+print(is_digit_char("x"))
+
+try {
+    throw new Exception("boom")
+} catch {
+    print("restored")
+}
+

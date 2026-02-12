@@ -1,0 +1,15 @@
+from stdlib.iter use range
+from stdlib.io use file_exists
+
+int total = 0
+for (i in range(4)) {
+    set total = total + i
+}
+print(total)
+
+if (file_exists("__mt_missing_file__.tmp")) {
+    print("exists")
+} else {
+    print("missing")
+}
+

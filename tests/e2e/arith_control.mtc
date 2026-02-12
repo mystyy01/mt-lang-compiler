@@ -1,0 +1,11 @@
+int add(int a, int b = 2) {
+    return a + b
+}
+
+int x = add(40)
+if (x == 42) {
+    print("ok")
+} else {
+    print("bad")
+}
+

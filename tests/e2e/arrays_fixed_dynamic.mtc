@@ -1,0 +1,13 @@
+int[4] fixed = [1, 2]
+set fixed[2] = 9
+print(fixed[0])
+print(fixed[2])
+print(length(fixed))
+
+dynamic array dyn = [0, 1, 2]
+dyn.append(3)
+print(dyn[3])
+int last = dyn.pop()
+print(last)
+print(dyn.length())
+

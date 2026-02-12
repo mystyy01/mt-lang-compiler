@@ -1,0 +1,8 @@
+class Box {
+    arg int value
+}
+
+Box b = new Box(9)
+print(classof(b))
+print(hasattr(b, "value"))
+

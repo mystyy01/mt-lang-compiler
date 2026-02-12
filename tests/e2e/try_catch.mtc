@@ -1,0 +1,16 @@
+try {
+    throw new Exception("boom")
+} catch ValueError(err) {
+    print("wrong-catch")
+} catch Exception(err) {
+    print("caught-exception")
+}
+
+try {
+    throw new Exception("other")
+} catch {
+    print("caught-any")
+}
+
+print("after")
+

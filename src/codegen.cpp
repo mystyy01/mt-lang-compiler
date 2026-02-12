@@ -1,0 +1,3739 @@
+#include "codegen.hpp"
+#include "libc_functions.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <cstddef>
+#include <iomanip>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+namespace {
+
+bool is_pointer_type(const std::string& type) {
+    return !type.empty() && type.back() == '*';
+}
+
+std::string join_params(const std::vector<std::string>& params) {
+    std::ostringstream out;
+    for (std::size_t i = 0; i < params.size(); ++i) {
+        if (i > 0) {
+            out << ", ";
+        }
+        out << params[i];
+    }
+    return out.str();
+}
+
+std::string ast_variant_name(const ASTNode& node) {
+    if (!node) {
+        return "null";
+    }
+    switch (node->index()) {
+        case 0: return "NumberLiteral";
+        case 1: return "FloatLiteral";
+        case 2: return "StringLiteral";
+        case 3: return "BoolLiteral";
+        case 4: return "NullLiteral";
+        case 5: return "TypeLiteral";
+        case 6: return "Identifier";
+        case 7: return "ThisExpression";
+        case 8: return "BinaryExpression";
+        case 9: return "InExpression";
+        case 10: return "ArrayLiteral";
+        case 11: return "DictLiteral";
+        case 12: return "VariableDeclaration";
+        case 13: return "SetStatement";
+        case 14: return "BreakStatement";
+        case 15: return "ReturnStatement";
+        case 16: return "Block";
+        case 17: return "ExpressionStatement";
+        case 18: return "CallExpression";
+        case 19: return "MemberExpression";
+        case 20: return "IndexExpression";
+        case 21: return "TypeofExpression";
+        case 22: return "HasattrExpression";
+        case 23: return "ClassofExpression";
+        case 24: return "IfStatement";
+        case 25: return "WhileStatement";
+        case 26: return "ForInStatement";
+        case 27: return "FunctionDeclaration";
+        case 28: return "ExternalDeclaration";
+        case 29: return "DynamicFunctionDeclaration";
+        case 30: return "FromImportStatement";
+        case 31: return "SimpleImportStatement";
+        case 32: return "LibcImportStatement";
+        case 33: return "ClassDeclaration";
+        case 34: return "NewExpression";
+        case 35: return "MethodCallExpression";
+        case 36: return "FieldAccessExpression";
+        case 37: return "TryStatement";
+        case 38: return "ThrowStatement";
+        case 39: return "Program";
+        default: return "UnknownNode";
+    }
+}
+
+std::string map_libc_type_to_llvm(const std::string& ty) {
+    if (ty == "int") {
+        return "i32";
+    }
+    if (ty == "float") {
+        return "double";
+    }
+    if (ty == "void") {
+        return "void";
+    }
+    if (ty == "ptr") {
+        return "i8*";
+    }
+    return "i8*";
+}
+
+void collect_called_functions(const ASTNode& node, std::unordered_set<std::string>* out) {
+    if (!node || out == nullptr) {
+        return;
+    }
+
+    if (is_node<CallExpression>(node)) {
+        const auto& call = get_node<CallExpression>(node);
+        if (call.callee && is_node<Identifier>(call.callee)) {
+            out->insert(get_node<Identifier>(call.callee).name);
+        }
+        collect_called_functions(call.callee, out);
+        for (const auto& arg : call.arguments) {
+            collect_called_functions(arg, out);
+        }
+        return;
+    }
+    if (is_node<BinaryExpression>(node)) {
+        const auto& expr = get_node<BinaryExpression>(node);
+        collect_called_functions(expr.left, out);
+        collect_called_functions(expr.right, out);
+        return;
+    }
+    if (is_node<InExpression>(node)) {
+        const auto& expr = get_node<InExpression>(node);
+        collect_called_functions(expr.item, out);
+        collect_called_functions(expr.container, out);
+        return;
+    }
+    if (is_node<ArrayLiteral>(node)) {
+        const auto& lit = get_node<ArrayLiteral>(node);
+        for (const auto& elem : lit.elements) {
+            collect_called_functions(elem, out);
+        }
+        return;
+    }
+    if (is_node<DictLiteral>(node)) {
+        const auto& lit = get_node<DictLiteral>(node);
+        for (const auto& key : lit.keys) {
+            collect_called_functions(key, out);
+        }
+        for (const auto& value : lit.values) {
+            collect_called_functions(value, out);
+        }
+        return;
+    }
+    if (is_node<VariableDeclaration>(node)) {
+        collect_called_functions(get_node<VariableDeclaration>(node).value, out);
+        return;
+    }
+    if (is_node<SetStatement>(node)) {
+        const auto& stmt = get_node<SetStatement>(node);
+        collect_called_functions(stmt.target, out);
+        collect_called_functions(stmt.value, out);
+        return;
+    }
+    if (is_node<ExpressionStatement>(node)) {
+        collect_called_functions(get_node<ExpressionStatement>(node).expression, out);
+        return;
+    }
+    if (is_node<ReturnStatement>(node)) {
+        collect_called_functions(get_node<ReturnStatement>(node).value, out);
+        return;
+    }
+    if (is_node<Block>(node)) {
+        const auto& block = get_node<Block>(node);
+        for (const auto& stmt : block.statements) {
+            collect_called_functions(stmt, out);
+        }
+        return;
+    }
+    if (is_node<IfStatement>(node)) {
+        const auto& stmt = get_node<IfStatement>(node);
+        collect_called_functions(stmt.condition, out);
+        collect_called_functions(stmt.then_body, out);
+        collect_called_functions(stmt.else_body, out);
+        return;
+    }
+    if (is_node<WhileStatement>(node)) {
+        const auto& stmt = get_node<WhileStatement>(node);
+        collect_called_functions(stmt.condition, out);
+        collect_called_functions(stmt.then_body, out);
+        return;
+    }
+    if (is_node<ForInStatement>(node)) {
+        const auto& stmt = get_node<ForInStatement>(node);
+        collect_called_functions(stmt.iterable, out);
+        collect_called_functions(stmt.body, out);
+        return;
+    }
+    if (is_node<TypeofExpression>(node)) {
+        collect_called_functions(get_node<TypeofExpression>(node).argument, out);
+        return;
+    }
+    if (is_node<HasattrExpression>(node)) {
+        collect_called_functions(get_node<HasattrExpression>(node).obj, out);
+        return;
+    }
+    if (is_node<ClassofExpression>(node)) {
+        collect_called_functions(get_node<ClassofExpression>(node).argument, out);
+        return;
+    }
+    if (is_node<IndexExpression>(node)) {
+        const auto& expr = get_node<IndexExpression>(node);
+        collect_called_functions(expr.object, out);
+        collect_called_functions(expr.index, out);
+        return;
+    }
+    if (is_node<MemberExpression>(node)) {
+        collect_called_functions(get_node<MemberExpression>(node).object, out);
+        return;
+    }
+    if (is_node<FunctionDeclaration>(node)) {
+        collect_called_functions(get_node<FunctionDeclaration>(node).body, out);
+        return;
+    }
+    if (is_node<DynamicFunctionDeclaration>(node)) {
+        collect_called_functions(get_node<DynamicFunctionDeclaration>(node).body, out);
+        return;
+    }
+    if (is_node<ClassDeclaration>(node)) {
+        const auto& class_decl = get_node<ClassDeclaration>(node);
+        for (const auto& field : class_decl.fields) {
+            collect_called_functions(field.initializer, out);
+        }
+        for (const auto& method : class_decl.methods) {
+            collect_called_functions(method.body, out);
+        }
+        return;
+    }
+    if (is_node<NewExpression>(node)) {
+        const auto& expr = get_node<NewExpression>(node);
+        for (const auto& arg : expr.arguments) {
+            collect_called_functions(arg, out);
+        }
+        return;
+    }
+    if (is_node<TryStatement>(node)) {
+        const auto& stmt = get_node<TryStatement>(node);
+        collect_called_functions(stmt.try_block, out);
+        for (const auto& catch_block : stmt.catch_blocks) {
+            collect_called_functions(catch_block.body, out);
+        }
+        return;
+    }
+    if (is_node<ThrowStatement>(node)) {
+        collect_called_functions(get_node<ThrowStatement>(node).expression, out);
+        return;
+    }
+}
+
+bool contains_call_or_new(const ASTNode& node) {
+    if (!node) {
+        return false;
+    }
+    if (is_node<NumberLiteral>(node) || is_node<FloatLiteral>(node) ||
+        is_node<StringLiteral>(node) || is_node<BoolLiteral>(node) ||
+        is_node<NullLiteral>(node) || is_node<TypeLiteral>(node)) {
+        return false;
+    }
+    if (is_node<CallExpression>(node) || is_node<NewExpression>(node)) {
+        return true;
+    }
+    if (is_node<BinaryExpression>(node)) {
+        return true;
+    }
+    if (is_node<InExpression>(node)) {
+        return true;
+    }
+    if (is_node<ArrayLiteral>(node)) {
+        const auto& n = get_node<ArrayLiteral>(node);
+        for (const auto& elem : n.elements) {
+            if (contains_call_or_new(elem)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (is_node<DictLiteral>(node)) {
+        const auto& n = get_node<DictLiteral>(node);
+        for (const auto& k : n.keys) {
+            if (contains_call_or_new(k)) {
+                return true;
+            }
+        }
+        for (const auto& v : n.values) {
+            if (contains_call_or_new(v)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (is_node<MemberExpression>(node)) {
+        return true;
+    }
+    if (is_node<IndexExpression>(node)) {
+        return true;
+    }
+    if (is_node<TypeofExpression>(node)) {
+        return true;
+    }
+    if (is_node<HasattrExpression>(node)) {
+        return true;
+    }
+    if (is_node<ClassofExpression>(node)) {
+        return true;
+    }
+    if (is_node<Identifier>(node) || is_node<ThisExpression>(node)) {
+        return true;
+    }
+    return true;
+}
+
+}  // namespace
+
+CodeGenerator::CodeGenerator(bool emit_main_function, bool emit_builtin_decls)
+    : current_block_terminated(false),
+      entry_alloca_insert_index(0),
+      register_counter(0),
+      label_counter(0),
+      string_counter(0),
+      emit_main_function_flag(emit_main_function),
+      emit_builtin_decls_flag(emit_builtin_decls) {}
+
+std::string CodeGenerator::generate(ASTNode& root) {
+    functions.clear();
+    classes.clear();
+    class_type_tags.clear();
+    string_constants.clear();
+    top_level_variables.clear();
+    global_lines.clear();
+    declaration_lines.clear();
+    function_lines.clear();
+    variable_scopes.clear();
+    break_labels.clear();
+    try_contexts.clear();
+    current_function_name.clear();
+    current_return_type.clear();
+    entry_alloca_insert_index = 0;
+    register_counter = 0;
+    label_counter = 0;
+    string_counter = 0;
+    current_block_terminated = false;
+
+    for (const auto& [symbol, libc_info] : LIBC_FUNCTIONS) {
+        CodegenFunctionInfo info;
+        info.name = symbol;
+        info.return_type = map_libc_type_to_llvm(libc_info.ret);
+        info.is_external = true;
+        info.is_var_arg = libc_info.var_arg;
+        for (const std::string& arg_ty : libc_info.args) {
+            info.parameters.emplace_back("", map_libc_type_to_llvm(arg_ty), nullptr, arg_ty);
+        }
+        functions[symbol] = std::move(info);
+    }
+
+    if (!is_node<Program>(root)) {
+        throw std::runtime_error("CodeGenerator expects a Program node");
+    }
+
+    Program& program = get_node<Program>(root);
+
+    collect_program_declarations(program);
+    emit_prelude();
+    if (emit_builtin_decls_flag) {
+        emit_builtin_declarations();
+    }
+    emit_user_declarations();
+
+    std::unordered_set<std::string> reachable_functions;
+    if (emit_main_function_flag) {
+        std::vector<std::string> worklist;
+        std::size_t work_index = 0;
+
+        auto enqueue_call = [&](const std::string& name) {
+            const auto it = functions.find(name);
+            if (it == functions.end() || it->second.is_external) {
+                return;
+            }
+            worklist.push_back(name);
+        };
+
+        std::unordered_set<std::string> discovered_calls;
+        for (const auto& statement : program.statements) {
+            if (!statement || is_node<FunctionDeclaration>(statement) ||
+                is_node<DynamicFunctionDeclaration>(statement) ||
+                is_node<ExternalDeclaration>(statement) ||
+                is_node<ClassDeclaration>(statement) ||
+                is_node<FromImportStatement>(statement) ||
+                is_node<SimpleImportStatement>(statement) ||
+                is_node<LibcImportStatement>(statement)) {
+                continue;
+            }
+            collect_called_functions(statement, &discovered_calls);
+        }
+
+        for (const auto& statement : program.statements) {
+            if (!statement || !is_node<ClassDeclaration>(statement)) {
+                continue;
+            }
+            const auto& class_decl = get_node<ClassDeclaration>(statement);
+            for (const auto& method : class_decl.methods) {
+                collect_called_functions(method.body, &discovered_calls);
+            }
+        }
+
+        for (const auto& name : discovered_calls) {
+            enqueue_call(name);
+        }
+
+        while (work_index < worklist.size()) {
+            const std::string name = worklist[work_index++];
+            if (reachable_functions.count(name) > 0) {
+                continue;
+            }
+            reachable_functions.insert(name);
+
+            for (const auto& statement : program.statements) {
+                if (!statement) {
+                    continue;
+                }
+                if (is_node<FunctionDeclaration>(statement)) {
+                    const auto& fn = get_node<FunctionDeclaration>(statement);
+                    if (fn.name == name) {
+                        std::unordered_set<std::string> nested_calls;
+                        collect_called_functions(fn.body, &nested_calls);
+                        for (const auto& nested : nested_calls) {
+                            enqueue_call(nested);
+                        }
+                        break;
+                    }
+                } else if (is_node<DynamicFunctionDeclaration>(statement)) {
+                    const auto& fn = get_node<DynamicFunctionDeclaration>(statement);
+                    if (fn.name == name) {
+                        std::unordered_set<std::string> nested_calls;
+                        collect_called_functions(fn.body, &nested_calls);
+                        for (const auto& nested : nested_calls) {
+                            enqueue_call(nested);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    for (auto& statement : program.statements) {
+        if (statement && is_node<FunctionDeclaration>(statement)) {
+            FunctionDeclaration& fn = get_node<FunctionDeclaration>(statement);
+            if (!emit_main_function_flag || reachable_functions.count(fn.name) > 0) {
+                emit_function_definition(fn);
+            }
+        } else if (statement && is_node<DynamicFunctionDeclaration>(statement)) {
+            DynamicFunctionDeclaration& fn = get_node<DynamicFunctionDeclaration>(statement);
+            if (!emit_main_function_flag || reachable_functions.count(fn.name) > 0) {
+                emit_dynamic_function_definition(fn);
+            }
+        } else if (statement && is_node<ClassDeclaration>(statement)) {
+            const ClassDeclaration& class_decl = get_node<ClassDeclaration>(statement);
+            const auto class_it = classes.find(class_decl.name);
+            if (class_it == classes.end()) {
+                throw std::runtime_error("Internal error: missing class declaration for '" +
+                                         class_decl.name + "'");
+            }
+            for (const auto& [method_name, method_info] : class_it->second.methods) {
+                (void)method_name;
+                emit_class_method_definition(method_info);
+            }
+        }
+    }
+
+    if (emit_main_function_flag) {
+        emit_main_function(program);
+    }
+
+    std::ostringstream out;
+    for (const auto& line : global_lines) {
+        out << line << '\n';
+    }
+    for (const auto& line : declaration_lines) {
+        out << line << '\n';
+    }
+    out << '\n';
+    for (const auto& line : function_lines) {
+        out << line << '\n';
+    }
+
+    return out.str();
+}
+
+void CodeGenerator::collect_program_declarations(Program& program) {
+    for (auto& statement : program.statements) {
+        if (!statement) {
+            continue;
+        }
+        if (is_node<FunctionDeclaration>(statement)) {
+            register_function_declaration(get_node<FunctionDeclaration>(statement));
+        } else if (is_node<DynamicFunctionDeclaration>(statement)) {
+            register_dynamic_function_declaration(get_node<DynamicFunctionDeclaration>(statement));
+        } else if (is_node<ExternalDeclaration>(statement)) {
+            register_external_declaration(get_node<ExternalDeclaration>(statement));
+        } else if (is_node<LibcImportStatement>(statement)) {
+            register_libc_import_declaration(get_node<LibcImportStatement>(statement));
+        } else if (is_node<ClassDeclaration>(statement)) {
+            register_class_declaration(get_node<ClassDeclaration>(statement));
+        } else if (is_node<VariableDeclaration>(statement)) {
+            top_level_variables.push_back(clone_node(statement));
+        }
+    }
+
+    std::vector<std::string> class_names;
+    class_names.reserve(classes.size());
+    for (const auto& [class_name, _] : classes) {
+        (void)_;
+        class_names.push_back(class_name);
+    }
+    std::sort(class_names.begin(), class_names.end());
+
+    int next_tag = 1;
+    for (const auto& class_name : class_names) {
+        class_type_tags[class_name] = next_tag;
+        auto it = classes.find(class_name);
+        if (it != classes.end()) {
+            it->second.type_tag = next_tag;
+        }
+        ++next_tag;
+    }
+}
+
+void CodeGenerator::register_function_declaration(FunctionDeclaration& node) {
+    CodegenFunctionInfo info;
+    info.name = node.name;
+    info.return_type = map_type_to_llvm(node.return_type);
+    info.is_external = false;
+
+    for (const auto& param : node.parameters) {
+        info.parameters.emplace_back(
+            param.name,
+            map_type_to_llvm(param.param_type.empty() ? "int" : param.param_type),
+            clone_node(param.default_value),
+            param.param_type.empty() ? "int" : param.param_type);
+    }
+
+    functions[node.name] = std::move(info);
+}
+
+void CodeGenerator::register_dynamic_function_declaration(DynamicFunctionDeclaration& node) {
+    CodegenFunctionInfo info;
+    info.name = node.name;
+    info.return_type = "i8*";
+    info.is_external = false;
+
+    for (const auto& param : node.parameters) {
+        info.parameters.emplace_back(
+            param.name,
+            map_type_to_llvm(param.param_type.empty() ? "any" : param.param_type),
+            clone_node(param.default_value),
+            param.param_type.empty() ? "any" : param.param_type);
+    }
+
+    functions[node.name] = std::move(info);
+}
+
+void CodeGenerator::register_external_declaration(ExternalDeclaration& node) {
+    CodegenFunctionInfo info;
+    info.name = node.name;
+    info.return_type = map_type_to_llvm(node.return_type);
+    info.is_external = true;
+    info.is_var_arg = false;
+
+    for (const auto& param : node.parameters) {
+        info.parameters.emplace_back(
+            param.name,
+            map_type_to_llvm(param.param_type.empty() ? "int" : param.param_type),
+            clone_node(param.default_value),
+            param.param_type.empty() ? "int" : param.param_type);
+    }
+
+    functions[node.name] = std::move(info);
+}
+
+void CodeGenerator::register_libc_import_declaration(LibcImportStatement& node) {
+    for (const std::string& symbol : node.symbols) {
+        if (functions.find(symbol) != functions.end()) {
+            continue;
+        }
+
+        const auto libc_it = LIBC_FUNCTIONS.find(symbol);
+        if (libc_it == LIBC_FUNCTIONS.end()) {
+            continue;
+        }
+
+        CodegenFunctionInfo info;
+        info.name = symbol;
+        info.return_type = map_libc_type_to_llvm(libc_it->second.ret);
+        info.is_external = true;
+        info.is_var_arg = libc_it->second.var_arg;
+
+        for (const std::string& arg_ty : libc_it->second.args) {
+            info.parameters.emplace_back("", map_libc_type_to_llvm(arg_ty), nullptr, arg_ty);
+        }
+
+        functions[symbol] = std::move(info);
+    }
+}
+
+void CodeGenerator::register_class_declaration(ClassDeclaration& node) {
+    CodegenClassInfo class_info;
+    class_info.name = node.name;
+    class_info.parent_class = node.inherits_from;
+
+    std::size_t offset = 0;
+    std::size_t max_alignment = 1;
+
+    for (const auto& field : node.fields) {
+        CodegenClassFieldInfo field_info;
+        field_info.name = field.name;
+        field_info.mt_type = field.type;
+        field_info.llvm_type = map_type_to_llvm(field.type);
+        field_info.is_constructor_arg = field.is_constructor_arg;
+        field_info.initializer = clone_node(field.initializer);
+
+        const std::size_t size = llvm_type_size(field_info.llvm_type);
+        const std::size_t alignment = std::max<std::size_t>(1, std::min<std::size_t>(size, 8));
+        offset = align_up(offset, alignment);
+        field_info.offset = offset;
+        offset += size;
+        max_alignment = std::max(max_alignment, alignment);
+
+        if (field_info.is_constructor_arg) {
+            class_info.constructor_arg_fields.push_back(field_info.name);
+        }
+
+        class_info.fields[field_info.name] = std::move(field_info);
+    }
+
+    class_info.object_size = offset == 0 ? 1 : align_up(offset, max_alignment);
+
+    for (const auto& method : node.methods) {
+        CodegenClassMethodInfo method_info;
+        method_info.class_name = node.name;
+        method_info.method_name = method.name;
+        method_info.mangled_name = node.name + "__" + method.name;
+        method_info.return_type = map_type_to_llvm(method.return_type.empty() ? "any" : method.return_type);
+        method_info.ast_node = &method;
+
+        method_info.parameters.emplace_back("this", "i8*", nullptr, node.name);
+        for (const auto& param : method.params) {
+            method_info.parameters.emplace_back(
+                param.name,
+                map_type_to_llvm(param.param_type.empty() ? "any" : param.param_type),
+                clone_node(param.default_value),
+                param.param_type.empty() ? "any" : param.param_type);
+        }
+
+        class_info.methods[method.name] = std::move(method_info);
+    }
+
+    classes[node.name] = std::move(class_info);
+}
+
+void CodeGenerator::emit_prelude() {
+    global_lines.push_back("; ModuleID = 'mt_lang'");
+    global_lines.push_back("source_filename = \"mt_lang\"");
+    global_lines.push_back("@__mt_char_pool = internal global [8388608 x i8] zeroinitializer");
+    global_lines.push_back("@__mt_char_pool_index = internal global i64 0");
+    global_lines.push_back("@__mt_exc_jmp = internal global i8* null");
+    global_lines.push_back("@__mt_exc_obj = internal global i8* null");
+    global_lines.push_back("@__mt_exc_tag = internal global i32 0");
+    global_lines.push_back("");
+
+    declaration_lines.push_back("@stdin = external global i8*");
+    declaration_lines.push_back("declare i32 @setjmp(i8*)");
+    declaration_lines.push_back("declare void @longjmp(i8*, i32)");
+    declaration_lines.push_back("declare i64 @strtol(i8*, i8**, i32)");
+
+    function_lines.push_back("define i8* @__mt_char(i8 %c) {");
+    function_lines.push_back("entry:");
+    function_lines.push_back("  %idx = load i64, i64* @__mt_char_pool_index");
+    function_lines.push_back("  %slot = urem i64 %idx, 4194304");
+    function_lines.push_back("  %offset = mul i64 %slot, 2");
+    function_lines.push_back("  %base = getelementptr inbounds [8388608 x i8], [8388608 x i8]* @__mt_char_pool, i64 0, i64 0");
+    function_lines.push_back("  %ptr = getelementptr inbounds i8, i8* %base, i64 %offset");
+    function_lines.push_back("  store i8 %c, i8* %ptr");
+    function_lines.push_back("  %nul_ptr = getelementptr inbounds i8, i8* %ptr, i64 1");
+    function_lines.push_back("  store i8 0, i8* %nul_ptr");
+    function_lines.push_back("  %next = add i64 %idx, 1");
+    function_lines.push_back("  store i64 %next, i64* @__mt_char_pool_index");
+    function_lines.push_back("  ret i8* %ptr");
+    function_lines.push_back("}");
+    function_lines.push_back("");
+}
+
+void CodeGenerator::emit_builtin_declarations() {
+    declaration_lines.push_back("declare i32 @printf(i8*, ...)");
+    declaration_lines.push_back("declare void @exit(i32)");
+    declaration_lines.push_back("declare i8* @malloc(i64)");
+    declaration_lines.push_back("declare i8* @realloc(i8*, i64)");
+    declaration_lines.push_back("declare i64 @strlen(i8*)");
+    declaration_lines.push_back("declare i8* @strcpy(i8*, i8*)");
+    declaration_lines.push_back("declare i8* @strcat(i8*, i8*)");
+    declaration_lines.push_back("declare i32 @sprintf(i8*, i8*, ...)");
+    declaration_lines.push_back("declare i32 @atoi(i8*)");
+    declaration_lines.push_back("declare double @atof(i8*)");
+    declaration_lines.push_back("declare i32 @strcmp(i8*, i8*)");
+    declaration_lines.push_back("declare i8* @strstr(i8*, i8*)");
+}
+
+void CodeGenerator::emit_user_declarations() {
+    static const std::unordered_set<std::string> kBuiltinDeclared = {
+        "printf", "exit", "malloc", "realloc", "strlen", "strcpy", "strcat", "sprintf", "atoi", "atof",
+        "strcmp", "strstr",
+    };
+
+    for (const auto& [name, info] : functions) {
+        if (!info.is_external) {
+            continue;
+        }
+        if (emit_builtin_decls_flag && kBuiltinDeclared.count(name)) {
+            continue;
+        }
+
+        std::vector<std::string> params;
+        params.reserve(info.parameters.size());
+        for (const auto& param : info.parameters) {
+            params.push_back(param.llvm_type);
+        }
+
+        std::string signature = join_params(params);
+        if (info.is_var_arg) {
+            if (!signature.empty()) {
+                signature += ", ...";
+            } else {
+                signature = "...";
+            }
+        }
+
+        declaration_lines.push_back(
+            "declare " + info.return_type + " @" + name + "(" + signature + ")");
+    }
+}
+
+void CodeGenerator::begin_function(const CodegenFunctionInfo& info) {
+    current_function_name = info.name;
+    current_return_type = info.return_type;
+    current_block_terminated = false;
+    variable_scopes.clear();
+    break_labels.clear();
+    try_contexts.clear();
+
+    std::vector<std::string> params;
+    params.reserve(info.parameters.size());
+    for (const auto& param : info.parameters) {
+        params.push_back(param.llvm_type + " %" + param.name);
+    }
+
+    function_lines.push_back("define " + info.return_type + " @" + info.name + "(" +
+                             join_params(params) + ") {");
+    emit_label("entry");
+    entry_alloca_insert_index = function_lines.size();
+
+    push_scope();
+    for (const auto& param : info.parameters) {
+        const std::string ptr = next_register(param.name + "_addr");
+        emit_line(ptr + " = alloca " + param.llvm_type);
+        emit_line("store " + param.llvm_type + " %" + param.name + ", " +
+                  param.llvm_type + "* " + ptr);
+        std::string class_name;
+        if (!param.mt_type.empty() && classes.find(param.mt_type) != classes.end()) {
+            class_name = param.mt_type;
+        }
+        declare_variable(param.name, VariableInfo{
+            param.llvm_type, ptr, false, "", 0, false, "", class_name});
+    }
+}
+
+void CodeGenerator::end_function() {
+    if (!current_block_terminated) {
+        if (current_return_type == "void") {
+            emit_line("ret void");
+        } else if (current_return_type == "i1") {
+            emit_line("ret i1 0");
+        } else if (current_return_type == "double") {
+            emit_line("ret double 0.0");
+        } else if (is_pointer_type(current_return_type)) {
+            emit_line("ret " + current_return_type + " null");
+        } else {
+            emit_line("ret " + current_return_type + " 0");
+        }
+        current_block_terminated = true;
+    }
+
+    function_lines.push_back("}");
+    function_lines.push_back("");
+
+    current_function_name.clear();
+    current_return_type.clear();
+    current_block_terminated = false;
+    entry_alloca_insert_index = 0;
+    variable_scopes.clear();
+    break_labels.clear();
+    try_contexts.clear();
+}
+
+void CodeGenerator::emit_function_definition(FunctionDeclaration& node) {
+    const auto it = functions.find(node.name);
+    if (it == functions.end()) {
+        throw std::runtime_error("Internal error: missing function declaration for '" + node.name + "'");
+    }
+
+    begin_function(it->second);
+    if (!variable_scopes.empty()) {
+        auto& scope = variable_scopes.back();
+        for (const auto& param : node.parameters) {
+            auto var_it = scope.find(param.name);
+            if (var_it == scope.end()) {
+                continue;
+            }
+            if (param.param_type == "array") {
+                var_it->second.is_dynamic_array = true;
+                var_it->second.dynamic_array_elem_llvm_type =
+                    map_type_to_llvm(param.element_type.empty() ? "int" : param.element_type);
+            }
+        }
+    }
+
+    if (!node.body || !is_node<Block>(node.body)) {
+        throw std::runtime_error("Function '" + node.name + "' has invalid body");
+    }
+
+    auto& body = get_node<Block>(node.body);
+    generate_block(body);
+
+    end_function();
+}
+
+void CodeGenerator::emit_dynamic_function_definition(DynamicFunctionDeclaration& node) {
+    const auto it = functions.find(node.name);
+    if (it == functions.end()) {
+        throw std::runtime_error("Internal error: missing dynamic function declaration for '" + node.name + "'");
+    }
+
+    begin_function(it->second);
+    if (!variable_scopes.empty()) {
+        auto& scope = variable_scopes.back();
+        for (const auto& param : node.parameters) {
+            auto var_it = scope.find(param.name);
+            if (var_it == scope.end()) {
+                continue;
+            }
+            if (param.param_type == "array") {
+                var_it->second.is_dynamic_array = true;
+                var_it->second.dynamic_array_elem_llvm_type =
+                    map_type_to_llvm(param.element_type.empty() ? "int" : param.element_type);
+            }
+        }
+    }
+
+    if (!node.body || !is_node<Block>(node.body)) {
+        throw std::runtime_error("Dynamic function '" + node.name + "' has invalid body");
+    }
+
+    auto& body = get_node<Block>(node.body);
+    generate_block(body);
+
+    end_function();
+}
+
+void CodeGenerator::emit_class_method_definition(const CodegenClassMethodInfo& method_info) {
+    if (method_info.ast_node == nullptr) {
+        throw std::runtime_error("Class method '" + method_info.method_name + "' has invalid AST body");
+    }
+
+    CodegenFunctionInfo fn_info;
+    fn_info.name = method_info.mangled_name;
+    fn_info.return_type = method_info.return_type;
+    fn_info.parameters = method_info.parameters;
+    fn_info.is_external = false;
+
+    begin_function(fn_info);
+    if (method_info.ast_node != nullptr && !variable_scopes.empty()) {
+        auto& scope = variable_scopes.back();
+        for (const auto& param : method_info.ast_node->params) {
+            auto var_it = scope.find(param.name);
+            if (var_it == scope.end()) {
+                continue;
+            }
+            if (param.param_type == "array") {
+                var_it->second.is_dynamic_array = true;
+                var_it->second.dynamic_array_elem_llvm_type =
+                    map_type_to_llvm(param.element_type.empty() ? "int" : param.element_type);
+            }
+        }
+    }
+
+    if (!method_info.ast_node->body || !is_node<Block>(method_info.ast_node->body)) {
+        throw std::runtime_error("Class method '" + method_info.class_name + "." +
+                                 method_info.method_name + "' has invalid body");
+    }
+
+    ASTNode body_node = clone_node(method_info.ast_node->body);
+    if (!body_node || !is_node<Block>(body_node)) {
+        throw std::runtime_error("Class method '" + method_info.class_name + "." +
+                                 method_info.method_name + "' body clone failed");
+    }
+    auto& body = get_node<Block>(body_node);
+    generate_block(body);
+
+    end_function();
+}
+
+void CodeGenerator::emit_main_function(Program& program) {
+    CodegenFunctionInfo main_info;
+    main_info.name = "main";
+    main_info.return_type = "i32";
+
+    begin_function(main_info);
+
+    for (auto& statement : program.statements) {
+        if (!statement) {
+            continue;
+        }
+        if (is_node<FunctionDeclaration>(statement) ||
+            is_node<DynamicFunctionDeclaration>(statement) ||
+            is_node<ExternalDeclaration>(statement) ||
+            is_node<ClassDeclaration>(statement) ||
+            is_node<FromImportStatement>(statement) ||
+            is_node<SimpleImportStatement>(statement) ||
+            is_node<LibcImportStatement>(statement)) {
+            continue;
+        }
+
+        generate_statement(statement);
+    }
+
+    end_function();
+}
+
+void CodeGenerator::emit_line(const std::string& line) {
+    if (line.find(" = alloca ") != std::string::npos &&
+        !current_function_name.empty() &&
+        entry_alloca_insert_index <= function_lines.size()) {
+        function_lines.insert(function_lines.begin() + static_cast<std::ptrdiff_t>(entry_alloca_insert_index),
+                              "  " + line);
+        ++entry_alloca_insert_index;
+        return;
+    }
+
+    function_lines.push_back("  " + line);
+    if (line.rfind("ret ", 0) == 0 || line.rfind("br ", 0) == 0 || line.rfind("unreachable", 0) == 0) {
+        current_block_terminated = true;
+    }
+}
+
+void CodeGenerator::emit_label(const std::string& label) {
+    function_lines.push_back(label + ":");
+    current_block_terminated = false;
+}
+
+std::string CodeGenerator::next_register(const std::string& prefix) {
+    return "%" + prefix + "." + std::to_string(register_counter++);
+}
+
+std::string CodeGenerator::next_label(const std::string& prefix) {
+    return prefix + "." + std::to_string(label_counter++);
+}
+
+void CodeGenerator::push_scope() {
+    variable_scopes.emplace_back();
+}
+
+void CodeGenerator::pop_scope() {
+    if (!variable_scopes.empty()) {
+        variable_scopes.pop_back();
+    }
+}
+
+void CodeGenerator::declare_variable(const std::string& name, const VariableInfo& info) {
+    if (variable_scopes.empty()) {
+        push_scope();
+    }
+    variable_scopes.back()[name] = info;
+}
+
+const CodeGenerator::VariableInfo* CodeGenerator::lookup_variable(const std::string& name) const {
+    for (auto it = variable_scopes.rbegin(); it != variable_scopes.rend(); ++it) {
+        const auto found = it->find(name);
+        if (found != it->end()) {
+            return &found->second;
+        }
+    }
+    return nullptr;
+}
+
+bool CodeGenerator::materialize_top_level_variable(const std::string& name) {
+    if (name.empty() || lookup_variable(name) != nullptr) {
+        return false;
+    }
+
+    for (const auto& stmt : top_level_variables) {
+        if (!stmt || !is_node<VariableDeclaration>(stmt)) {
+            continue;
+        }
+        const auto& decl = get_node<VariableDeclaration>(stmt);
+        if (decl.name != name) {
+            continue;
+        }
+        if (contains_call_or_new(decl.value)) {
+            return false;
+        }
+
+        ASTNode cloned = clone_node(stmt);
+        if (!cloned || !is_node<VariableDeclaration>(cloned)) {
+            return false;
+        }
+        generate_variable_declaration(get_node<VariableDeclaration>(cloned));
+        return true;
+    }
+
+    return false;
+}
+
+const CodeGenerator::VariableInfo* CodeGenerator::resolve_variable(const std::string& name) {
+    const VariableInfo* var = lookup_variable(name);
+    if (var) {
+        return var;
+    }
+    if (materialize_top_level_variable(name)) {
+        return lookup_variable(name);
+    }
+    return nullptr;
+}
+
+bool CodeGenerator::is_top_level_variable_name(const std::string& name) const {
+    if (name.empty()) {
+        return false;
+    }
+    for (const auto& stmt : top_level_variables) {
+        if (!stmt || !is_node<VariableDeclaration>(stmt)) {
+            continue;
+        }
+        const auto& decl = get_node<VariableDeclaration>(stmt);
+        if (decl.name == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool CodeGenerator::is_builtin_mt_type(const std::string& mt_type) const {
+    return mt_type == "int" || mt_type == "float" || mt_type == "bool" || mt_type == "string" ||
+           mt_type == "void" || mt_type == "array" || mt_type == "dict" || mt_type == "any" ||
+           mt_type.rfind("dict<", 0) == 0;
+}
+
+std::string CodeGenerator::map_type_to_llvm(const std::string& mt_type) const {
+    if (mt_type.empty()) {
+        return "i32";
+    }
+    if (mt_type == "int") {
+        return "i32";
+    }
+    if (mt_type == "float") {
+        return "double";
+    }
+    if (mt_type == "bool") {
+        return "i1";
+    }
+    if (mt_type == "string") {
+        return "i8*";
+    }
+    if (mt_type == "void") {
+        return "void";
+    }
+
+    if (mt_type == "array" || mt_type == "dict" || mt_type == "any" || mt_type.rfind("dict<", 0) == 0) {
+        return "i8*";
+    }
+
+    if (classes.find(mt_type) != classes.end()) {
+        return "i8*";
+    }
+
+    return "i8*";
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_expression(ASTNode& node) {
+    if (!node) {
+        return IRValue{"void", "", false};
+    }
+
+    if (is_node<NumberLiteral>(node)) {
+        return generate_number_literal(get_node<NumberLiteral>(node));
+    }
+    if (is_node<FloatLiteral>(node)) {
+        return generate_float_literal(get_node<FloatLiteral>(node));
+    }
+    if (is_node<StringLiteral>(node)) {
+        return generate_string_literal(get_node<StringLiteral>(node));
+    }
+    if (is_node<BoolLiteral>(node)) {
+        return generate_bool_literal(get_node<BoolLiteral>(node));
+    }
+    if (is_node<ArrayLiteral>(node)) {
+        return generate_array_literal(get_node<ArrayLiteral>(node));
+    }
+    if (is_node<DictLiteral>(node)) {
+        return generate_dict_literal(get_node<DictLiteral>(node));
+    }
+    if (is_node<NullLiteral>(node)) {
+        return generate_null_literal();
+    }
+    if (is_node<Identifier>(node)) {
+        return generate_identifier(get_node<Identifier>(node));
+    }
+    if (is_node<ThisExpression>(node)) {
+        return generate_this_expression(get_node<ThisExpression>(node));
+    }
+    if (is_node<BinaryExpression>(node)) {
+        return generate_binary_expression(get_node<BinaryExpression>(node));
+    }
+    if (is_node<InExpression>(node)) {
+        return generate_in_expression(get_node<InExpression>(node));
+    }
+    if (is_node<CallExpression>(node)) {
+        return generate_call_expression(get_node<CallExpression>(node));
+    }
+    if (is_node<TypeofExpression>(node)) {
+        return generate_typeof_expression(get_node<TypeofExpression>(node));
+    }
+    if (is_node<HasattrExpression>(node)) {
+        return generate_hasattr_expression(get_node<HasattrExpression>(node));
+    }
+    if (is_node<IndexExpression>(node)) {
+        return generate_index_expression(get_node<IndexExpression>(node));
+    }
+    if (is_node<MemberExpression>(node)) {
+        return generate_member_expression(get_node<MemberExpression>(node));
+    }
+    if (is_node<NewExpression>(node)) {
+        return generate_new_expression(get_node<NewExpression>(node));
+    }
+    if (is_node<ClassofExpression>(node)) {
+        auto& expr = get_node<ClassofExpression>(node);
+        IRValue arg = generate_expression(expr.argument);
+        std::string class_name = infer_class_name_from_ast(expr.argument);
+        if (!class_name.empty()) {
+            StringConstantInfo info = get_or_create_string_constant(class_name);
+            return IRValue{"i8*", string_constant_gep(info), true};
+        }
+
+        std::string type_name = "unknown";
+        if (arg.type == "i32") {
+            type_name = "int";
+        } else if (arg.type == "double") {
+            type_name = "float";
+        } else if (arg.type == "i1") {
+            type_name = "bool";
+        } else if (arg.type == "i8*") {
+            type_name = "string";
+        }
+        StringConstantInfo info = get_or_create_string_constant(type_name);
+        return IRValue{"i8*", string_constant_gep(info), true};
+    }
+
+    throw std::runtime_error("Unsupported expression node in codegen: " + ast_variant_name(node));
+}
+
+void CodeGenerator::generate_statement(ASTNode& node) {
+    if (!node || current_block_terminated) {
+        return;
+    }
+
+    if (is_node<VariableDeclaration>(node)) {
+        generate_variable_declaration(get_node<VariableDeclaration>(node));
+        return;
+    }
+    if (is_node<SetStatement>(node)) {
+        generate_set_statement(get_node<SetStatement>(node));
+        return;
+    }
+    if (is_node<ExpressionStatement>(node)) {
+        generate_expression_statement(get_node<ExpressionStatement>(node));
+        return;
+    }
+    if (is_node<ReturnStatement>(node)) {
+        generate_return_statement(get_node<ReturnStatement>(node));
+        return;
+    }
+    if (is_node<Block>(node)) {
+        generate_block(get_node<Block>(node));
+        return;
+    }
+    if (is_node<IfStatement>(node)) {
+        generate_if_statement(get_node<IfStatement>(node));
+        return;
+    }
+    if (is_node<WhileStatement>(node)) {
+        generate_while_statement(get_node<WhileStatement>(node));
+        return;
+    }
+    if (is_node<ForInStatement>(node)) {
+        ForInStatement& for_node = get_node<ForInStatement>(node);
+        if (for_node.iterable && is_node<CallExpression>(for_node.iterable)) {
+            CallExpression& call = get_node<CallExpression>(for_node.iterable);
+            const bool is_range_call =
+                call.callee && is_node<Identifier>(call.callee) &&
+                get_node<Identifier>(call.callee).name == "range" && call.arguments.size() == 1;
+            if (is_range_call) {
+                const std::string cond_label = next_label("for_cond");
+                const std::string body_label = next_label("for_body");
+                const std::string end_label = next_label("for_end");
+
+                const std::string loop_ptr = next_register(for_node.variable + "_addr");
+                emit_line(loop_ptr + " = alloca i32");
+                emit_line("store i32 0, i32* " + loop_ptr);
+
+                push_scope();
+                declare_variable(for_node.variable, VariableInfo{
+                    "i32", loop_ptr, false, "", 0, false, "", ""});
+
+                emit_line("br label %" + cond_label);
+                emit_label(cond_label);
+
+                IRValue end_value = cast_value(generate_expression(call.arguments[0]), "i32");
+                const std::string loop_value = next_register(for_node.variable + "_val");
+                emit_line(loop_value + " = load i32, i32* " + loop_ptr);
+                const std::string cond_reg = next_register("for_cmp");
+                emit_line(cond_reg + " = icmp slt i32 " + loop_value + ", " + end_value.value);
+                emit_line("br i1 " + cond_reg + ", label %" + body_label + ", label %" + end_label);
+
+                emit_label(body_label);
+                break_labels.push_back(end_label);
+                if (for_node.body && is_node<Block>(for_node.body)) {
+                    generate_block(get_node<Block>(for_node.body));
+                }
+                break_labels.pop_back();
+
+                if (!current_block_terminated) {
+                    const std::string cur = next_register("for_i");
+                    emit_line(cur + " = load i32, i32* " + loop_ptr);
+                    const std::string inc = next_register("for_next");
+                    emit_line(inc + " = add i32 " + cur + ", 1");
+                    emit_line("store i32 " + inc + ", i32* " + loop_ptr);
+                    emit_line("br label %" + cond_label);
+                }
+
+                emit_label(end_label);
+                pop_scope();
+                return;
+            }
+        }
+
+        std::string iterable_name = "iterable";
+        const VariableInfo* iterable_var = nullptr;
+        VariableInfo iterable_temp;
+
+        if (for_node.iterable && is_node<Identifier>(for_node.iterable)) {
+            iterable_name = get_node<Identifier>(for_node.iterable).name;
+            iterable_var = resolve_variable(iterable_name);
+        }
+
+        if (!(iterable_var && (iterable_var->is_fixed_array || iterable_var->is_dynamic_array))) {
+            IRValue iterable_value = cast_value(generate_expression(for_node.iterable), "i8*");
+            const std::string iterable_ptr = next_register("for_iterable_addr");
+            emit_line(iterable_ptr + " = alloca i8*");
+            emit_line("store i8* " + iterable_value.value + ", i8** " + iterable_ptr);
+            iterable_temp = VariableInfo{
+                "i8*", iterable_ptr, false, "", 0, true, "i8*", ""};
+            iterable_var = &iterable_temp;
+        }
+
+        const bool is_fixed = iterable_var->is_fixed_array;
+        const std::string elem_type = is_fixed
+            ? iterable_var->fixed_array_elem_llvm_type
+            : iterable_var->dynamic_array_elem_llvm_type;
+
+        const std::string idx_ptr = next_register(for_node.variable + "_idx");
+        emit_line(idx_ptr + " = alloca i64");
+        emit_line("store i64 0, i64* " + idx_ptr);
+
+        const std::string loop_var_ptr = next_register(for_node.variable + "_addr");
+        emit_line(loop_var_ptr + " = alloca " + elem_type);
+
+        const std::string cond_label = next_label("for_arr_cond");
+        const std::string body_label = next_label("for_arr_body");
+        const std::string end_label = next_label("for_arr_end");
+
+        push_scope();
+        declare_variable(for_node.variable, VariableInfo{
+            elem_type, loop_var_ptr, false, "", 0, false, "", ""});
+
+        emit_line("br label %" + cond_label);
+        emit_label(cond_label);
+
+        const std::string idx = next_register("for_arr_idx");
+        emit_line(idx + " = load i64, i64* " + idx_ptr);
+
+        std::string len_value;
+        if (is_fixed) {
+            len_value = std::to_string(iterable_var->fixed_array_size);
+        } else {
+            const std::string header = next_register(iterable_name + "_hdr");
+            emit_line(header + " = load i8*, i8** " + iterable_var->ptr_value);
+            const std::string len_slot = next_register(iterable_name + "_len_slot");
+            emit_line(len_slot + " = bitcast i8* " + header + " to i64*");
+            const std::string dyn_len = next_register(iterable_name + "_len");
+            emit_line(dyn_len + " = load i64, i64* " + len_slot);
+            len_value = dyn_len;
+        }
+
+        const std::string cond = next_register("for_arr_cmp");
+        emit_line(cond + " = icmp slt i64 " + idx + ", " + len_value);
+        emit_line("br i1 " + cond + ", label %" + body_label + ", label %" + end_label);
+
+        emit_label(body_label);
+
+        if (is_fixed) {
+            const std::string array_type = "[" + std::to_string(iterable_var->fixed_array_size) + " x " +
+                                           iterable_var->fixed_array_elem_llvm_type + "]";
+            const std::string elem_ptr = next_register(iterable_name + "_iter_ptr");
+            emit_line(elem_ptr + " = getelementptr inbounds " + array_type + ", " + array_type + "* " +
+                      iterable_var->ptr_value + ", i64 0, i64 " + idx);
+            const std::string elem_val = next_register(iterable_name + "_iter_val");
+            emit_line(elem_val + " = load " + elem_type + ", " + elem_type + "* " + elem_ptr);
+            emit_line("store " + elem_type + " " + elem_val + ", " + elem_type + "* " + loop_var_ptr);
+        } else {
+            const std::string header = next_register(iterable_name + "_iter_hdr");
+            emit_line(header + " = load i8*, i8** " + iterable_var->ptr_value);
+            const std::string data_slot_raw = next_register(iterable_name + "_iter_data_slot_raw");
+            emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 16");
+            const std::string data_slot = next_register(iterable_name + "_iter_data_slot");
+            emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
+            const std::string data_raw = next_register(iterable_name + "_iter_data_raw");
+            emit_line(data_raw + " = load i8*, i8** " + data_slot);
+            const std::string typed_data = next_register(iterable_name + "_iter_data");
+            emit_line(typed_data + " = bitcast i8* " + data_raw + " to " + elem_type + "*");
+            const std::string elem_ptr = next_register(iterable_name + "_iter_ptr");
+            emit_line(elem_ptr + " = getelementptr inbounds " + elem_type + ", " + elem_type + "* " +
+                      typed_data + ", i64 " + idx);
+            const std::string elem_val = next_register(iterable_name + "_iter_val");
+            emit_line(elem_val + " = load " + elem_type + ", " + elem_type + "* " + elem_ptr);
+            emit_line("store " + elem_type + " " + elem_val + ", " + elem_type + "* " + loop_var_ptr);
+        }
+
+        break_labels.push_back(end_label);
+        if (for_node.body && is_node<Block>(for_node.body)) {
+            generate_block(get_node<Block>(for_node.body));
+        }
+        break_labels.pop_back();
+
+        if (!current_block_terminated) {
+            const std::string cur = next_register("for_arr_i");
+            emit_line(cur + " = load i64, i64* " + idx_ptr);
+            const std::string inc = next_register("for_arr_next");
+            emit_line(inc + " = add i64 " + cur + ", 1");
+            emit_line("store i64 " + inc + ", i64* " + idx_ptr);
+            emit_line("br label %" + cond_label);
+        }
+
+        emit_label(end_label);
+        pop_scope();
+        return;
+    }
+    if (is_node<BreakStatement>(node)) {
+        generate_break_statement(get_node<BreakStatement>(node));
+        return;
+    }
+
+    if (is_node<TryStatement>(node)) {
+        auto& try_stmt = get_node<TryStatement>(node);
+        const std::string setjmp_label = next_label("try_setjmp");
+        const std::string try_body_label = next_label("try_body");
+        const std::string catch_dispatch_label = next_label("try_catch");
+        const std::string end_label = next_label("try_end");
+
+        const std::string jmp_buf_addr = next_register("try_jmp_buf");
+        emit_line(jmp_buf_addr + " = alloca [256 x i8]");
+        const std::string jmp_ptr = next_register("try_jmp_ptr");
+        emit_line(jmp_ptr + " = getelementptr inbounds [256 x i8], [256 x i8]* " + jmp_buf_addr +
+                  ", i64 0, i64 0");
+
+        const std::string prev_jmp_addr = next_register("try_prev_jmp_addr");
+        emit_line(prev_jmp_addr + " = alloca i8*");
+        const std::string prev_jmp = next_register("try_prev_jmp");
+        emit_line(prev_jmp + " = load i8*, i8** @__mt_exc_jmp");
+        emit_line("store i8* " + prev_jmp + ", i8** " + prev_jmp_addr);
+        emit_line("store i8* " + jmp_ptr + ", i8** @__mt_exc_jmp");
+
+        emit_line("br label %" + setjmp_label);
+        emit_label(setjmp_label);
+        const std::string setjmp_result = next_register("setjmp_result");
+        emit_line(setjmp_result + " = call i32 @setjmp(i8* " + jmp_ptr + ")");
+        const std::string is_try_path = next_register("try_is_initial");
+        emit_line(is_try_path + " = icmp eq i32 " + setjmp_result + ", 0");
+        emit_line("br i1 " + is_try_path + ", label %" + try_body_label + ", label %" +
+                  catch_dispatch_label);
+
+        try_contexts.push_back(TryContext{prev_jmp_addr});
+
+        emit_label(try_body_label);
+        if (try_stmt.try_block && is_node<Block>(try_stmt.try_block)) {
+            generate_block(get_node<Block>(try_stmt.try_block));
+        }
+        if (!current_block_terminated) {
+            const std::string restored_prev = next_register("try_restore_prev");
+            emit_line(restored_prev + " = load i8*, i8** " + prev_jmp_addr);
+            emit_line("store i8* " + restored_prev + ", i8** @__mt_exc_jmp");
+            emit_line("br label %" + end_label);
+        }
+
+        emit_label(catch_dispatch_label);
+        {
+            const std::string restored_prev = next_register("catch_restore_prev");
+            emit_line(restored_prev + " = load i8*, i8** " + prev_jmp_addr);
+            emit_line("store i8* " + restored_prev + ", i8** @__mt_exc_jmp");
+        }
+
+        const std::string thrown_tag = next_register("caught_tag");
+        emit_line(thrown_tag + " = load i32, i32* @__mt_exc_tag");
+        const std::string thrown_obj = next_register("caught_obj");
+        emit_line(thrown_obj + " = load i8*, i8** @__mt_exc_obj");
+
+        bool has_catch_all = false;
+        for (std::size_t i = 0; i < try_stmt.catch_blocks.size(); ++i) {
+            auto& catch_block = try_stmt.catch_blocks[i];
+            const bool is_catch_all = catch_block.exception_type.empty();
+            const std::string catch_body_label = next_label("catch_body");
+            std::string catch_next_label;
+
+            if (is_catch_all) {
+                emit_line("br label %" + catch_body_label);
+                has_catch_all = true;
+            } else {
+                catch_next_label = next_label("catch_next");
+
+                std::vector<int> matching_tags;
+                for (const auto& [class_name, tag] : class_type_tags) {
+                    if (class_is_a(class_name, catch_block.exception_type)) {
+                        matching_tags.push_back(tag);
+                    }
+                }
+                std::sort(matching_tags.begin(), matching_tags.end());
+                matching_tags.erase(std::unique(matching_tags.begin(), matching_tags.end()),
+                                    matching_tags.end());
+
+                std::string match_value = "0";
+                if (!matching_tags.empty()) {
+                    std::string accumulated_cmp;
+                    for (std::size_t tag_index = 0; tag_index < matching_tags.size(); ++tag_index) {
+                        const std::string cmp = next_register("catch_match");
+                        emit_line(cmp + " = icmp eq i32 " + thrown_tag + ", " +
+                                  std::to_string(matching_tags[tag_index]));
+                        if (tag_index == 0) {
+                            accumulated_cmp = cmp;
+                        } else {
+                            const std::string or_value = next_register("catch_match_or");
+                            emit_line(or_value + " = or i1 " + accumulated_cmp + ", " + cmp);
+                            accumulated_cmp = or_value;
+                        }
+                    }
+                    match_value = accumulated_cmp;
+                }
+
+                emit_line("br i1 " + match_value + ", label %" + catch_body_label +
+                          ", label %" + catch_next_label);
+            }
+
+            emit_label(catch_body_label);
+            push_scope();
+            if (!catch_block.identifier.empty()) {
+                const std::string catch_type_name =
+                    catch_block.exception_type.empty() ? "Exception" : catch_block.exception_type;
+                const std::string catch_llvm_type = map_type_to_llvm(catch_type_name);
+                const std::string catch_var_addr = next_register(catch_block.identifier + "_addr");
+                emit_line(catch_var_addr + " = alloca " + catch_llvm_type);
+
+                std::string catch_obj_value = thrown_obj;
+                if (catch_llvm_type != "i8*") {
+                    const std::string cast_obj = next_register("caught_obj_cast");
+                    emit_line(cast_obj + " = bitcast i8* " + thrown_obj + " to " + catch_llvm_type);
+                    catch_obj_value = cast_obj;
+                }
+                emit_line("store " + catch_llvm_type + " " + catch_obj_value + ", " +
+                          catch_llvm_type + "* " + catch_var_addr);
+
+                std::string catch_class_name;
+                if (!catch_type_name.empty() && classes.find(catch_type_name) != classes.end()) {
+                    catch_class_name = catch_type_name;
+                }
+                declare_variable(catch_block.identifier, VariableInfo{
+                    catch_llvm_type, catch_var_addr, false, "", 0, false, "", catch_class_name});
+            }
+
+            emit_line("store i8* null, i8** @__mt_exc_obj");
+            emit_line("store i32 0, i32* @__mt_exc_tag");
+
+            if (catch_block.body && is_node<Block>(catch_block.body)) {
+                generate_block(get_node<Block>(catch_block.body));
+            }
+            pop_scope();
+
+            if (!current_block_terminated) {
+                emit_line("br label %" + end_label);
+            }
+
+            if (is_catch_all) {
+                break;
+            }
+            emit_label(catch_next_label);
+        }
+
+        if (!has_catch_all) {
+            emit_line("call void @exit(i32 1)");
+            emit_line("unreachable");
+        }
+
+        emit_label(end_label);
+        if (!try_contexts.empty()) {
+            try_contexts.pop_back();
+        }
+        return;
+    }
+    if (is_node<ThrowStatement>(node)) {
+        auto& throw_stmt = get_node<ThrowStatement>(node);
+        IRValue thrown_value{"i8*", "null", true};
+        int thrown_tag = 0;
+        if (throw_stmt.expression) {
+            thrown_value = cast_value(generate_expression(throw_stmt.expression), "i8*");
+            const std::string thrown_class = infer_class_name_from_ast(throw_stmt.expression);
+            thrown_tag = class_tag_for_name(thrown_class);
+        }
+
+        emit_line("store i8* " + thrown_value.value + ", i8** @__mt_exc_obj");
+        emit_line("store i32 " + std::to_string(thrown_tag) + ", i32* @__mt_exc_tag");
+
+        const std::string jmp_ptr = next_register("throw_jmp_ptr");
+        emit_line(jmp_ptr + " = load i8*, i8** @__mt_exc_jmp");
+        const std::string has_jmp = next_register("throw_has_jmp");
+        emit_line(has_jmp + " = icmp ne i8* " + jmp_ptr + ", null");
+
+        const std::string longjmp_label = next_label("throw_longjmp");
+        const std::string exit_label = next_label("throw_exit");
+        emit_line("br i1 " + has_jmp + ", label %" + longjmp_label + ", label %" + exit_label);
+
+        emit_label(longjmp_label);
+        emit_line("call void @longjmp(i8* " + jmp_ptr + ", i32 1)");
+        emit_line("unreachable");
+
+        emit_label(exit_label);
+        StringConstantInfo unhandled = get_or_create_string_constant("Unhandled exception\n");
+        IRValue msg{"i8*", string_constant_gep(unhandled), true};
+        (void)emit_call("i32", "@printf", {msg}, true);
+        emit_line("call void @exit(i32 1)");
+        emit_line("unreachable");
+        return;
+    }
+
+    if (is_node<ClassDeclaration>(node) || is_node<FromImportStatement>(node) ||
+        is_node<SimpleImportStatement>(node) || is_node<LibcImportStatement>(node) ||
+        is_node<ExternalDeclaration>(node) || is_node<FunctionDeclaration>(node) ||
+        is_node<DynamicFunctionDeclaration>(node)) {
+        return;
+    }
+
+    throw std::runtime_error("Unsupported statement node in codegen: " + ast_variant_name(node));
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_number_literal(NumberLiteral& node) {
+    return IRValue{"i32", std::to_string(node.value), true};
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_float_literal(FloatLiteral& node) {
+    std::ostringstream out;
+    out << std::setprecision(17) << node.value;
+    std::string value = out.str();
+    if (value.find('.') == std::string::npos &&
+        value.find('e') == std::string::npos &&
+        value.find('E') == std::string::npos) {
+        value += ".0";
+    }
+    return IRValue{"double", value, true};
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_string_literal(StringLiteral& node) {
+    StringConstantInfo info = get_or_create_string_constant(node.value);
+    return IRValue{"i8*", string_constant_gep(info), true};
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_bool_literal(BoolLiteral& node) {
+    return IRValue{"i1", node.value ? "1" : "0", true};
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_array_literal(ArrayLiteral& node) {
+    std::string element_type = "int";
+    if (!node.elements.empty()) {
+        ASTNode& first = node.elements[0];
+        if (is_node<FloatLiteral>(first)) {
+            element_type = "float";
+        } else if (is_node<StringLiteral>(first)) {
+            element_type = "string";
+        } else if (is_node<BoolLiteral>(first)) {
+            element_type = "bool";
+        } else if (is_node<NullLiteral>(first)) {
+            element_type = "any";
+        }
+    }
+
+    const std::string elem_llvm_type = map_type_to_llvm(element_type);
+    std::size_t elem_size = 8;
+    if (elem_llvm_type == "i1") {
+        elem_size = 1;
+    } else if (elem_llvm_type == "i32") {
+        elem_size = 4;
+    } else if (elem_llvm_type == "double") {
+        elem_size = 8;
+    }
+
+    const std::size_t initial_len = node.elements.size();
+    const std::size_t capacity = std::max<std::size_t>(4, initial_len);
+    const std::size_t total_bytes = capacity * elem_size;
+
+    const std::string header_raw = next_register("arr_lit_hdr_raw");
+    emit_line(header_raw + " = call i8* @malloc(i64 24)");
+
+    const std::string len_slot = next_register("arr_lit_len_slot");
+    emit_line(len_slot + " = bitcast i8* " + header_raw + " to i64*");
+    emit_line("store i64 " + std::to_string(initial_len) + ", i64* " + len_slot);
+
+    const std::string cap_slot = next_register("arr_lit_cap_slot");
+    emit_line(cap_slot + " = getelementptr inbounds i64, i64* " + len_slot + ", i64 1");
+    emit_line("store i64 " + std::to_string(capacity) + ", i64* " + cap_slot);
+
+    const std::string data_slot_raw = next_register("arr_lit_data_slot_raw");
+    emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + header_raw + ", i64 16");
+    const std::string data_slot = next_register("arr_lit_data_slot");
+    emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
+
+    const std::string data_raw = next_register("arr_lit_data_raw");
+    emit_line(data_raw + " = call i8* @malloc(i64 " + std::to_string(total_bytes) + ")");
+    emit_line("store i8* " + data_raw + ", i8** " + data_slot);
+
+    const std::string typed_data = next_register("arr_lit_typed_data");
+    emit_line(typed_data + " = bitcast i8* " + data_raw + " to " + elem_llvm_type + "*");
+    for (std::size_t i = 0; i < node.elements.size(); ++i) {
+        IRValue value = cast_value(generate_expression(node.elements[i]), elem_llvm_type);
+        const std::string elem_ptr = next_register("arr_lit_elem_ptr");
+        emit_line(elem_ptr + " = getelementptr inbounds " + elem_llvm_type + ", " +
+                  elem_llvm_type + "* " + typed_data + ", i64 " + std::to_string(i));
+        emit_line("store " + elem_llvm_type + " " + value.value + ", " +
+                  elem_llvm_type + "* " + elem_ptr);
+    }
+
+    return IRValue{"i8*", header_raw, true};
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_dict_literal(DictLiteral& node) {
+    std::string repr = "{";
+    for (std::size_t i = 0; i < node.keys.size() && i < node.values.size(); ++i) {
+        if (i > 0) {
+            repr += ", ";
+        }
+
+        auto append_literal = [&](const ASTNode& expr) {
+            if (!expr) {
+                repr += "null";
+                return;
+            }
+            if (is_node<StringLiteral>(expr)) {
+                repr += "\"";
+                repr += get_node<StringLiteral>(expr).value;
+                repr += "\"";
+                return;
+            }
+            if (is_node<NumberLiteral>(expr)) {
+                repr += std::to_string(get_node<NumberLiteral>(expr).value);
+                return;
+            }
+            if (is_node<FloatLiteral>(expr)) {
+                std::ostringstream out;
+                out << std::setprecision(17) << get_node<FloatLiteral>(expr).value;
+                std::string value = out.str();
+                if (value.find('.') == std::string::npos &&
+                    value.find('e') == std::string::npos &&
+                    value.find('E') == std::string::npos) {
+                    value += ".0";
+                }
+                repr += value;
+                return;
+            }
+            if (is_node<BoolLiteral>(expr)) {
+                repr += get_node<BoolLiteral>(expr).value ? "true" : "false";
+                return;
+            }
+            repr += "?";
+        };
+
+        append_literal(node.keys[i]);
+        repr += ": ";
+        append_literal(node.values[i]);
+    }
+    repr += "}";
+
+    StringConstantInfo info = get_or_create_string_constant(repr);
+    return IRValue{"i8*", string_constant_gep(info), true};
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_null_literal() {
+    return IRValue{"i8*", "null", true};
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_identifier(Identifier& node) {
+    const VariableInfo* var = resolve_variable(node.name);
+    if (!var) {
+        throw std::runtime_error("Unknown variable '" + node.name + "' in codegen");
+    }
+    if (var->is_fixed_array) {
+        throw std::runtime_error(
+            "Fixed-size array '" + node.name +
+            "' cannot be used directly as a scalar expression; index it with []");
+    }
+
+    const std::string reg = next_register(node.name + "_load");
+    emit_line(reg + " = load " + var->llvm_type + ", " + var->llvm_type + "* " + var->ptr_value);
+    return IRValue{var->llvm_type, reg, true};
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_this_expression(ThisExpression&) {
+    const VariableInfo* var = resolve_variable("this");
+    if (!var) {
+        throw std::runtime_error("'this' used outside class method");
+    }
+    const std::string reg = next_register("this_load");
+    emit_line(reg + " = load " + var->llvm_type + ", " + var->llvm_type + "* " + var->ptr_value);
+    return IRValue{var->llvm_type, reg, true};
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_member_expression(MemberExpression& node) {
+    if (node.property == "length") {
+        throw std::runtime_error("Use length() or .length() call form for runtime length");
+    }
+
+    const VariableInfo* obj_var = nullptr;
+    std::string object_name;
+    if (node.object && is_node<Identifier>(node.object)) {
+        object_name = get_node<Identifier>(node.object).name;
+        obj_var = resolve_variable(object_name);
+    } else if (node.object && is_node<ThisExpression>(node.object)) {
+        object_name = "this";
+        obj_var = resolve_variable("this");
+    }
+    if (!obj_var) {
+        IRValue object_value = generate_expression(node.object);
+        if (object_value.type == "double") {
+            return IRValue{"double", "0.0", true};
+        }
+        if (object_value.type == "i1") {
+            return IRValue{"i1", "0", true};
+        }
+        if (object_value.type == "i32" || object_value.type == "i64") {
+            return IRValue{"i32", "0", true};
+        }
+        return IRValue{"i8*", "null", true};
+    }
+    if (obj_var->class_name.empty()) {
+        return IRValue{"i8*", "null", true};
+    }
+
+    const auto class_it = classes.find(obj_var->class_name);
+    if (class_it == classes.end()) {
+        throw std::runtime_error("Unknown class type '" + obj_var->class_name + "'");
+    }
+
+    const auto field_it = class_it->second.fields.find(node.property);
+    if (field_it == class_it->second.fields.end()) {
+        throw std::runtime_error("Unknown field '" + node.property + "' for class '" +
+                                 obj_var->class_name + "'");
+    }
+
+    const std::string obj_ptr = next_register(object_name + "_obj");
+    emit_line(obj_ptr + " = load i8*, i8** " + obj_var->ptr_value);
+    const std::string field_raw = next_register(object_name + "_field_raw");
+    emit_line(field_raw + " = getelementptr inbounds i8, i8* " + obj_ptr + ", i64 " +
+              std::to_string(field_it->second.offset));
+    const std::string field_ptr = next_register(object_name + "_field_ptr");
+    emit_line(field_ptr + " = bitcast i8* " + field_raw + " to " + field_it->second.llvm_type + "*");
+    const std::string field_val = next_register(object_name + "_field_val");
+    emit_line(field_val + " = load " + field_it->second.llvm_type + ", " +
+              field_it->second.llvm_type + "* " + field_ptr);
+    return IRValue{field_it->second.llvm_type, field_val, true};
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_new_expression(NewExpression& node) {
+    const auto class_it = classes.find(node.class_name);
+    if (class_it == classes.end()) {
+        throw std::runtime_error("Unknown class '" + node.class_name + "' in codegen");
+    }
+
+    const CodegenClassInfo& class_info = class_it->second;
+    const std::string obj_ptr = next_register(node.class_name + "_obj");
+    emit_line(obj_ptr + " = call i8* @malloc(i64 " + std::to_string(class_info.object_size) + ")");
+
+    // Zero/default initialize fields first.
+    for (const auto& [field_name, field] : class_info.fields) {
+        (void)field_name;
+        const std::string field_raw = next_register(node.class_name + "_init_field_raw");
+        emit_line(field_raw + " = getelementptr inbounds i8, i8* " + obj_ptr + ", i64 " +
+                  std::to_string(field.offset));
+        const std::string field_ptr = next_register(node.class_name + "_init_field_ptr");
+        emit_line(field_ptr + " = bitcast i8* " + field_raw + " to " + field.llvm_type + "*");
+        std::string default_value = "0";
+        if (field.llvm_type == "double") {
+            default_value = "0.0";
+        } else if (is_pointer_type(field.llvm_type)) {
+            default_value = "null";
+        }
+        emit_line("store " + field.llvm_type + " " + default_value + ", " +
+                  field.llvm_type + "* " + field_ptr);
+    }
+
+    // Then apply field initializers.
+    for (const auto& [field_name, field] : class_info.fields) {
+        if (!field.initializer) {
+            continue;
+        }
+        ASTNode init_expr = clone_node(field.initializer);
+        IRValue value = cast_value(generate_expression(init_expr), field.llvm_type);
+        const std::string field_raw = next_register(node.class_name + "_field_init_raw");
+        emit_line(field_raw + " = getelementptr inbounds i8, i8* " + obj_ptr + ", i64 " +
+                  std::to_string(field.offset));
+        const std::string field_ptr = next_register(node.class_name + "_field_init_ptr");
+        emit_line(field_ptr + " = bitcast i8* " + field_raw + " to " + field.llvm_type + "*");
+        emit_line("store " + field.llvm_type + " " + value.value + ", " +
+                  field.llvm_type + "* " + field_ptr);
+    }
+
+    // Constructor args map to `arg` fields in declaration order.
+    const std::size_t ctor_count = std::min(node.arguments.size(), class_info.constructor_arg_fields.size());
+    for (std::size_t i = 0; i < ctor_count; ++i) {
+        const auto fit = class_info.fields.find(class_info.constructor_arg_fields[i]);
+        if (fit == class_info.fields.end()) {
+            continue;
+        }
+        const auto& field = fit->second;
+        IRValue arg = cast_value(generate_expression(node.arguments[i]), field.llvm_type);
+        const std::string field_raw = next_register(node.class_name + "_ctor_field_raw");
+        emit_line(field_raw + " = getelementptr inbounds i8, i8* " + obj_ptr + ", i64 " +
+                  std::to_string(field.offset));
+        const std::string field_ptr = next_register(node.class_name + "_ctor_field_ptr");
+        emit_line(field_ptr + " = bitcast i8* " + field_raw + " to " + field.llvm_type + "*");
+        emit_line("store " + field.llvm_type + " " + arg.value + ", " +
+                  field.llvm_type + "* " + field_ptr);
+    }
+
+    return IRValue{"i8*", obj_ptr, true};
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_index_expression(IndexExpression& node) {
+    IRValue raw_index = generate_expression(node.index);
+    const CodegenClassFieldInfo* object_member_field = nullptr;
+    if (node.object && is_node<MemberExpression>(node.object)) {
+        const auto& member = get_node<MemberExpression>(node.object);
+        const VariableInfo* owner_var = nullptr;
+        if (member.object && is_node<Identifier>(member.object)) {
+            owner_var = resolve_variable(get_node<Identifier>(member.object).name);
+        } else if (member.object && is_node<ThisExpression>(member.object)) {
+            owner_var = resolve_variable("this");
+        }
+        if (owner_var && !owner_var->class_name.empty()) {
+            const auto class_it = classes.find(owner_var->class_name);
+            if (class_it != classes.end()) {
+                const auto field_it = class_it->second.fields.find(member.property);
+                if (field_it != class_it->second.fields.end()) {
+                    object_member_field = &field_it->second;
+                }
+            }
+        }
+    }
+
+    if (node.object && is_node<Identifier>(node.object)) {
+        const std::string object_name = get_node<Identifier>(node.object).name;
+        const VariableInfo* var = resolve_variable(object_name);
+        if (!var) {
+            throw std::runtime_error("Unknown variable '" + object_name + "' in index expression");
+        }
+
+        if (var->is_fixed_array) {
+            IRValue index = cast_value(raw_index, "i64");
+            const std::string array_type = "[" + std::to_string(var->fixed_array_size) + " x " +
+                                           var->fixed_array_elem_llvm_type + "]";
+            const std::string elem_ptr = next_register(object_name + "_elem_ptr");
+            emit_line(elem_ptr + " = getelementptr inbounds " + array_type + ", " + array_type + "* " +
+                      var->ptr_value + ", i64 0, i64 " + index.value);
+
+            const std::string loaded = next_register(object_name + "_elem");
+            emit_line(loaded + " = load " + var->fixed_array_elem_llvm_type + ", " +
+                      var->fixed_array_elem_llvm_type + "* " + elem_ptr);
+            return IRValue{var->fixed_array_elem_llvm_type, loaded, true};
+        }
+
+        if (var->is_dynamic_array) {
+            IRValue index = cast_value(raw_index, "i64");
+            const std::string header = next_register(object_name + "_hdr");
+            emit_line(header + " = load i8*, i8** " + var->ptr_value);
+
+            const std::string data_slot_raw = next_register(object_name + "_data_slot_raw");
+            emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 16");
+            const std::string data_slot = next_register(object_name + "_data_slot");
+            emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
+            const std::string data_raw = next_register(object_name + "_data_raw");
+            emit_line(data_raw + " = load i8*, i8** " + data_slot);
+
+            const std::string typed_data = next_register(object_name + "_typed_data");
+            emit_line(typed_data + " = bitcast i8* " + data_raw + " to " +
+                      var->dynamic_array_elem_llvm_type + "*");
+
+            const std::string elem_ptr = next_register(object_name + "_elem_ptr");
+            emit_line(elem_ptr + " = getelementptr inbounds " + var->dynamic_array_elem_llvm_type +
+                      ", " + var->dynamic_array_elem_llvm_type + "* " + typed_data + ", i64 " +
+                      index.value);
+
+            const std::string loaded = next_register(object_name + "_elem");
+            emit_line(loaded + " = load " + var->dynamic_array_elem_llvm_type + ", " +
+                      var->dynamic_array_elem_llvm_type + "* " + elem_ptr);
+            return IRValue{var->dynamic_array_elem_llvm_type, loaded, true};
+        }
+
+        if (var->llvm_type == "i8*" && raw_index.type == "i8*") {
+            // Dict lookup placeholder for bootstrap parity: unknown keys produce null.
+            return IRValue{"i8*", "null", true};
+        }
+
+        if (var->llvm_type == "i8*" && var->class_name.empty()) {
+            IRValue index = cast_value(raw_index, "i64");
+            const std::string str_ptr = next_register(object_name + "_str");
+            emit_line(str_ptr + " = load i8*, i8** " + var->ptr_value);
+
+            const std::string char_ptr = next_register(object_name + "_char_ptr");
+            emit_line(char_ptr + " = getelementptr inbounds i8, i8* " + str_ptr + ", i64 " + index.value);
+            const std::string ch = next_register(object_name + "_char");
+            emit_line(ch + " = load i8, i8* " + char_ptr);
+
+            const std::string one_char = next_register(object_name + "_one_char");
+            emit_line(one_char + " = call i8* @__mt_char(i8 " + ch + ")");
+            return IRValue{"i8*", one_char, true};
+        }
+    }
+
+    IRValue object = cast_value(generate_expression(node.object), "i8*");
+    if (raw_index.type == "i8*") {
+        // Dict lookup placeholder for bootstrap parity.
+        return IRValue{"i8*", "null", true};
+    }
+
+    IRValue index = cast_value(raw_index, "i64");
+    if (object_member_field && object_member_field->mt_type == "array") {
+        const std::string data_slot_raw = next_register("idx_data_slot_raw");
+        emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + object.value + ", i64 16");
+        const std::string data_slot = next_register("idx_data_slot");
+        emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
+        const std::string data_raw = next_register("idx_data_raw");
+        emit_line(data_raw + " = load i8*, i8** " + data_slot);
+        const std::string typed_data = next_register("idx_typed_data");
+        emit_line(typed_data + " = bitcast i8* " + data_raw + " to i8**");
+        const std::string elem_ptr = next_register("idx_elem_ptr");
+        emit_line(elem_ptr + " = getelementptr inbounds i8*, i8** " + typed_data + ", i64 " + index.value);
+        const std::string loaded = next_register("idx_elem");
+        emit_line(loaded + " = load i8*, i8** " + elem_ptr);
+        return IRValue{"i8*", loaded, true};
+    }
+
+    const std::string char_ptr = next_register("idx_char_ptr");
+    emit_line(char_ptr + " = getelementptr inbounds i8, i8* " + object.value + ", i64 " + index.value);
+    const std::string ch = next_register("idx_char");
+    emit_line(ch + " = load i8, i8* " + char_ptr);
+    const std::string one_char = next_register("idx_one_char");
+    emit_line(one_char + " = call i8* @__mt_char(i8 " + ch + ")");
+    return IRValue{"i8*", one_char, true};
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_string_concat(IRValue lhs, IRValue rhs) {
+    lhs = cast_value(lhs, "i8*");
+    rhs = cast_value(rhs, "i8*");
+
+    IRValue lhs_len = emit_call("i64", "@strlen", {lhs});
+    IRValue rhs_len = emit_call("i64", "@strlen", {rhs});
+
+    const std::string total_len = next_register("strcat_total_len");
+    emit_line(total_len + " = add i64 " + lhs_len.value + ", " + rhs_len.value);
+    const std::string with_null = next_register("strcat_with_null");
+    emit_line(with_null + " = add i64 " + total_len + ", 1");
+
+    IRValue size{"i64", with_null, true};
+    IRValue buffer = emit_call("i8*", "@malloc", {size});
+    (void)emit_call("i8*", "@strcpy", {buffer, lhs});
+    (void)emit_call("i8*", "@strcat", {buffer, rhs});
+    return buffer;
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_binary_expression(BinaryExpression& node) {
+    const std::string op = node.op.value;
+
+    if (op == "&&" || op == "||") {
+        IRValue lhs_bool = ensure_boolean(generate_expression(node.left));
+        IRValue rhs_bool = ensure_boolean(generate_expression(node.right));
+
+        const std::string reg = next_register(op == "&&" ? "and" : "or");
+        emit_line(reg + " = " + std::string(op == "&&" ? "and" : "or") + " i1 " +
+                  lhs_bool.value + ", " + rhs_bool.value);
+        return IRValue{"i1", reg, true};
+    }
+
+    IRValue lhs = generate_expression(node.left);
+    IRValue rhs = generate_expression(node.right);
+
+    auto is_null_ptr = [](const IRValue& value) -> bool {
+        return value.type == "i8*" && value.value == "null";
+    };
+    auto zero_for_type = [](const std::string& type) -> IRValue {
+        if (type == "double") {
+            return IRValue{"double", "0.0", true};
+        }
+        if (type == "i1") {
+            return IRValue{"i1", "0", true};
+        }
+        if (type == "i64") {
+            return IRValue{"i64", "0", true};
+        }
+        return IRValue{"i32", "0", true};
+    };
+
+    if (is_null_ptr(lhs) && (rhs.type == "i32" || rhs.type == "double" || rhs.type == "i1")) {
+        lhs = zero_for_type(rhs.type);
+    } else if (is_null_ptr(rhs) && (lhs.type == "i32" || lhs.type == "double" || lhs.type == "i1")) {
+        rhs = zero_for_type(lhs.type);
+    }
+
+    if (op == "+" && lhs.type == "i8*" && rhs.type == "i8*") {
+        return generate_string_concat(std::move(lhs), std::move(rhs));
+    }
+
+    if ((op == "==" || op == "!=") && lhs.type == "i8*" && rhs.type == "i8*") {
+        const std::string lhs_is_null = next_register("lhs_is_null");
+        emit_line(lhs_is_null + " = icmp eq i8* " + lhs.value + ", null");
+        const std::string rhs_is_null = next_register("rhs_is_null");
+        emit_line(rhs_is_null + " = icmp eq i8* " + rhs.value + ", null");
+        const std::string both_null = next_register("both_null");
+        emit_line(both_null + " = and i1 " + lhs_is_null + ", " + rhs_is_null);
+        const std::string either_null = next_register("either_null");
+        emit_line(either_null + " = or i1 " + lhs_is_null + ", " + rhs_is_null);
+
+        const std::string null_label = next_label("strcmp_null");
+        const std::string cmp_label = next_label("strcmp_cmp");
+        const std::string end_label = next_label("strcmp_end");
+        const std::string result_ptr = next_register("strcmp_result_addr");
+        emit_line(result_ptr + " = alloca i1");
+        emit_line("br i1 " + either_null + ", label %" + null_label + ", label %" + cmp_label);
+
+        emit_label(null_label);
+        if (op == "==") {
+            emit_line("store i1 " + both_null + ", i1* " + result_ptr);
+        } else {
+            const std::string not_both_null = next_register("not_both_null");
+            emit_line(not_both_null + " = xor i1 " + both_null + ", 1");
+            emit_line("store i1 " + not_both_null + ", i1* " + result_ptr);
+        }
+        emit_line("br label %" + end_label);
+
+        emit_label(cmp_label);
+        IRValue cmp = emit_call("i32", "@strcmp", {lhs, rhs});
+        const std::string reg = next_register("str_cmp");
+        emit_line(reg + " = icmp " + std::string(op == "==" ? "eq" : "ne") +
+                  " i32 " + cmp.value + ", 0");
+        emit_line("store i1 " + reg + ", i1* " + result_ptr);
+        emit_line("br label %" + end_label);
+
+        emit_label(end_label);
+        const std::string result = next_register("str_cmp_result");
+        emit_line(result + " = load i1, i1* " + result_ptr);
+        return IRValue{"i1", result, true};
+    }
+
+    std::string common_type = lhs.type;
+    if (lhs.type == "double" || rhs.type == "double") {
+        common_type = "double";
+    } else if (lhs.type == "i32" || rhs.type == "i32") {
+        common_type = "i32";
+    } else if (lhs.type == "i1" && rhs.type == "i1") {
+        common_type = "i1";
+    }
+
+    lhs = cast_value(lhs, common_type);
+    rhs = cast_value(rhs, common_type);
+
+    if (op == "+" || op == "-" || op == "*" || op == "/") {
+        std::string ir_op;
+        if (common_type == "double") {
+            ir_op = (op == "+") ? "fadd" : (op == "-") ? "fsub" : (op == "*") ? "fmul" : "fdiv";
+        } else {
+            ir_op = (op == "+") ? "add" : (op == "-") ? "sub" : (op == "*") ? "mul" : "sdiv";
+        }
+
+        const std::string reg = next_register("binop");
+        emit_line(reg + " = " + ir_op + " " + common_type + " " + lhs.value + ", " + rhs.value);
+        return IRValue{common_type, reg, true};
+    }
+
+    if (op == "==" || op == "!=" || op == ">" || op == "<" || op == ">=" || op == "<=") {
+        std::string cmp_op;
+        if (op == "==") cmp_op = "eq";
+        if (op == "!=") cmp_op = "ne";
+        if (op == ">") cmp_op = "sgt";
+        if (op == "<") cmp_op = "slt";
+        if (op == ">=") cmp_op = "sge";
+        if (op == "<=") cmp_op = "sle";
+
+        const std::string reg = next_register("cmp");
+        if (common_type == "double") {
+            const std::string fcmp =
+                (op == "==") ? "oeq" : (op == "!=") ? "one" : (op == ">") ? "ogt"
+                : (op == "<") ? "olt" : (op == ">=") ? "oge" : "ole";
+            emit_line(reg + " = fcmp " + fcmp + " double " + lhs.value + ", " + rhs.value);
+        } else {
+            emit_line(reg + " = icmp " + cmp_op + " " + common_type + " " + lhs.value + ", " + rhs.value);
+        }
+        return IRValue{"i1", reg, true};
+    }
+
+    throw std::runtime_error("Unsupported binary operator '" + op + "'");
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_in_expression(InExpression& node) {
+    auto compare_with_item = [this](const std::string& elem_type,
+                                    const std::string& elem_value,
+                                    const IRValue& item) -> std::string {
+        if (elem_type == "i8*") {
+            IRValue item_str = cast_value(item, "i8*");
+            IRValue cmp = emit_call("i32", "@strcmp", {IRValue{"i8*", elem_value, true}, item_str});
+            const std::string is_eq = next_register("in_eq");
+            emit_line(is_eq + " = icmp eq i32 " + cmp.value + ", 0");
+            return is_eq;
+        }
+        if (elem_type == "double") {
+            IRValue item_num = cast_value(item, "double");
+            const std::string is_eq = next_register("in_eq");
+            emit_line(is_eq + " = fcmp oeq double " + elem_value + ", " + item_num.value);
+            return is_eq;
+        }
+        if (elem_type == "i1") {
+            IRValue item_bool = cast_value(item, "i1");
+            const std::string is_eq = next_register("in_eq");
+            emit_line(is_eq + " = icmp eq i1 " + elem_value + ", " + item_bool.value);
+            return is_eq;
+        }
+        IRValue item_int = cast_value(item, elem_type);
+        const std::string is_eq = next_register("in_eq");
+        emit_line(is_eq + " = icmp eq " + elem_type + " " + elem_value + ", " + item_int.value);
+        return is_eq;
+    };
+
+    IRValue item = generate_expression(node.item);
+
+    const VariableInfo* var = nullptr;
+    std::string container_name = "container";
+    if (node.container && is_node<Identifier>(node.container)) {
+        container_name = get_node<Identifier>(node.container).name;
+        var = resolve_variable(container_name);
+    }
+
+    if (var && (var->is_fixed_array || var->is_dynamic_array)) {
+        const bool is_fixed = var->is_fixed_array;
+        const std::string elem_type = is_fixed ? var->fixed_array_elem_llvm_type : var->dynamic_array_elem_llvm_type;
+
+        const std::string result_ptr = next_register("in_result_addr");
+        emit_line(result_ptr + " = alloca i1");
+        emit_line("store i1 0, i1* " + result_ptr);
+
+        const std::string idx_ptr = next_register("in_idx_addr");
+        emit_line(idx_ptr + " = alloca i64");
+        emit_line("store i64 0, i64* " + idx_ptr);
+
+        const std::string cond_label = next_label("in_cond");
+        const std::string body_label = next_label("in_body");
+        const std::string step_label = next_label("in_step");
+        const std::string found_label = next_label("in_found");
+        const std::string end_label = next_label("in_end");
+
+        emit_line("br label %" + cond_label);
+        emit_label(cond_label);
+        const std::string idx = next_register("in_idx");
+        emit_line(idx + " = load i64, i64* " + idx_ptr);
+
+        std::string len_value;
+        if (is_fixed) {
+            len_value = std::to_string(var->fixed_array_size);
+        } else {
+            const std::string header = next_register(container_name + "_hdr");
+            emit_line(header + " = load i8*, i8** " + var->ptr_value);
+            const std::string len_slot = next_register(container_name + "_len_slot");
+            emit_line(len_slot + " = bitcast i8* " + header + " to i64*");
+            const std::string dyn_len = next_register(container_name + "_len");
+            emit_line(dyn_len + " = load i64, i64* " + len_slot);
+            len_value = dyn_len;
+        }
+
+        const std::string cond = next_register("in_cmp");
+        emit_line(cond + " = icmp slt i64 " + idx + ", " + len_value);
+        emit_line("br i1 " + cond + ", label %" + body_label + ", label %" + end_label);
+
+        emit_label(body_label);
+        std::string elem_value;
+        if (is_fixed) {
+            const std::string array_type = "[" + std::to_string(var->fixed_array_size) + " x " +
+                                           var->fixed_array_elem_llvm_type + "]";
+            const std::string elem_ptr = next_register(container_name + "_in_elem_ptr");
+            emit_line(elem_ptr + " = getelementptr inbounds " + array_type + ", " + array_type + "* " +
+                      var->ptr_value + ", i64 0, i64 " + idx);
+            const std::string elem_val = next_register(container_name + "_in_elem");
+            emit_line(elem_val + " = load " + elem_type + ", " + elem_type + "* " + elem_ptr);
+            elem_value = elem_val;
+        } else {
+            const std::string header = next_register(container_name + "_in_hdr");
+            emit_line(header + " = load i8*, i8** " + var->ptr_value);
+            const std::string data_slot_raw = next_register(container_name + "_in_data_slot_raw");
+            emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 16");
+            const std::string data_slot = next_register(container_name + "_in_data_slot");
+            emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
+            const std::string data_raw = next_register(container_name + "_in_data_raw");
+            emit_line(data_raw + " = load i8*, i8** " + data_slot);
+            const std::string typed_data = next_register(container_name + "_in_typed_data");
+            emit_line(typed_data + " = bitcast i8* " + data_raw + " to " + elem_type + "*");
+            const std::string elem_ptr = next_register(container_name + "_in_elem_ptr");
+            emit_line(elem_ptr + " = getelementptr inbounds " + elem_type + ", " + elem_type + "* " +
+                      typed_data + ", i64 " + idx);
+            const std::string elem_val = next_register(container_name + "_in_elem");
+            emit_line(elem_val + " = load " + elem_type + ", " + elem_type + "* " + elem_ptr);
+            elem_value = elem_val;
+        }
+
+        const std::string is_eq = compare_with_item(elem_type, elem_value, item);
+        emit_line("br i1 " + is_eq + ", label %" + found_label + ", label %" + step_label);
+
+        emit_label(step_label);
+        const std::string next_idx = next_register("in_next");
+        emit_line(next_idx + " = add i64 " + idx + ", 1");
+        emit_line("store i64 " + next_idx + ", i64* " + idx_ptr);
+        emit_line("br label %" + cond_label);
+
+        emit_label(found_label);
+        emit_line("store i1 1, i1* " + result_ptr);
+        emit_line("br label %" + end_label);
+
+        emit_label(end_label);
+        const std::string result = next_register("in_result");
+        emit_line(result + " = load i1, i1* " + result_ptr);
+        return IRValue{"i1", result, true};
+    }
+
+    IRValue container = generate_expression(node.container);
+    if (container.type == "i8*" && item.type == "i8*") {
+        IRValue found = emit_call("i8*", "@strstr", {container, item});
+        return ensure_boolean(found);
+    }
+
+    return IRValue{"i1", "0", true};
+}
+
+CodeGenerator::IRValue CodeGenerator::emit_call(const std::string& return_type,
+                                                const std::string& callee,
+                                                const std::vector<IRValue>& args,
+                                                bool) {
+    std::vector<std::string> formatted_args;
+    formatted_args.reserve(args.size());
+    for (const auto& arg : args) {
+        formatted_args.push_back(arg.type + " " + arg.value);
+    }
+
+    if (return_type == "void") {
+        emit_line("call void " + callee + "(" + join_params(formatted_args) + ")");
+        return IRValue{"void", "", true};
+    }
+
+    const std::string reg = next_register("call");
+    emit_line(reg + " = call " + return_type + " " + callee + "(" + join_params(formatted_args) + ")");
+    return IRValue{return_type, reg, true};
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& node) {
+    auto emit_strlen_for_string = [this](const IRValue& value) -> IRValue {
+        if (value.type != "i8*") {
+            throw std::runtime_error("length() for strings expects i8* value");
+        }
+        IRValue len_i64 = emit_call("i64", "@strlen", {value});
+        const std::string len_i32 = next_register("strlen_i32");
+        emit_line(len_i32 + " = trunc i64 " + len_i64.value + " to i32");
+        return IRValue{"i32", len_i32, true};
+    };
+
+    auto emit_dynamic_array_length =
+        [this](const std::string& object_name, const VariableInfo* var) -> IRValue {
+            if (!var || !var->is_dynamic_array) {
+                throw std::runtime_error("Internal error: expected dynamic array variable");
+            }
+            const std::string header = next_register(object_name + "_hdr");
+            emit_line(header + " = load i8*, i8** " + var->ptr_value);
+            const std::string len_slot = next_register(object_name + "_len_slot");
+            emit_line(len_slot + " = bitcast i8* " + header + " to i64*");
+            const std::string len_i64 = next_register(object_name + "_len_i64");
+            emit_line(len_i64 + " = load i64, i64* " + len_slot);
+            const std::string len_i32 = next_register(object_name + "_len_i32");
+            emit_line(len_i32 + " = trunc i64 " + len_i64 + " to i32");
+            return IRValue{"i32", len_i32, true};
+        };
+
+    auto emit_dynamic_array_append =
+        [this](const std::string& object_name, const VariableInfo* var, ASTNode& value_node) -> IRValue {
+            if (!var || !var->is_dynamic_array) {
+                throw std::runtime_error("Internal error: expected dynamic array variable");
+            }
+
+            std::size_t elem_size = 8;
+            if (var->dynamic_array_elem_llvm_type == "i1") {
+                elem_size = 1;
+            } else if (var->dynamic_array_elem_llvm_type == "i32") {
+                elem_size = 4;
+            } else if (var->dynamic_array_elem_llvm_type == "double") {
+                elem_size = 8;
+            }
+
+            const std::string header = next_register(object_name + "_hdr");
+            emit_line(header + " = load i8*, i8** " + var->ptr_value);
+
+            const std::string len_slot = next_register(object_name + "_len_slot");
+            emit_line(len_slot + " = bitcast i8* " + header + " to i64*");
+            const std::string cap_slot = next_register(object_name + "_cap_slot");
+            emit_line(cap_slot + " = getelementptr inbounds i64, i64* " + len_slot + ", i64 1");
+            const std::string data_slot_raw = next_register(object_name + "_data_slot_raw");
+            emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 16");
+            const std::string data_slot = next_register(object_name + "_data_slot");
+            emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
+
+            const std::string len = next_register(object_name + "_len");
+            emit_line(len + " = load i64, i64* " + len_slot);
+            const std::string cap = next_register(object_name + "_cap");
+            emit_line(cap + " = load i64, i64* " + cap_slot);
+
+            const std::string need_grow = next_register(object_name + "_need_grow");
+            emit_line(need_grow + " = icmp eq i64 " + len + ", " + cap);
+
+            const std::string grow_label = next_label("arr_append_grow");
+            const std::string cont_label = next_label("arr_append_cont");
+            emit_line("br i1 " + need_grow + ", label %" + grow_label + ", label %" + cont_label);
+
+            emit_label(grow_label);
+            const std::string doubled_cap = next_register(object_name + "_doubled_cap");
+            emit_line(doubled_cap + " = mul i64 " + cap + ", 2");
+            const std::string cap_is_zero = next_register(object_name + "_cap_is_zero");
+            emit_line(cap_is_zero + " = icmp eq i64 " + doubled_cap + ", 0");
+            const std::string new_cap = next_register(object_name + "_new_cap");
+            emit_line(new_cap + " = select i1 " + cap_is_zero + ", i64 4, i64 " + doubled_cap);
+
+            const std::string old_data = next_register(object_name + "_old_data");
+            emit_line(old_data + " = load i8*, i8** " + data_slot);
+            const std::string new_bytes = next_register(object_name + "_new_bytes");
+            emit_line(new_bytes + " = mul i64 " + new_cap + ", " + std::to_string(elem_size));
+            const std::string new_data = next_register(object_name + "_new_data");
+            emit_line(new_data + " = call i8* @realloc(i8* " + old_data + ", i64 " + new_bytes + ")");
+            emit_line("store i8* " + new_data + ", i8** " + data_slot);
+            emit_line("store i64 " + new_cap + ", i64* " + cap_slot);
+            emit_line("br label %" + cont_label);
+
+            emit_label(cont_label);
+            const std::string len2 = next_register(object_name + "_len2");
+            emit_line(len2 + " = load i64, i64* " + len_slot);
+            const std::string data_raw = next_register(object_name + "_data_raw");
+            emit_line(data_raw + " = load i8*, i8** " + data_slot);
+            const std::string typed_data = next_register(object_name + "_typed_data");
+            emit_line(typed_data + " = bitcast i8* " + data_raw + " to " +
+                      var->dynamic_array_elem_llvm_type + "*");
+            const std::string elem_ptr = next_register(object_name + "_append_elem_ptr");
+            emit_line(elem_ptr + " = getelementptr inbounds " + var->dynamic_array_elem_llvm_type + ", " +
+                      var->dynamic_array_elem_llvm_type + "* " + typed_data + ", i64 " + len2);
+
+            IRValue value = cast_value(generate_expression(value_node), var->dynamic_array_elem_llvm_type);
+            emit_line("store " + var->dynamic_array_elem_llvm_type + " " + value.value + ", " +
+                      var->dynamic_array_elem_llvm_type + "* " + elem_ptr);
+
+            const std::string new_len = next_register(object_name + "_new_len");
+            emit_line(new_len + " = add i64 " + len2 + ", 1");
+            emit_line("store i64 " + new_len + ", i64* " + len_slot);
+
+            return IRValue{"void", "", true};
+        };
+
+    auto emit_dynamic_array_pop =
+        [this](const std::string& object_name, const VariableInfo* var) -> IRValue {
+            if (!var || !var->is_dynamic_array) {
+                throw std::runtime_error("Internal error: expected dynamic array variable");
+            }
+
+            const std::string header = next_register(object_name + "_hdr");
+            emit_line(header + " = load i8*, i8** " + var->ptr_value);
+            const std::string len_slot = next_register(object_name + "_len_slot");
+            emit_line(len_slot + " = bitcast i8* " + header + " to i64*");
+            const std::string len = next_register(object_name + "_len");
+            emit_line(len + " = load i64, i64* " + len_slot);
+
+            const std::string pop_tmp = next_register(object_name + "_pop_tmp");
+            emit_line(pop_tmp + " = alloca " + var->dynamic_array_elem_llvm_type);
+
+            std::string default_value = "0";
+            if (var->dynamic_array_elem_llvm_type == "double") {
+                default_value = "0.0";
+            } else if (is_pointer_type(var->dynamic_array_elem_llvm_type)) {
+                default_value = "null";
+            }
+            emit_line("store " + var->dynamic_array_elem_llvm_type + " " + default_value + ", " +
+                      var->dynamic_array_elem_llvm_type + "* " + pop_tmp);
+
+            const std::string is_empty = next_register(object_name + "_is_empty");
+            emit_line(is_empty + " = icmp eq i64 " + len + ", 0");
+            const std::string empty_label = next_label("arr_pop_empty");
+            const std::string value_label = next_label("arr_pop_value");
+            const std::string end_label = next_label("arr_pop_end");
+            emit_line("br i1 " + is_empty + ", label %" + empty_label + ", label %" + value_label);
+
+            emit_label(empty_label);
+            emit_line("br label %" + end_label);
+
+            emit_label(value_label);
+            const std::string new_len = next_register(object_name + "_new_len");
+            emit_line(new_len + " = sub i64 " + len + ", 1");
+            emit_line("store i64 " + new_len + ", i64* " + len_slot);
+
+            const std::string data_slot_raw = next_register(object_name + "_data_slot_raw");
+            emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 16");
+            const std::string data_slot = next_register(object_name + "_data_slot");
+            emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
+            const std::string data_raw = next_register(object_name + "_data_raw");
+            emit_line(data_raw + " = load i8*, i8** " + data_slot);
+            const std::string typed_data = next_register(object_name + "_typed_data");
+            emit_line(typed_data + " = bitcast i8* " + data_raw + " to " +
+                      var->dynamic_array_elem_llvm_type + "*");
+            const std::string elem_ptr = next_register(object_name + "_pop_elem_ptr");
+            emit_line(elem_ptr + " = getelementptr inbounds " + var->dynamic_array_elem_llvm_type + ", " +
+                      var->dynamic_array_elem_llvm_type + "* " + typed_data + ", i64 " + new_len);
+            const std::string elem_value = next_register(object_name + "_pop_elem_value");
+            emit_line(elem_value + " = load " + var->dynamic_array_elem_llvm_type + ", " +
+                      var->dynamic_array_elem_llvm_type + "* " + elem_ptr);
+            emit_line("store " + var->dynamic_array_elem_llvm_type + " " + elem_value + ", " +
+                      var->dynamic_array_elem_llvm_type + "* " + pop_tmp);
+            emit_line("br label %" + end_label);
+
+            emit_label(end_label);
+            const std::string pop_result = next_register(object_name + "_pop_result");
+            emit_line(pop_result + " = load " + var->dynamic_array_elem_llvm_type + ", " +
+                      var->dynamic_array_elem_llvm_type + "* " + pop_tmp);
+            return IRValue{var->dynamic_array_elem_llvm_type, pop_result, true};
+        };
+
+    if (node.callee && is_node<MemberExpression>(node.callee)) {
+        auto& member = get_node<MemberExpression>(node.callee);
+        const std::string method_name = member.property;
+        const VariableInfo* var = nullptr;
+        const CodegenClassFieldInfo* member_object_field = nullptr;
+        std::string object_name;
+        if (member.object && is_node<Identifier>(member.object)) {
+            object_name = get_node<Identifier>(member.object).name;
+            var = resolve_variable(object_name);
+        } else if (member.object && is_node<ThisExpression>(member.object)) {
+            object_name = "this";
+            var = resolve_variable("this");
+        } else if (member.object && is_node<MemberExpression>(member.object)) {
+            const auto& inner = get_node<MemberExpression>(member.object);
+            const VariableInfo* owner_var = nullptr;
+            if (inner.object && is_node<Identifier>(inner.object)) {
+                owner_var = resolve_variable(get_node<Identifier>(inner.object).name);
+            } else if (inner.object && is_node<ThisExpression>(inner.object)) {
+                owner_var = resolve_variable("this");
+            }
+            if (owner_var && !owner_var->class_name.empty()) {
+                const auto class_it = classes.find(owner_var->class_name);
+                if (class_it != classes.end()) {
+                    const auto field_it = class_it->second.fields.find(inner.property);
+                    if (field_it != class_it->second.fields.end()) {
+                        member_object_field = &field_it->second;
+                    }
+                }
+            }
+        }
+
+        if (method_name == "length") {
+            if (!node.arguments.empty()) {
+                throw std::runtime_error("length() method expects no arguments");
+            }
+
+            if (var && var->is_fixed_array) {
+                return IRValue{"i32", std::to_string(var->fixed_array_size), true};
+            }
+            if (var && var->is_dynamic_array) {
+                return emit_dynamic_array_length(object_name.empty() ? "arr" : object_name, var);
+            }
+            if (member_object_field && member_object_field->mt_type == "array") {
+                IRValue object_value = cast_value(generate_expression(member.object), "i8*");
+                const std::string tmp_ptr = next_register("member_obj_addr");
+                emit_line(tmp_ptr + " = alloca i8*");
+                emit_line("store i8* " + object_value.value + ", i8** " + tmp_ptr);
+                VariableInfo temp_var{"i8*", tmp_ptr, false, "", 0, true, "i8*", ""};
+                return emit_dynamic_array_length(object_name.empty() ? "arr" : object_name, &temp_var);
+            }
+
+            IRValue object_value = generate_expression(member.object);
+            if (object_value.type == "i8*") {
+                return emit_strlen_for_string(object_value);
+            }
+            throw std::runtime_error("Unsupported object type for .length()");
+        }
+
+        if (method_name == "append") {
+            if (node.arguments.size() != 1) {
+                throw std::runtime_error("append() expects exactly one argument");
+            }
+            if (!var || !var->is_dynamic_array) {
+                if (!(member_object_field && member_object_field->mt_type == "array")) {
+                    throw std::runtime_error("append() is only implemented for dynamic arrays");
+                }
+                IRValue object_value = cast_value(generate_expression(member.object), "i8*");
+                const std::string tmp_ptr = next_register("member_obj_addr");
+                emit_line(tmp_ptr + " = alloca i8*");
+                emit_line("store i8* " + object_value.value + ", i8** " + tmp_ptr);
+                VariableInfo temp_var{"i8*", tmp_ptr, false, "", 0, true, "i8*", ""};
+                return emit_dynamic_array_append(object_name.empty() ? "arr" : object_name, &temp_var,
+                                                 node.arguments[0]);
+            }
+            return emit_dynamic_array_append(object_name.empty() ? "arr" : object_name, var, node.arguments[0]);
+        }
+
+        if (method_name == "pop") {
+            if (!node.arguments.empty()) {
+                throw std::runtime_error("pop() expects no arguments");
+            }
+            if (!var || !var->is_dynamic_array) {
+                if (!(member_object_field && member_object_field->mt_type == "array")) {
+                    throw std::runtime_error("pop() is only implemented for dynamic arrays");
+                }
+                IRValue object_value = cast_value(generate_expression(member.object), "i8*");
+                const std::string tmp_ptr = next_register("member_obj_addr");
+                emit_line(tmp_ptr + " = alloca i8*");
+                emit_line("store i8* " + object_value.value + ", i8** " + tmp_ptr);
+                VariableInfo temp_var{"i8*", tmp_ptr, false, "", 0, true, "i8*", ""};
+                return emit_dynamic_array_pop(object_name.empty() ? "arr" : object_name, &temp_var);
+            }
+            return emit_dynamic_array_pop(object_name.empty() ? "arr" : object_name, var);
+        }
+
+        if (var && !var->class_name.empty()) {
+            const auto class_it = classes.find(var->class_name);
+            if (class_it == classes.end()) {
+                throw std::runtime_error("Unknown class '" + var->class_name + "'");
+            }
+            const auto method_it = class_it->second.methods.find(method_name);
+            if (method_it == class_it->second.methods.end()) {
+                throw std::runtime_error("Unknown method '" + method_name + "' for class '" +
+                                         var->class_name + "'");
+            }
+
+            const CodegenClassMethodInfo& method_info = method_it->second;
+            const std::size_t expected_params = method_info.parameters.size() > 0
+                ? method_info.parameters.size() - 1 : 0;
+
+            std::vector<ASTNode> arg_nodes;
+            arg_nodes.reserve(node.arguments.size());
+            for (const auto& arg : node.arguments) {
+                arg_nodes.push_back(clone_node(arg));
+            }
+            while (arg_nodes.size() < expected_params) {
+                const std::size_t param_index = arg_nodes.size() + 1;
+                if (param_index >= method_info.parameters.size() ||
+                    !method_info.parameters[param_index].default_value) {
+                    break;
+                }
+                arg_nodes.push_back(clone_node(method_info.parameters[param_index].default_value));
+            }
+            if (arg_nodes.size() != expected_params) {
+                throw std::runtime_error("Method '" + var->class_name + "." + method_name +
+                                         "' argument count mismatch");
+            }
+
+            std::vector<IRValue> args;
+            args.reserve(1 + arg_nodes.size());
+            IRValue self = generate_expression(member.object);
+            self = cast_value(self, "i8*");
+            args.push_back(self);
+
+            for (std::size_t i = 0; i < arg_nodes.size(); ++i) {
+                const auto& param = method_info.parameters[i + 1];
+                IRValue arg = cast_value(generate_expression(arg_nodes[i]), param.llvm_type);
+                args.push_back(std::move(arg));
+            }
+
+            return emit_call(method_info.return_type, "@" + method_info.mangled_name, args);
+        }
+
+        throw std::runtime_error("Unsupported member call '" + method_name + "'");
+    }
+
+    std::string callee_name;
+    if (node.callee && is_node<Identifier>(node.callee)) {
+        callee_name = get_node<Identifier>(node.callee).name;
+    } else if (node.callee && is_node<TypeLiteral>(node.callee)) {
+        callee_name = get_node<TypeLiteral>(node.callee).name;
+    } else {
+        throw std::runtime_error("Unsupported callee in call expression");
+    }
+
+    if (callee_name == "print") {
+        if (node.arguments.empty()) {
+            throw std::runtime_error("print() requires one argument");
+        }
+
+        IRValue arg = generate_expression(node.arguments[0]);
+        std::string fmt = "%d\n";
+
+        if (arg.type == "double") {
+            fmt = "%f\n";
+        } else if (arg.type == "i8*") {
+            fmt = "%s\n";
+        } else if (arg.type == "i1") {
+            arg = cast_value(arg, "i32");
+            fmt = "%d\n";
+        } else if (is_pointer_type(arg.type)) {
+            arg = cast_value(arg, "i8*");
+            fmt = "%s\n";
+        } else if (arg.type != "i32") {
+            arg = cast_value(arg, "i32");
+        }
+
+        StringConstantInfo format_const = get_or_create_string_constant(fmt);
+        IRValue fmt_arg{"i8*", string_constant_gep(format_const), true};
+        return emit_call("i32", "@printf", {fmt_arg, arg}, true);
+    }
+
+    if (callee_name == "str") {
+        if (node.arguments.size() != 1) {
+            throw std::runtime_error("str() takes exactly one argument");
+        }
+
+        IRValue arg = generate_expression(node.arguments[0]);
+        if (arg.type == "i8*") {
+            return arg;
+        }
+
+        IRValue size{"i64", "64", true};
+        IRValue buffer = emit_call("i8*", "@malloc", {size});
+        std::string fmt = "%d";
+
+        if (arg.type == "double") {
+            fmt = "%g";
+        } else if (arg.type == "i1") {
+            arg = cast_value(arg, "i32");
+        } else if (arg.type != "i32") {
+            arg = cast_value(arg, "i32");
+        }
+
+        StringConstantInfo fmt_const = get_or_create_string_constant(fmt);
+        IRValue fmt_ptr{"i8*", string_constant_gep(fmt_const), true};
+        (void)emit_call("i32", "@sprintf", {buffer, fmt_ptr, arg}, true);
+        return buffer;
+    }
+
+    if (callee_name == "int") {
+        if (node.arguments.size() != 1) {
+            throw std::runtime_error("int() takes exactly one argument");
+        }
+        IRValue arg = generate_expression(node.arguments[0]);
+        if (arg.type == "i32") {
+            return arg;
+        }
+        if (arg.type == "double") {
+            return cast_value(arg, "i32");
+        }
+        if (arg.type == "i1") {
+            return cast_value(arg, "i32");
+        }
+        if (arg.type == "i8*") {
+            const std::string end_ptr_addr = next_register("int_endptr_addr");
+            emit_line(end_ptr_addr + " = alloca i8*");
+            emit_line("store i8* null, i8** " + end_ptr_addr);
+
+            const std::string parsed_i64 = next_register("int_parsed_i64");
+            emit_line(parsed_i64 + " = call i64 @strtol(i8* " + arg.value + ", i8** " + end_ptr_addr +
+                      ", i32 10)");
+            const std::string end_ptr = next_register("int_endptr");
+            emit_line(end_ptr + " = load i8*, i8** " + end_ptr_addr);
+
+            const std::string consumed_any = next_register("int_consumed_any");
+            emit_line(consumed_any + " = icmp ne i8* " + end_ptr + ", " + arg.value);
+            const std::string end_char = next_register("int_end_char");
+            emit_line(end_char + " = load i8, i8* " + end_ptr);
+            const std::string ended_clean = next_register("int_ended_clean");
+            emit_line(ended_clean + " = icmp eq i8 " + end_char + ", 0");
+            const std::string is_valid = next_register("int_is_valid");
+            emit_line(is_valid + " = and i1 " + consumed_any + ", " + ended_clean);
+
+            const std::string valid_label = next_label("int_valid");
+            const std::string invalid_label = next_label("int_invalid");
+            const std::string merge_label = next_label("int_merge");
+            emit_line("br i1 " + is_valid + ", label %" + valid_label + ", label %" + invalid_label);
+
+            emit_label(valid_label);
+            const std::string parsed_i32 = next_register("int_parsed_i32");
+            emit_line(parsed_i32 + " = trunc i64 " + parsed_i64 + " to i32");
+            emit_line("br label %" + merge_label);
+
+            emit_label(invalid_label);
+            emit_line("store i8* null, i8** @__mt_exc_obj");
+            emit_line("store i32 " + std::to_string(class_tag_for_name("ValueError")) +
+                      ", i32* @__mt_exc_tag");
+
+            const std::string jmp_ptr = next_register("int_throw_jmp_ptr");
+            emit_line(jmp_ptr + " = load i8*, i8** @__mt_exc_jmp");
+            const std::string has_jmp = next_register("int_throw_has_jmp");
+            emit_line(has_jmp + " = icmp ne i8* " + jmp_ptr + ", null");
+            const std::string longjmp_label = next_label("int_throw_longjmp");
+            const std::string exit_label = next_label("int_throw_exit");
+            emit_line("br i1 " + has_jmp + ", label %" + longjmp_label + ", label %" + exit_label);
+
+            emit_label(longjmp_label);
+            emit_line("call void @longjmp(i8* " + jmp_ptr + ", i32 1)");
+            emit_line("unreachable");
+
+            emit_label(exit_label);
+            StringConstantInfo msg = get_or_create_string_constant("Invalid int conversion\n");
+            IRValue msg_arg{"i8*", string_constant_gep(msg), true};
+            (void)emit_call("i32", "@printf", {msg_arg}, true);
+            emit_line("call void @exit(i32 1)");
+            emit_line("unreachable");
+
+            emit_label(merge_label);
+            return IRValue{"i32", parsed_i32, true};
+        }
+        return cast_value(arg, "i32");
+    }
+
+    if (callee_name == "float") {
+        if (node.arguments.size() != 1) {
+            throw std::runtime_error("float() takes exactly one argument");
+        }
+        IRValue arg = generate_expression(node.arguments[0]);
+        if (arg.type == "double") {
+            return arg;
+        }
+        if (arg.type == "i32" || arg.type == "i1") {
+            return cast_value(arg, "double");
+        }
+        if (arg.type == "i8*") {
+            return emit_call("double", "@atof", {arg});
+        }
+        return cast_value(arg, "double");
+    }
+
+    if (callee_name == "read") {
+        if (node.arguments.size() > 1) {
+            throw std::runtime_error("read() takes 0 or 1 arguments");
+        }
+
+        if (node.arguments.size() == 1) {
+            IRValue prompt = generate_expression(node.arguments[0]);
+            std::string fmt = "%s";
+            if (prompt.type == "double") {
+                fmt = "%f";
+            } else if (prompt.type == "i32" || prompt.type == "i1") {
+                prompt = cast_value(prompt, "i32");
+                fmt = "%d";
+            } else {
+                prompt = cast_value(prompt, "i8*");
+            }
+
+            StringConstantInfo fmt_const = get_or_create_string_constant(fmt);
+            IRValue fmt_ptr{"i8*", string_constant_gep(fmt_const), true};
+            (void)emit_call("i32", "@printf", {fmt_ptr, prompt}, true);
+        }
+
+        IRValue buffer_size{"i64", "1024", true};
+        IRValue buffer = emit_call("i8*", "@malloc", {buffer_size});
+
+        const std::string stdin_stream = next_register("stdin_stream");
+        emit_line(stdin_stream + " = load i8*, i8** @stdin");
+        IRValue stdin_arg{"i8*", stdin_stream, true};
+        IRValue fgets_size{"i32", "1024", true};
+        (void)emit_call("i8*", "@fgets", {buffer, fgets_size, stdin_arg});
+
+        IRValue len = emit_call("i64", "@strlen", {buffer});
+        const std::string has_chars = next_register("read_has_chars");
+        emit_line(has_chars + " = icmp sgt i64 " + len.value + ", 0");
+
+        const std::string check_label = next_label("read_check_nl");
+        const std::string strip_label = next_label("read_strip_nl");
+        const std::string keep_label = next_label("read_keep_nl");
+        const std::string done_label = next_label("read_done");
+
+        emit_line("br i1 " + has_chars + ", label %" + check_label + ", label %" + done_label);
+
+        emit_label(check_label);
+        const std::string last_idx = next_register("read_last_idx");
+        emit_line(last_idx + " = sub i64 " + len.value + ", 1");
+        const std::string nl_ptr = next_register("read_nl_ptr");
+        emit_line(nl_ptr + " = getelementptr inbounds i8, i8* " + buffer.value + ", i64 " + last_idx);
+        const std::string last_char = next_register("read_last_char");
+        emit_line(last_char + " = load i8, i8* " + nl_ptr);
+        const std::string is_newline = next_register("read_is_newline");
+        emit_line(is_newline + " = icmp eq i8 " + last_char + ", 10");
+        emit_line("br i1 " + is_newline + ", label %" + strip_label + ", label %" + keep_label);
+
+        emit_label(strip_label);
+        emit_line("store i8 0, i8* " + nl_ptr);
+        emit_line("br label %" + done_label);
+
+        emit_label(keep_label);
+        emit_line("br label %" + done_label);
+
+        emit_label(done_label);
+        return buffer;
+    }
+
+    if (callee_name == "split") {
+        if (node.arguments.size() != 2) {
+            throw std::runtime_error("split() expects exactly two arguments");
+        }
+
+        IRValue text = cast_value(generate_expression(node.arguments[0]), "i8*");
+        (void)cast_value(generate_expression(node.arguments[1]), "i8*");
+
+        const std::string header_raw = next_register("split_arr_hdr_raw");
+        emit_line(header_raw + " = call i8* @malloc(i64 24)");
+
+        const std::string len_slot = next_register("split_arr_len_slot");
+        emit_line(len_slot + " = bitcast i8* " + header_raw + " to i64*");
+        emit_line("store i64 1, i64* " + len_slot);
+
+        const std::string cap_slot = next_register("split_arr_cap_slot");
+        emit_line(cap_slot + " = getelementptr inbounds i64, i64* " + len_slot + ", i64 1");
+        emit_line("store i64 1, i64* " + cap_slot);
+
+        const std::string data_slot_raw = next_register("split_arr_data_slot_raw");
+        emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + header_raw + ", i64 16");
+        const std::string data_slot = next_register("split_arr_data_slot");
+        emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
+
+        const std::string data_raw = next_register("split_arr_data_raw");
+        emit_line(data_raw + " = call i8* @malloc(i64 8)");
+        emit_line("store i8* " + data_raw + ", i8** " + data_slot);
+
+        const std::string typed_data = next_register("split_arr_typed_data");
+        emit_line(typed_data + " = bitcast i8* " + data_raw + " to i8**");
+        emit_line("store i8* " + text.value + ", i8** " + typed_data);
+        return IRValue{"i8*", header_raw, true};
+    }
+
+    if (callee_name == "length") {
+        if (node.arguments.size() != 1) {
+            throw std::runtime_error("length() expects exactly one argument");
+        }
+
+        if (node.arguments[0] && is_node<Identifier>(node.arguments[0])) {
+            const std::string object_name = get_node<Identifier>(node.arguments[0]).name;
+            const VariableInfo* var = resolve_variable(object_name);
+            if (var && var->is_fixed_array) {
+                return IRValue{"i32", std::to_string(var->fixed_array_size), true};
+            }
+            if (var && var->is_dynamic_array) {
+                return emit_dynamic_array_length(object_name, var);
+            }
+        }
+
+        IRValue arg = generate_expression(node.arguments[0]);
+        if (arg.type == "i8*") {
+            return emit_strlen_for_string(arg);
+        }
+        throw std::runtime_error("length() supports strings and arrays");
+    }
+
+    if (callee_name == "append") {
+        if (node.arguments.size() != 2) {
+            throw std::runtime_error("append() expects exactly two arguments");
+        }
+        if (!(node.arguments[0] && is_node<Identifier>(node.arguments[0]))) {
+            throw std::runtime_error("append() expects identifier as first argument");
+        }
+        const std::string object_name = get_node<Identifier>(node.arguments[0]).name;
+        const VariableInfo* var = resolve_variable(object_name);
+        if (!var || !var->is_dynamic_array) {
+            throw std::runtime_error("append() first argument must be a dynamic array");
+        }
+        return emit_dynamic_array_append(object_name, var, node.arguments[1]);
+    }
+
+    if (callee_name == "pop") {
+        if (node.arguments.size() != 1) {
+            throw std::runtime_error("pop() expects exactly one argument");
+        }
+        if (!(node.arguments[0] && is_node<Identifier>(node.arguments[0]))) {
+            throw std::runtime_error("pop() expects identifier as argument");
+        }
+        const std::string object_name = get_node<Identifier>(node.arguments[0]).name;
+        const VariableInfo* var = resolve_variable(object_name);
+        if (!var || !var->is_dynamic_array) {
+            throw std::runtime_error("pop() argument must be a dynamic array");
+        }
+        return emit_dynamic_array_pop(object_name, var);
+    }
+
+    const auto function_it = functions.find(callee_name);
+    if (function_it == functions.end()) {
+        throw std::runtime_error("Unknown function '" + callee_name + "' in codegen");
+    }
+
+    const CodegenFunctionInfo& info = function_it->second;
+
+    std::vector<ASTNode> arg_nodes;
+    arg_nodes.reserve(node.arguments.size());
+    for (const auto& arg : node.arguments) {
+        arg_nodes.push_back(clone_node(arg));
+    }
+
+    if (!info.is_var_arg) {
+        while (arg_nodes.size() < info.parameters.size() &&
+               info.parameters[arg_nodes.size()].default_value) {
+            arg_nodes.push_back(clone_node(info.parameters[arg_nodes.size()].default_value));
+        }
+
+        if (arg_nodes.size() != info.parameters.size()) {
+            throw std::runtime_error("Function '" + callee_name + "' argument count mismatch during codegen");
+        }
+    } else if (arg_nodes.size() < info.parameters.size()) {
+        throw std::runtime_error("Function '" + callee_name + "' requires at least " +
+                                 std::to_string(info.parameters.size()) + " arguments");
+    }
+
+    std::vector<IRValue> args;
+    args.reserve(arg_nodes.size());
+    for (std::size_t i = 0; i < arg_nodes.size(); ++i) {
+        IRValue arg_value = generate_expression(arg_nodes[i]);
+        if (i < info.parameters.size()) {
+            arg_value = cast_value(arg_value, info.parameters[i].llvm_type);
+        } else if (arg_value.type == "i1") {
+            arg_value = cast_value(arg_value, "i32");
+        }
+        args.push_back(std::move(arg_value));
+    }
+
+    return emit_call(info.return_type, "@" + callee_name, args);
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_typeof_expression(TypeofExpression& node) {
+    IRValue arg = generate_expression(node.argument);
+    StringConstantInfo info = get_or_create_string_constant(infer_type_name(arg));
+    return IRValue{"i8*", string_constant_gep(info), true};
+}
+
+CodeGenerator::IRValue CodeGenerator::generate_hasattr_expression(HasattrExpression& node) {
+    (void)node;
+    return IRValue{"i1", node.compile_time_result ? "1" : "0", true};
+}
+
+void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
+    if (node.type == "array" &&
+        node.fixed_size <= 0 &&
+        node.value &&
+        is_node<ArrayLiteral>(node.value) &&
+        current_function_name != "main" &&
+        is_top_level_variable_name(node.name)) {
+        auto& literal = get_node<ArrayLiteral>(node.value);
+        if (!literal.elements.empty()) {
+            std::string element_type = node.element_type;
+            if (element_type.empty()) {
+                ASTNode& first = literal.elements[0];
+                if (is_node<NumberLiteral>(first)) {
+                    element_type = "int";
+                } else if (is_node<FloatLiteral>(first)) {
+                    element_type = "float";
+                } else if (is_node<StringLiteral>(first)) {
+                    element_type = "string";
+                } else if (is_node<BoolLiteral>(first)) {
+                    element_type = "bool";
+                } else {
+                    element_type = "any";
+                }
+            }
+
+            const std::string elem_llvm_type = map_type_to_llvm(element_type);
+            if (elem_llvm_type != "void") {
+                const int fixed_size = static_cast<int>(literal.elements.size());
+                const std::string array_type = "[" + std::to_string(fixed_size) + " x " +
+                                               elem_llvm_type + "]";
+                const std::string ptr = next_register(node.name + "_addr");
+                emit_line(ptr + " = alloca " + array_type);
+                emit_line("store " + array_type + " zeroinitializer, " + array_type + "* " + ptr);
+                declare_variable(node.name, VariableInfo{
+                    array_type,
+                    ptr,
+                    true,
+                    elem_llvm_type,
+                    fixed_size,
+                    false,
+                    "",
+                    "",
+                });
+
+                for (std::size_t i = 0; i < literal.elements.size(); ++i) {
+                    IRValue element_value = cast_value(generate_expression(literal.elements[i]), elem_llvm_type);
+                    const std::string elem_ptr = next_register(node.name + "_elem_ptr");
+                    emit_line(elem_ptr + " = getelementptr inbounds " + array_type + ", " +
+                              array_type + "* " + ptr + ", i64 0, i64 " + std::to_string(i));
+                    emit_line("store " + elem_llvm_type + " " + element_value.value + ", " +
+                              elem_llvm_type + "* " + elem_ptr);
+                }
+                return;
+            }
+        }
+    }
+
+    if (node.type == "array" && node.fixed_size > 0) {
+        if (node.element_type.empty()) {
+            throw std::runtime_error("Fixed-size array declaration requires an element type");
+        }
+
+        const std::string elem_llvm_type = map_type_to_llvm(node.element_type);
+        if (elem_llvm_type == "void") {
+            throw std::runtime_error("Fixed-size array element type cannot be void");
+        }
+
+        const std::string array_type = "[" + std::to_string(node.fixed_size) + " x " +
+                                       elem_llvm_type + "]";
+        const std::string ptr = next_register(node.name + "_addr");
+        emit_line(ptr + " = alloca " + array_type);
+        emit_line("store " + array_type + " zeroinitializer, " + array_type + "* " + ptr);
+        declare_variable(node.name, VariableInfo{
+            array_type,
+            ptr,
+            true,
+            elem_llvm_type,
+            node.fixed_size,
+            false,
+            "",
+            "",
+        });
+
+        if (node.value) {
+            if (!is_node<ArrayLiteral>(node.value)) {
+                throw std::runtime_error(
+                    "Fixed-size arrays must be initialized with an array literal");
+            }
+
+            auto& literal = get_node<ArrayLiteral>(node.value);
+            if (literal.elements.size() > static_cast<std::size_t>(node.fixed_size)) {
+                throw std::runtime_error("Array initializer has more elements than fixed size");
+            }
+
+            for (std::size_t i = 0; i < literal.elements.size(); ++i) {
+                IRValue element_value = cast_value(generate_expression(literal.elements[i]), elem_llvm_type);
+                const std::string elem_ptr = next_register(node.name + "_elem_ptr");
+                emit_line(elem_ptr + " = getelementptr inbounds " + array_type + ", " +
+                          array_type + "* " + ptr + ", i64 0, i64 " + std::to_string(i));
+                emit_line("store " + elem_llvm_type + " " + element_value.value + ", " +
+                          elem_llvm_type + "* " + elem_ptr);
+            }
+        }
+
+        return;
+    }
+
+    if (node.type == "array") {
+        if (node.value && !is_node<ArrayLiteral>(node.value)) {
+            IRValue existing = cast_value(generate_expression(node.value), "i8*");
+            std::string inferred_element_type = node.element_type;
+            if (inferred_element_type.empty()) {
+                if (is_node<CallExpression>(node.value)) {
+                    const auto& call = get_node<CallExpression>(node.value);
+                    if (call.callee && is_node<Identifier>(call.callee) &&
+                        get_node<Identifier>(call.callee).name == "split") {
+                        inferred_element_type = "string";
+                    }
+                }
+            }
+            if (inferred_element_type.empty()) {
+                inferred_element_type = "any";
+            }
+
+            const std::string ptr = next_register(node.name + "_addr");
+            emit_line(ptr + " = alloca i8*");
+            emit_line("store i8* " + existing.value + ", i8** " + ptr);
+            declare_variable(node.name, VariableInfo{
+                "i8*",
+                ptr,
+                false,
+                "",
+                0,
+                true,
+                map_type_to_llvm(inferred_element_type),
+                "",
+            });
+            return;
+        }
+
+        std::string element_type = node.element_type;
+        std::size_t initial_len = 0;
+
+        if (node.value) {
+            auto& literal = get_node<ArrayLiteral>(node.value);
+            initial_len = literal.elements.size();
+
+            if (element_type.empty() && !literal.elements.empty()) {
+                ASTNode& first = literal.elements[0];
+                if (is_node<NumberLiteral>(first)) {
+                    element_type = "int";
+                } else if (is_node<FloatLiteral>(first)) {
+                    element_type = "float";
+                } else if (is_node<StringLiteral>(first)) {
+                    element_type = "string";
+                } else if (is_node<BoolLiteral>(first)) {
+                    element_type = "bool";
+                } else {
+                    element_type = "any";
+                }
+            }
+        }
+
+        if (element_type.empty()) {
+            element_type = "int";
+        }
+
+        const std::string elem_llvm_type = map_type_to_llvm(element_type);
+        if (elem_llvm_type == "void") {
+            throw std::runtime_error("Dynamic array element type cannot be void");
+        }
+
+        std::size_t elem_size = 8;
+        if (elem_llvm_type == "i1") {
+            elem_size = 1;
+        } else if (elem_llvm_type == "i32") {
+            elem_size = 4;
+        } else if (elem_llvm_type == "double") {
+            elem_size = 8;
+        } else if (is_pointer_type(elem_llvm_type)) {
+            elem_size = 8;
+        }
+
+        const std::size_t capacity = std::max<std::size_t>(4, initial_len);
+        const std::size_t total_bytes = capacity * elem_size;
+
+        const std::string header_raw = next_register(node.name + "_arr_hdr_raw");
+        emit_line(header_raw + " = call i8* @malloc(i64 24)");
+
+        const std::string len_slot = next_register(node.name + "_arr_len_slot");
+        emit_line(len_slot + " = bitcast i8* " + header_raw + " to i64*");
+        emit_line("store i64 " + std::to_string(initial_len) + ", i64* " + len_slot);
+
+        const std::string cap_slot = next_register(node.name + "_arr_cap_slot");
+        emit_line(cap_slot + " = getelementptr inbounds i64, i64* " + len_slot + ", i64 1");
+        emit_line("store i64 " + std::to_string(capacity) + ", i64* " + cap_slot);
+
+        const std::string data_slot_raw = next_register(node.name + "_arr_data_slot_raw");
+        emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + header_raw + ", i64 16");
+        const std::string data_slot = next_register(node.name + "_arr_data_slot");
+        emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
+
+        const std::string data_raw = next_register(node.name + "_arr_data_raw");
+        emit_line(data_raw + " = call i8* @malloc(i64 " + std::to_string(total_bytes) + ")");
+        emit_line("store i8* " + data_raw + ", i8** " + data_slot);
+
+        const std::string ptr = next_register(node.name + "_addr");
+        emit_line(ptr + " = alloca i8*");
+        emit_line("store i8* " + header_raw + ", i8** " + ptr);
+        declare_variable(node.name, VariableInfo{
+            "i8*",
+            ptr,
+            false,
+            "",
+            0,
+            true,
+            elem_llvm_type,
+            "",
+        });
+
+        if (node.value) {
+            auto& literal = get_node<ArrayLiteral>(node.value);
+            const std::string typed_data = next_register(node.name + "_arr_typed_data");
+            emit_line(typed_data + " = bitcast i8* " + data_raw + " to " + elem_llvm_type + "*");
+
+            for (std::size_t i = 0; i < literal.elements.size(); ++i) {
+                IRValue element_value = cast_value(generate_expression(literal.elements[i]), elem_llvm_type);
+                const std::string elem_ptr = next_register(node.name + "_arr_elem_ptr");
+                emit_line(elem_ptr + " = getelementptr inbounds " + elem_llvm_type + ", " +
+                          elem_llvm_type + "* " + typed_data + ", i64 " + std::to_string(i));
+                emit_line("store " + elem_llvm_type + " " + element_value.value + ", " +
+                          elem_llvm_type + "* " + elem_ptr);
+            }
+        }
+
+        return;
+    }
+
+    const std::string llvm_type = map_type_to_llvm(node.type);
+    if (llvm_type == "void") {
+        throw std::runtime_error("Cannot declare variable of type void");
+    }
+
+    const std::string ptr = next_register(node.name + "_addr");
+    emit_line(ptr + " = alloca " + llvm_type);
+    const std::string class_name = (!is_builtin_mt_type(node.type) && classes.find(node.type) != classes.end())
+        ? node.type : "";
+    declare_variable(node.name, VariableInfo{
+        llvm_type, ptr, false, "", 0, false, "", class_name});
+
+    IRValue init;
+    if (node.value) {
+        init = generate_expression(node.value);
+        init = cast_value(init, llvm_type);
+    } else {
+        if (llvm_type == "i1") {
+            init = IRValue{"i1", "0", true};
+        } else if (llvm_type == "double") {
+            init = IRValue{"double", "0.0", true};
+        } else if (is_pointer_type(llvm_type)) {
+            init = IRValue{llvm_type, "null", true};
+        } else {
+            init = IRValue{llvm_type, "0", true};
+        }
+    }
+
+    emit_line("store " + llvm_type + " " + init.value + ", " + llvm_type + "* " + ptr);
+}
+
+void CodeGenerator::generate_set_statement(SetStatement& node) {
+    if (node.target && is_node<Identifier>(node.target)) {
+        const std::string name = get_node<Identifier>(node.target).name;
+        const VariableInfo* var = resolve_variable(name);
+        if (!var) {
+            throw std::runtime_error("Assignment to undeclared variable '" + name + "'");
+        }
+        if (var->is_fixed_array) {
+            throw std::runtime_error(
+                "Cannot assign to fixed-size array '" + name +
+                "' directly; assign through an index (set " + name + "[i] = ...)");
+        }
+
+        IRValue value = generate_expression(node.value);
+        value = cast_value(value, var->llvm_type);
+        emit_line("store " + var->llvm_type + " " + value.value + ", " +
+                  var->llvm_type + "* " + var->ptr_value);
+        return;
+    }
+
+    if (node.target && is_node<IndexExpression>(node.target)) {
+        auto& index_expr = get_node<IndexExpression>(node.target);
+        if (!index_expr.object || !is_node<Identifier>(index_expr.object)) {
+            throw std::runtime_error(
+                "Indexed assignment is only supported on array identifiers");
+        }
+
+        const std::string object_name = get_node<Identifier>(index_expr.object).name;
+        const VariableInfo* var = resolve_variable(object_name);
+        if (!var) {
+            throw std::runtime_error("Assignment to undeclared variable '" + object_name + "'");
+        }
+        IRValue raw_index = generate_expression(index_expr.index);
+
+        if (var->is_fixed_array) {
+            IRValue index = cast_value(raw_index, "i64");
+            const std::string array_type = "[" + std::to_string(var->fixed_array_size) + " x " +
+                                           var->fixed_array_elem_llvm_type + "]";
+            const std::string elem_ptr = next_register(object_name + "_elem_ptr");
+            emit_line(elem_ptr + " = getelementptr inbounds " + array_type + ", " +
+                      array_type + "* " + var->ptr_value + ", i64 0, i64 " + index.value);
+
+            IRValue value = cast_value(generate_expression(node.value), var->fixed_array_elem_llvm_type);
+            emit_line("store " + var->fixed_array_elem_llvm_type + " " + value.value + ", " +
+                      var->fixed_array_elem_llvm_type + "* " + elem_ptr);
+            return;
+        }
+
+        if (var->is_dynamic_array) {
+            IRValue index = cast_value(raw_index, "i64");
+            const std::string header = next_register(object_name + "_hdr");
+            emit_line(header + " = load i8*, i8** " + var->ptr_value);
+
+            const std::string data_slot_raw = next_register(object_name + "_data_slot_raw");
+            emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 16");
+            const std::string data_slot = next_register(object_name + "_data_slot");
+            emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
+            const std::string data_raw = next_register(object_name + "_data_raw");
+            emit_line(data_raw + " = load i8*, i8** " + data_slot);
+
+            const std::string typed_data = next_register(object_name + "_typed_data");
+            emit_line(typed_data + " = bitcast i8* " + data_raw + " to " +
+                      var->dynamic_array_elem_llvm_type + "*");
+            const std::string elem_ptr = next_register(object_name + "_elem_ptr");
+            emit_line(elem_ptr + " = getelementptr inbounds " + var->dynamic_array_elem_llvm_type +
+                      ", " + var->dynamic_array_elem_llvm_type + "* " + typed_data + ", i64 " +
+                      index.value);
+
+            IRValue value = cast_value(generate_expression(node.value), var->dynamic_array_elem_llvm_type);
+            emit_line("store " + var->dynamic_array_elem_llvm_type + " " + value.value + ", " +
+                      var->dynamic_array_elem_llvm_type + "* " + elem_ptr);
+            return;
+        }
+
+        if (var->llvm_type == "i8*" && raw_index.type == "i8*") {
+            // Dict set placeholder for bootstrap parity: mutate is currently ignored.
+            (void)generate_expression(node.value);
+            return;
+        }
+
+        throw std::runtime_error("Indexed assignment is only supported for fixed-size or dynamic arrays");
+    }
+
+    if (node.target && is_node<MemberExpression>(node.target)) {
+        auto& member = get_node<MemberExpression>(node.target);
+        const VariableInfo* obj_var = nullptr;
+        std::string object_name;
+        if (member.object && is_node<Identifier>(member.object)) {
+            object_name = get_node<Identifier>(member.object).name;
+            obj_var = resolve_variable(object_name);
+        } else if (member.object && is_node<ThisExpression>(member.object)) {
+            object_name = "this";
+            obj_var = resolve_variable("this");
+        }
+        if (!obj_var || obj_var->class_name.empty()) {
+            throw std::runtime_error("Field assignment requires class object identifier or this");
+        }
+
+        const auto class_it = classes.find(obj_var->class_name);
+        if (class_it == classes.end()) {
+            throw std::runtime_error("Unknown class type '" + obj_var->class_name + "'");
+        }
+        const auto field_it = class_it->second.fields.find(member.property);
+        if (field_it == class_it->second.fields.end()) {
+            throw std::runtime_error("Unknown field '" + member.property + "' for class '" +
+                                     obj_var->class_name + "'");
+        }
+
+        const std::string obj_ptr = next_register(object_name + "_obj");
+        emit_line(obj_ptr + " = load i8*, i8** " + obj_var->ptr_value);
+        const std::string field_raw = next_register(object_name + "_field_raw");
+        emit_line(field_raw + " = getelementptr inbounds i8, i8* " + obj_ptr + ", i64 " +
+                  std::to_string(field_it->second.offset));
+        const std::string field_ptr = next_register(object_name + "_field_ptr");
+        emit_line(field_ptr + " = bitcast i8* " + field_raw + " to " + field_it->second.llvm_type + "*");
+        IRValue value = cast_value(generate_expression(node.value), field_it->second.llvm_type);
+        emit_line("store " + field_it->second.llvm_type + " " + value.value + ", " +
+                  field_it->second.llvm_type + "* " + field_ptr);
+        return;
+    }
+
+    throw std::runtime_error("Unsupported assignment target in codegen");
+}
+
+void CodeGenerator::generate_expression_statement(ExpressionStatement& node) {
+    (void)generate_expression(node.expression);
+}
+
+void CodeGenerator::emit_restore_try_contexts_for_return() {
+    if (try_contexts.empty()) {
+        return;
+    }
+
+    const std::string restore_prev = next_register("ret_restore_prev_jmp");
+    emit_line(restore_prev + " = load i8*, i8** " + try_contexts.front().saved_prev_jmp_addr);
+    emit_line("store i8* " + restore_prev + ", i8** @__mt_exc_jmp");
+}
+
+void CodeGenerator::generate_return_statement(ReturnStatement& node) {
+    emit_restore_try_contexts_for_return();
+
+    if (current_return_type == "void") {
+        emit_line("ret void");
+        return;
+    }
+
+    if (!node.value) {
+        if (current_return_type == "i1") {
+            emit_line("ret i1 0");
+        } else if (current_return_type == "double") {
+            emit_line("ret double 0.0");
+        } else if (is_pointer_type(current_return_type)) {
+            emit_line("ret " + current_return_type + " null");
+        } else {
+            emit_line("ret " + current_return_type + " 0");
+        }
+        return;
+    }
+
+    IRValue value = cast_value(generate_expression(node.value), current_return_type);
+    emit_line("ret " + current_return_type + " " + value.value);
+}
+
+void CodeGenerator::generate_block(Block& node) {
+    push_scope();
+    for (auto& statement : node.statements) {
+        if (current_block_terminated) {
+            break;
+        }
+        generate_statement(statement);
+    }
+    pop_scope();
+}
+
+void CodeGenerator::generate_if_statement(IfStatement& node) {
+    IRValue cond = ensure_boolean(generate_expression(node.condition));
+
+    const std::string then_label = next_label("if_then");
+    const std::string else_label = next_label("if_else");
+    const std::string end_label = next_label("if_end");
+
+    emit_line("br i1 " + cond.value + ", label %" + then_label + ", label %" + else_label);
+
+    emit_label(then_label);
+    if (node.then_body && is_node<Block>(node.then_body)) {
+        generate_block(get_node<Block>(node.then_body));
+    }
+    const bool then_terminated = current_block_terminated;
+    if (!then_terminated) {
+        emit_line("br label %" + end_label);
+    }
+
+    emit_label(else_label);
+    if (node.else_body && is_node<Block>(node.else_body)) {
+        generate_block(get_node<Block>(node.else_body));
+    }
+    const bool else_terminated = current_block_terminated;
+    if (!else_terminated) {
+        emit_line("br label %" + end_label);
+    }
+
+    emit_label(end_label);
+}
+
+void CodeGenerator::generate_while_statement(WhileStatement& node) {
+    const std::string cond_label = next_label("while_cond");
+    const std::string body_label = next_label("while_body");
+    const std::string end_label = next_label("while_end");
+
+    emit_line("br label %" + cond_label);
+
+    emit_label(cond_label);
+    IRValue cond = ensure_boolean(generate_expression(node.condition));
+    emit_line("br i1 " + cond.value + ", label %" + body_label + ", label %" + end_label);
+
+    emit_label(body_label);
+    break_labels.push_back(end_label);
+    if (node.then_body && is_node<Block>(node.then_body)) {
+        generate_block(get_node<Block>(node.then_body));
+    }
+    break_labels.pop_back();
+
+    if (!current_block_terminated) {
+        emit_line("br label %" + cond_label);
+    }
+
+    emit_label(end_label);
+}
+
+void CodeGenerator::generate_break_statement(BreakStatement&) {
+    if (break_labels.empty()) {
+        throw std::runtime_error("break used outside of loop in codegen");
+    }
+    emit_line("br label %" + break_labels.back());
+}
+
+std::string CodeGenerator::infer_class_name_from_ast(ASTNode& node) {
+    if (!node) {
+        return "";
+    }
+
+    if (is_node<NewExpression>(node)) {
+        return get_node<NewExpression>(node).class_name;
+    }
+
+    if (is_node<Identifier>(node)) {
+        const std::string name = get_node<Identifier>(node).name;
+        const VariableInfo* var = lookup_variable(name);
+        if (var && !var->class_name.empty()) {
+            return var->class_name;
+        }
+        return "";
+    }
+
+    if (is_node<ThisExpression>(node)) {
+        const VariableInfo* var = lookup_variable("this");
+        if (var && !var->class_name.empty()) {
+            return var->class_name;
+        }
+        return "";
+    }
+
+    if (is_node<MemberExpression>(node)) {
+        auto& member = get_node<MemberExpression>(node);
+        const VariableInfo* owner_var = nullptr;
+        if (member.object && is_node<Identifier>(member.object)) {
+            owner_var = lookup_variable(get_node<Identifier>(member.object).name);
+        } else if (member.object && is_node<ThisExpression>(member.object)) {
+            owner_var = lookup_variable("this");
+        }
+        if (!owner_var || owner_var->class_name.empty()) {
+            return "";
+        }
+
+        const auto class_it = classes.find(owner_var->class_name);
+        if (class_it == classes.end()) {
+            return "";
+        }
+        const auto field_it = class_it->second.fields.find(member.property);
+        if (field_it == class_it->second.fields.end()) {
+            return "";
+        }
+        if (classes.find(field_it->second.mt_type) != classes.end()) {
+            return field_it->second.mt_type;
+        }
+    }
+
+    return "";
+}
+
+bool CodeGenerator::class_is_a(const std::string& derived_class, const std::string& base_class) const {
+    if (derived_class.empty() || base_class.empty()) {
+        return false;
+    }
+    if (derived_class == base_class) {
+        return true;
+    }
+
+    auto current_it = classes.find(derived_class);
+    while (current_it != classes.end()) {
+        const std::string parent = current_it->second.parent_class;
+        if (parent.empty()) {
+            return false;
+        }
+        if (parent == base_class) {
+            return true;
+        }
+        current_it = classes.find(parent);
+    }
+
+    return false;
+}
+
+int CodeGenerator::class_tag_for_name(const std::string& class_name) const {
+    if (class_name.empty()) {
+        return 0;
+    }
+    const auto it = class_type_tags.find(class_name);
+    if (it == class_type_tags.end()) {
+        return 0;
+    }
+    return it->second;
+}
+
+CodeGenerator::IRValue CodeGenerator::cast_value(const IRValue& value, const std::string& target_type) {
+    if (!value.is_valid) {
+        return value;
+    }
+    if (value.type == target_type) {
+        return value;
+    }
+
+    if (target_type == "i1") {
+        return ensure_boolean(value);
+    }
+
+    if (value.type == "i1" && target_type == "i32") {
+        const std::string reg = next_register("zext");
+        emit_line(reg + " = zext i1 " + value.value + " to i32");
+        return IRValue{"i32", reg, true};
+    }
+
+    if (value.type == "i1" && target_type == "i64") {
+        const std::string reg = next_register("zext");
+        emit_line(reg + " = zext i1 " + value.value + " to i64");
+        return IRValue{"i64", reg, true};
+    }
+
+    if (value.type == "i1" && target_type == "double") {
+        const std::string reg = next_register("bool_to_double");
+        emit_line(reg + " = uitofp i1 " + value.value + " to double");
+        return IRValue{"double", reg, true};
+    }
+
+    if (value.type == "i32" && target_type == "double") {
+        const std::string reg = next_register("sitofp");
+        emit_line(reg + " = sitofp i32 " + value.value + " to double");
+        return IRValue{"double", reg, true};
+    }
+
+    if (value.type == "i32" && target_type == "i64") {
+        const std::string reg = next_register("sext");
+        emit_line(reg + " = sext i32 " + value.value + " to i64");
+        return IRValue{"i64", reg, true};
+    }
+
+    if (value.type == "i64" && target_type == "i32") {
+        const std::string reg = next_register("trunc");
+        emit_line(reg + " = trunc i64 " + value.value + " to i32");
+        return IRValue{"i32", reg, true};
+    }
+
+    if (value.type == "double" && target_type == "i32") {
+        const std::string reg = next_register("fptosi");
+        emit_line(reg + " = fptosi double " + value.value + " to i32");
+        return IRValue{"i32", reg, true};
+    }
+
+    if (value.type == "i8*" && target_type == "i32") {
+        const std::string reg = next_register("ptrtoint");
+        emit_line(reg + " = ptrtoint i8* " + value.value + " to i32");
+        return IRValue{"i32", reg, true};
+    }
+
+    if (value.type == "i32" && target_type == "i8*") {
+        const std::string reg = next_register("inttoptr");
+        emit_line(reg + " = inttoptr i32 " + value.value + " to i8*");
+        return IRValue{"i8*", reg, true};
+    }
+
+    if (is_pointer_type(value.type) && is_pointer_type(target_type)) {
+        const std::string reg = next_register("bitcast");
+        emit_line(reg + " = bitcast " + value.type + " " + value.value + " to " + target_type);
+        return IRValue{target_type, reg, true};
+    }
+
+    if (value.value == "null" && is_pointer_type(target_type)) {
+        return IRValue{target_type, "null", true};
+    }
+
+    throw std::runtime_error("Unsupported cast from " + value.type + " to " + target_type);
+}
+
+CodeGenerator::IRValue CodeGenerator::ensure_boolean(const IRValue& value) {
+    if (value.type == "i1") {
+        return value;
+    }
+
+    if (value.type == "i32") {
+        const std::string reg = next_register("tobool");
+        emit_line(reg + " = icmp ne i32 " + value.value + ", 0");
+        return IRValue{"i1", reg, true};
+    }
+
+    if (value.type == "double") {
+        const std::string reg = next_register("tobool");
+        emit_line(reg + " = fcmp one double " + value.value + ", 0.0");
+        return IRValue{"i1", reg, true};
+    }
+
+    if (is_pointer_type(value.type)) {
+        const std::string reg = next_register("tobool");
+        emit_line(reg + " = icmp ne " + value.type + " " + value.value + ", null");
+        return IRValue{"i1", reg, true};
+    }
+
+    throw std::runtime_error("Cannot convert type " + value.type + " to bool");
+}
+
+CodeGenerator::StringConstantInfo CodeGenerator::get_or_create_string_constant(const std::string& value) {
+    const auto found = string_constants.find(value);
+    if (found != string_constants.end()) {
+        return found->second;
+    }
+
+    const StringConstantInfo info{ "@.str." + std::to_string(string_counter++), value.size() + 1 };
+    const std::string escaped = escape_llvm_string(value) + "\\00";
+
+    global_lines.push_back(info.symbol + " = private unnamed_addr constant [" +
+                           std::to_string(info.length) + " x i8] c\"" + escaped + "\", align 1");
+
+    string_constants[value] = info;
+    return info;
+}
+
+std::string CodeGenerator::string_constant_gep(const StringConstantInfo& info) const {
+    return "getelementptr inbounds ([" + std::to_string(info.length) + " x i8], [" +
+           std::to_string(info.length) + " x i8]* " + info.symbol + ", i64 0, i64 0)";
+}
+
+std::string CodeGenerator::escape_llvm_string(const std::string& value) const {
+    std::ostringstream out;
+    for (unsigned char ch : value) {
+        if (ch == '\\') {
+            out << "\\5C";
+        } else if (ch == '"') {
+            out << "\\22";
+        } else if (std::isprint(ch) && ch != '\n' && ch != '\r' && ch != '\t') {
+            out << static_cast<char>(ch);
+        } else {
+            out << "\\" << std::uppercase << std::hex << std::setw(2) << std::setfill('0')
+                << static_cast<int>(ch) << std::nouppercase << std::dec;
+        }
+    }
+    return out.str();
+}
+
+std::string CodeGenerator::infer_type_name(const IRValue& value) const {
+    if (value.type == "i32") {
+        return "int";
+    }
+    if (value.type == "double") {
+        return "float";
+    }
+    if (value.type == "i1") {
+        return "bool";
+    }
+    if (value.type == "i8*") {
+        return "string";
+    }
+    return "unknown";
+}
+
+std::size_t CodeGenerator::llvm_type_size(const std::string& llvm_type) const {
+    if (llvm_type == "i1") {
+        return 1;
+    }
+    if (llvm_type == "i32") {
+        return 4;
+    }
+    if (llvm_type == "double") {
+        return 8;
+    }
+    if (is_pointer_type(llvm_type)) {
+        return 8;
+    }
+    return 8;
+}
+
+std::size_t CodeGenerator::align_up(std::size_t value, std::size_t alignment) const {
+    if (alignment <= 1) {
+        return value;
+    }
+    const std::size_t remainder = value % alignment;
+    if (remainder == 0) {
+        return value;
+    }
+    return value + (alignment - remainder);
+}

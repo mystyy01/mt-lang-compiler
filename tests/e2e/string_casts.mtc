@@ -1,0 +1,10 @@
+string s = str(42)
+print(s)
+
+int i = int("7")
+float f = float("3.5")
+print(i)
+print(int(f))
+print(length("abcd"))
+print("hi"[1])
+

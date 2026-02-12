@@ -1,0 +1,6 @@
+array<int> nums = [5]
+nums.append(8)
+print(nums[1])
+print(nums.pop())
+print(nums.length())
+

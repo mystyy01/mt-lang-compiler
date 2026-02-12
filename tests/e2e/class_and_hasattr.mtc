@@ -1,0 +1,17 @@
+class Counter {
+    arg int seed
+    int value = 0
+
+    int next(int step) {
+        set this.value = this.value + step
+        return this.value
+    }
+}
+
+Counter c = new Counter(10)
+print(c.seed)
+print(c.next(2))
+print(hasattr(c, "seed"))
+print(hasattr(c, "next"))
+print(hasattr(c, "missing"))
+
