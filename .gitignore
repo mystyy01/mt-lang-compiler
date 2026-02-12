@@ -1,0 +1,36 @@
+# Project build output
+/build/
+/dist/
+
+# C/C++ object and binary artifacts
+*.o
+*.obj
+*.lo
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+
+# Debug/profiling artifacts
+*.dSYM/
+*.gcno
+*.gcda
+*.gcov
+*.profraw
+*.profdata
+
+# Tooling/editor files
+compile_commands.json
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+dist/mtc
