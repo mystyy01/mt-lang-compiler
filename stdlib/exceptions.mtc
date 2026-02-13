@@ -1,7 +1,15 @@
 class Exception {
-    arg string message
+    string message = ""
+
+    func new(string message = "") {
+        set this.message = message
+    }
 }
 
 class ValueError inherits Exception {
-    arg string message
+    string message = ""
+
+    func new(string message = "") {
+        set this.message = message
+    }
 }
