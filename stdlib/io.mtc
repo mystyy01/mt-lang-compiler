@@ -1,0 +1,3 @@
+bool file_exists(string path) {
+    return false
+}

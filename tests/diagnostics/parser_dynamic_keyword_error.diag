@@ -1,0 +1,1 @@
+Error: Expected 'array' after 'dynamic' at line 1, column 9 but found 'int' in <ROOT>/tests/diagnostics/parser_dynamic_keyword_error.mtc (Severity: ERROR)

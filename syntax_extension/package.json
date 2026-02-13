@@ -1,0 +1,48 @@
+{
+  "name": "mtc-language",
+  "displayName": "MTC Language",
+  "description": "Syntax highlighting and language support for the MTC programming language",
+  "version": "0.1.0",
+  "main": "./extension.js",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "activationEvents": [
+    "onLanguage:mtc"
+  ],
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "mtc",
+        "aliases": [
+          "MTC",
+          "mtc"
+        ],
+        "extensions": [
+          ".mtc"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "mtc",
+        "scopeName": "source.mtc",
+        "path": "./syntaxes/mtc.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "MTC",
+      "properties": {
+        "mtc.languageServer.path": {
+          "type": "string",
+          "default": "dist/mtc_lsp",
+          "description": "Path to the mtc language server binary. Relative paths are resolved from the first workspace folder."
+        }
+      }
+    }
+  }
+}

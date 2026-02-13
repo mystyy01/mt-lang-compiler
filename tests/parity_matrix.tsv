@@ -1,0 +1,14 @@
+# case_name feature_tags(comma-separated)
+arith_control arithmetic,control_flow
+arrays_fixed_dynamic arrays,builtins
+typed_array_methods arrays,builtins
+dict_literal dicts
+dict_ops dicts,builtins
+class_and_hasattr classes,builtins
+classof_basic classes,builtins
+try_catch try_catch
+try_return_restore try_catch
+imports_and_io imports,io,builtins
+simple_import_alias imports
+read_split io,builtins
+string_casts builtins

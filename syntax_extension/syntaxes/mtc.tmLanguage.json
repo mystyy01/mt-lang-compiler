@@ -1,0 +1,110 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "MTC",
+  "scopeName": "source.mtc",
+  "patterns": [
+    {
+      "name": "comment.line.double-slash.mtc",
+      "match": "//.*$"
+    },
+    {
+      "name": "string.quoted.double.mtc",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.mtc",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "string.quoted.single.mtc",
+      "begin": "'",
+      "end": "'",
+      "patterns": [
+        {
+          "name": "constant.character.escape.mtc",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "constant.numeric.float.mtc",
+      "match": "\\b-?[0-9]+\\.[0-9]+([eE][+-]?[0-9]+)?\\b"
+    },
+    {
+      "name": "constant.numeric.integer.mtc",
+      "match": "\\b-?[0-9]+([eE][+-]?[0-9]+)?\\b"
+    },
+    {
+      "match": "\\b(false|true)\\b",
+      "name": "constant.language.boolean.mtc"
+    },
+    {
+      "match": "\\b(array|bool|dict|float|int|string|void)\\b",
+      "name": "storage.type.mtc"
+    },
+    {
+      "match": "\\b(break|catch|elif|else|for|if|in|return|set|throw|try|while)\\b",
+      "name": "keyword.control.mtc"
+    },
+    {
+      "match": "\\b(as|from|use)\\b",
+      "name": "keyword.control.import.mtc"
+    },
+    {
+      "match": "\\b(class|dynamic|func|new|static|this|virtual)\\b",
+      "name": "keyword.other.mtc"
+    },
+    {
+      "match": "\\b(arg|classof|except|external|hasattr|null|typeof)\\b",
+      "name": "support.function.builtin.mtc"
+    },
+    {
+      "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\()",
+      "captures": {
+        "1": {
+          "name": "entity.name.function.mtc"
+        }
+      }
+    },
+    {
+      "match": "\\b(new)\\s+([A-Z][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": {
+          "name": "keyword.other.mtc"
+        },
+        "2": {
+          "name": "entity.name.class.mtc"
+        }
+      }
+    },
+    {
+      "match": "\\b(class)\\s+([A-Z][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": {
+          "name": "keyword.other.mtc"
+        },
+        "2": {
+          "name": "entity.name.class.mtc"
+        }
+      }
+    },
+    {
+      "match": "\\b([A-Z][a-zA-Z0-9_]*)\\s+([a-z_][a-zA-Z0-9_]*)\\s*=",
+      "captures": {
+        "1": {
+          "name": "entity.name.class.mtc"
+        },
+        "2": {
+          "name": "variable.other.mtc"
+        }
+      }
+    },
+    {
+      "name": "keyword.operator.mtc",
+      "match": "==|!=|<=|>=|&&|\\|\\||[+\\-*/=<>!]"
+    }
+  ]
+}

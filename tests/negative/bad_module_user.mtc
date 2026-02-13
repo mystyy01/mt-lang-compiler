@@ -1,0 +1,2 @@
+use bad_module as bm
+print(1)

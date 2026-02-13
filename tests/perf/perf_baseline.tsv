@@ -1,0 +1,4 @@
+# case compile_ms_max compile_rss_kb_max run_ms_max run_rss_kb_max
+dynamic_array_stress 12000 700000 12000 700000
+fixed_array_stress 12000 700000 12000 700000
+dict_stress 12000 700000 12000 700000

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -106,12 +107,15 @@ public:
     const std::unordered_map<std::string, ClassInfo>& get_classes() const;
 
 private:
+    SemanticAnalyzer(std::string file_path, std::shared_ptr<std::vector<std::string>> import_stack_paths);
+
     SymbolTable symbol_table;
     std::unordered_map<std::string, ClassInfo> classes;
     std::vector<std::string> errors;
     std::string file_path;
     std::string current_class;
     int break_depth;
+    std::shared_ptr<std::vector<std::string>> import_stack_paths;
 
     void add_builtin_symbols();
 

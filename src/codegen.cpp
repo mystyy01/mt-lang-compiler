@@ -685,6 +685,7 @@ void CodeGenerator::register_class_declaration(ClassDeclaration& node) {
 void CodeGenerator::emit_prelude() {
     global_lines.push_back("; ModuleID = 'mt_lang'");
     global_lines.push_back("source_filename = \"mt_lang\"");
+    global_lines.push_back("@__mt_runtime_abi_version = constant i32 1");
     global_lines.push_back("@__mt_char_pool = internal global [8388608 x i8] zeroinitializer");
     global_lines.push_back("@__mt_char_pool_index = internal global i64 0");
     global_lines.push_back("@__mt_exc_jmp = internal global i8* null");
@@ -696,6 +697,8 @@ void CodeGenerator::emit_prelude() {
     declaration_lines.push_back("declare i32 @setjmp(i8*)");
     declaration_lines.push_back("declare void @longjmp(i8*, i32)");
     declaration_lines.push_back("declare i64 @strtol(i8*, i8**, i32)");
+    declaration_lines.push_back("declare i32 @printf(i8*, ...)");
+    declaration_lines.push_back("declare void @exit(i32)");
 
     function_lines.push_back("define i8* @__mt_char(i8 %c) {");
     function_lines.push_back("entry:");
@@ -712,11 +715,23 @@ void CodeGenerator::emit_prelude() {
     function_lines.push_back("  ret i8* %ptr");
     function_lines.push_back("}");
     function_lines.push_back("");
+
+    StringConstantInfo panic_fmt = get_or_create_string_constant("[mt-runtime] fatal(%d): %s\n");
+    function_lines.push_back("define void @__mt_runtime_panic(i8* %msg, i32 %code) {");
+    function_lines.push_back("entry:");
+    function_lines.push_back(
+        "  %panic_fmt = getelementptr inbounds [" + std::to_string(panic_fmt.length) +
+        " x i8], [" + std::to_string(panic_fmt.length) + " x i8]* " + panic_fmt.symbol +
+        ", i32 0, i32 0");
+    function_lines.push_back(
+        "  %panic_print = call i32 (i8*, ...) @printf(i8* %panic_fmt, i32 %code, i8* %msg)");
+    function_lines.push_back("  call void @exit(i32 %code)");
+    function_lines.push_back("  unreachable");
+    function_lines.push_back("}");
+    function_lines.push_back("");
 }
 
 void CodeGenerator::emit_builtin_declarations() {
-    declaration_lines.push_back("declare i32 @printf(i8*, ...)");
-    declaration_lines.push_back("declare void @exit(i32)");
     declaration_lines.push_back("declare i8* @malloc(i64)");
     declaration_lines.push_back("declare i8* @realloc(i8*, i64)");
     declaration_lines.push_back("declare i64 @strlen(i8*)");
@@ -1599,7 +1614,11 @@ void CodeGenerator::generate_statement(ASTNode& node) {
         }
 
         if (!has_catch_all) {
-            emit_line("call void @exit(i32 1)");
+            StringConstantInfo msg =
+                get_or_create_string_constant("Unhandled exception (no matching catch)");
+            IRValue msg_arg{"i8*", string_constant_gep(msg), true};
+            IRValue code_arg{"i32", "1001", true};
+            (void)emit_call("void", "@__mt_runtime_panic", {msg_arg, code_arg}, true);
             emit_line("unreachable");
         }
 
@@ -1636,10 +1655,10 @@ void CodeGenerator::generate_statement(ASTNode& node) {
         emit_line("unreachable");
 
         emit_label(exit_label);
-        StringConstantInfo unhandled = get_or_create_string_constant("Unhandled exception\n");
+        StringConstantInfo unhandled = get_or_create_string_constant("Unhandled exception");
         IRValue msg{"i8*", string_constant_gep(unhandled), true};
-        (void)emit_call("i32", "@printf", {msg}, true);
-        emit_line("call void @exit(i32 1)");
+        IRValue code{"i32", "1001", true};
+        (void)emit_call("void", "@__mt_runtime_panic", {msg, code}, true);
         emit_line("unreachable");
         return;
     }
@@ -3365,10 +3384,10 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
             emit_line("unreachable");
 
             emit_label(exit_label);
-            StringConstantInfo msg = get_or_create_string_constant("Invalid int conversion\n");
+            StringConstantInfo msg = get_or_create_string_constant("Invalid int conversion");
             IRValue msg_arg{"i8*", string_constant_gep(msg), true};
-            (void)emit_call("i32", "@printf", {msg_arg}, true);
-            emit_line("call void @exit(i32 1)");
+            IRValue code_arg{"i32", "1002", true};
+            (void)emit_call("void", "@__mt_runtime_panic", {msg_arg, code_arg}, true);
             emit_line("unreachable");
 
             emit_label(merge_label);

@@ -16,12 +16,16 @@
 
 namespace {
 
+constexpr const char* kMtcVersion = "0.4.0";
+
 struct CompilerArgs {
     bool object_only = false;
     bool lib_file = false;
     bool no_runtime = false;
     bool no_libc = false;
     bool emit_ir = false;
+    bool show_version = false;
+    std::string opt_level = "2";
     std::vector<std::string> extra_objects;
     std::string source_file;
     std::string output_path;
@@ -36,6 +40,8 @@ void print_usage() {
     std::cerr << "  mtc -o source.mtc output.o\n";
     std::cerr << "  mtc source.mtc --obj lib.o output\n";
     std::cerr << "  mtc --emit-ir source.mtc output\n";
+    std::cerr << "  mtc --opt-level 0 source.mtc output\n";
+    std::cerr << "  mtc --version\n";
 }
 
 std::string shell_quote(const std::string& input) {
@@ -136,55 +142,194 @@ std::filesystem::path path_from_module_parts(const std::vector<std::string>& par
     return path;
 }
 
+std::string normalize_existing_path(const std::filesystem::path& path) {
+    try {
+        return std::filesystem::weakly_canonical(path).string();
+    } catch (...) {
+        return std::filesystem::absolute(path).lexically_normal().string();
+    }
+}
+
+void append_unique_path(std::vector<std::filesystem::path>* paths,
+                        std::unordered_set<std::string>* seen,
+                        const std::filesystem::path& path) {
+    if (!paths || !seen || path.empty()) {
+        return;
+    }
+    const std::string key = path.lexically_normal().string();
+    if (seen->insert(key).second) {
+        paths->push_back(path.lexically_normal());
+    }
+}
+
+std::vector<std::string> split_env_paths(const std::string& value) {
+    std::vector<std::string> paths;
+    std::string current;
+    for (char ch : value) {
+        if (ch == ':' || ch == ';') {
+            if (!current.empty()) {
+                paths.push_back(current);
+                current.clear();
+            }
+            continue;
+        }
+        current.push_back(ch);
+    }
+    if (!current.empty()) {
+        paths.push_back(current);
+    }
+    return paths;
+}
+
+std::vector<std::filesystem::path> build_module_search_roots(const std::filesystem::path& source_file) {
+    std::vector<std::filesystem::path> roots;
+    std::unordered_set<std::string> seen;
+
+    std::filesystem::path parent = source_file.parent_path();
+    while (!parent.empty()) {
+        append_unique_path(&roots, &seen, parent);
+        const std::filesystem::path next = parent.parent_path();
+        if (next == parent) {
+            break;
+        }
+        parent = next;
+    }
+
+    append_unique_path(&roots, &seen, std::filesystem::current_path());
+
+    const char* env_paths = std::getenv("MTC_PATH");
+    if (env_paths != nullptr) {
+        for (const auto& raw : split_env_paths(env_paths)) {
+            append_unique_path(&roots, &seen, std::filesystem::path(raw));
+        }
+    }
+
+    return roots;
+}
+
+std::optional<std::filesystem::path> resolve_module_relative_path(
+    const std::filesystem::path& relative_path,
+    const std::filesystem::path& current_file,
+    const std::vector<std::filesystem::path>& search_roots) {
+    std::vector<std::filesystem::path> candidates;
+    std::unordered_set<std::string> seen;
+
+    if (relative_path.is_absolute()) {
+        append_unique_path(&candidates, &seen, relative_path);
+    } else {
+        append_unique_path(&candidates, &seen, current_file.parent_path() / relative_path);
+        for (const auto& root : search_roots) {
+            append_unique_path(&candidates, &seen, root / relative_path);
+        }
+    }
+
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::exists(candidate) && std::filesystem::is_regular_file(candidate)) {
+            return std::filesystem::absolute(candidate).lexically_normal();
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<std::filesystem::path> resolve_module_file(const ASTNode& module_path,
-                                                         const std::filesystem::path& current_file) {
+                                                         const std::filesystem::path& current_file,
+                                                         const std::vector<std::filesystem::path>& search_roots) {
     std::vector<std::string> parts;
     if (!flatten_module_path(module_path, &parts)) {
         return std::nullopt;
     }
 
-    const std::filesystem::path rel_path = path_from_module_parts(parts);
-    const std::vector<std::filesystem::path> candidates = {
-        current_file.parent_path() / rel_path,
-        std::filesystem::current_path() / rel_path,
-        std::filesystem::path("/mnt/ssd/Coding/mt-lang/compiler") / rel_path,
-    };
-
-    for (const auto& candidate : candidates) {
-        if (std::filesystem::exists(candidate)) {
-            return std::filesystem::absolute(candidate);
-        }
-    }
-    return std::nullopt;
+    return resolve_module_relative_path(path_from_module_parts(parts), current_file, search_roots);
 }
 
 std::optional<std::filesystem::path> resolve_simple_module_file(
     const std::string& module_name,
-    const std::filesystem::path& current_file) {
+    const std::filesystem::path& current_file,
+    const std::vector<std::filesystem::path>& search_roots) {
     if (module_name.empty()) {
         return std::nullopt;
     }
 
-    const std::filesystem::path rel_path = std::filesystem::path(module_name + ".mtc");
-    const std::vector<std::filesystem::path> candidates = {
-        current_file.parent_path() / rel_path,
-        std::filesystem::current_path() / rel_path,
-        std::filesystem::path("/mnt/ssd/Coding/mt-lang/compiler") / rel_path,
-    };
-
-    for (const auto& candidate : candidates) {
-        if (std::filesystem::exists(candidate)) {
-            return std::filesystem::absolute(candidate);
+    std::string module_path_str = module_name;
+    for (char& ch : module_path_str) {
+        if (ch == '.') {
+            ch = '/';
         }
     }
-    return std::nullopt;
+    return resolve_module_relative_path(
+        std::filesystem::path(module_path_str + ".mtc"),
+        current_file,
+        search_roots);
 }
 
-void expand_imports_in_program(ASTNode* ast,
+std::string short_path_label(const std::string& path_text) {
+    const std::filesystem::path path(path_text);
+    if (!path.filename().empty()) {
+        return path.filename().string();
+    }
+    return path_text;
+}
+
+std::string format_import_cycle(const std::vector<std::string>& active_stack, const std::string& repeated) {
+    std::ostringstream out;
+    auto start = std::find(active_stack.begin(), active_stack.end(), repeated);
+    if (start == active_stack.end()) {
+        return short_path_label(repeated);
+    }
+
+    bool first = true;
+    for (auto it = start; it != active_stack.end(); ++it) {
+        if (!first) {
+            out << " -> ";
+        }
+        first = false;
+        out << short_path_label(*it);
+    }
+    out << " -> " << short_path_label(repeated);
+    return out.str();
+}
+
+class ActiveModuleGuard {
+public:
+    ActiveModuleGuard(std::vector<std::string>* stack,
+                      std::unordered_set<std::string>* active_set,
+                      std::string key)
+        : stack_(stack), active_set_(active_set), key_(std::move(key)), active_(false) {
+        if (!stack_ || !active_set_) {
+            return;
+        }
+        stack_->push_back(key_);
+        active_set_->insert(key_);
+        active_ = true;
+    }
+
+    ~ActiveModuleGuard() {
+        if (!active_ || !stack_ || !active_set_) {
+            return;
+        }
+        active_set_->erase(key_);
+        if (!stack_->empty()) {
+            stack_->pop_back();
+        }
+    }
+
+private:
+    std::vector<std::string>* stack_;
+    std::unordered_set<std::string>* active_set_;
+    std::string key_;
+    bool active_;
+};
+
+bool expand_imports_in_program(ASTNode* ast,
                                const std::filesystem::path& current_file,
-                               std::unordered_set<std::string>* loaded_modules) {
-    if (ast == nullptr || loaded_modules == nullptr || !is_node<Program>(*ast)) {
-        return;
+                               const std::vector<std::filesystem::path>& search_roots,
+                               std::unordered_set<std::string>* loaded_modules,
+                               std::vector<std::string>* active_stack,
+                               std::unordered_set<std::string>* active_set,
+                               std::string* error_out) {
+    if (ast == nullptr || loaded_modules == nullptr || active_stack == nullptr ||
+        active_set == nullptr || !is_node<Program>(*ast)) {
+        return true;
     }
 
     auto& program = get_node<Program>(*ast);
@@ -198,31 +343,45 @@ void expand_imports_in_program(ASTNode* ast,
 
         if (is_node<FromImportStatement>(statement)) {
             const auto& from = get_node<FromImportStatement>(statement);
-            const auto resolved = resolve_module_file(from.module_path, current_file);
+            const auto resolved = resolve_module_file(from.module_path, current_file, search_roots);
             if (!resolved.has_value()) {
                 expanded_statements.push_back(std::move(statement));
                 continue;
             }
 
-            std::string key;
-            try {
-                key = std::filesystem::weakly_canonical(*resolved).string();
-            } catch (...) {
-                key = resolved->string();
+            const std::string key = normalize_existing_path(*resolved);
+            if (active_set->count(key) > 0) {
+                if (error_out != nullptr) {
+                    *error_out = "Import cycle detected: " + format_import_cycle(*active_stack, key);
+                }
+                return false;
             }
             if (loaded_modules->count(key) > 0) {
                 continue;
             }
             loaded_modules->insert(key);
 
+            ActiveModuleGuard guard(active_stack, active_set, key);
             ASTNode module_ast;
             std::string module_error;
             if (!parse_file_to_ast(*resolved, &module_ast, &module_error)) {
-                expanded_statements.push_back(std::move(statement));
-                continue;
+                if (error_out != nullptr) {
+                    *error_out =
+                        "Failed to parse imported module '" + resolved->string() + "': " + module_error;
+                }
+                return false;
             }
 
-            expand_imports_in_program(&module_ast, *resolved, loaded_modules);
+            if (!expand_imports_in_program(
+                    &module_ast,
+                    *resolved,
+                    search_roots,
+                    loaded_modules,
+                    active_stack,
+                    active_set,
+                    error_out)) {
+                return false;
+            }
 
             if (!is_node<Program>(module_ast)) {
                 continue;
@@ -241,31 +400,45 @@ void expand_imports_in_program(ASTNode* ast,
 
         if (is_node<SimpleImportStatement>(statement)) {
             const auto& simple = get_node<SimpleImportStatement>(statement);
-            const auto resolved = resolve_simple_module_file(simple.module_name, current_file);
+            const auto resolved = resolve_simple_module_file(simple.module_name, current_file, search_roots);
             if (!resolved.has_value()) {
                 expanded_statements.push_back(std::move(statement));
                 continue;
             }
 
-            std::string key;
-            try {
-                key = std::filesystem::weakly_canonical(*resolved).string();
-            } catch (...) {
-                key = resolved->string();
+            const std::string key = normalize_existing_path(*resolved);
+            if (active_set->count(key) > 0) {
+                if (error_out != nullptr) {
+                    *error_out = "Import cycle detected: " + format_import_cycle(*active_stack, key);
+                }
+                return false;
             }
             if (loaded_modules->count(key) > 0) {
                 continue;
             }
             loaded_modules->insert(key);
 
+            ActiveModuleGuard guard(active_stack, active_set, key);
             ASTNode module_ast;
             std::string module_error;
             if (!parse_file_to_ast(*resolved, &module_ast, &module_error)) {
-                expanded_statements.push_back(std::move(statement));
-                continue;
+                if (error_out != nullptr) {
+                    *error_out =
+                        "Failed to parse imported module '" + resolved->string() + "': " + module_error;
+                }
+                return false;
             }
 
-            expand_imports_in_program(&module_ast, *resolved, loaded_modules);
+            if (!expand_imports_in_program(
+                    &module_ast,
+                    *resolved,
+                    search_roots,
+                    loaded_modules,
+                    active_stack,
+                    active_set,
+                    error_out)) {
+                return false;
+            }
             if (!is_node<Program>(module_ast)) {
                 continue;
             }
@@ -285,6 +458,7 @@ void expand_imports_in_program(ASTNode* ast,
     }
 
     program.statements = std::move(expanded_statements);
+    return true;
 }
 
 std::optional<CompilerArgs> parse_args(int argc, char** argv) {
@@ -328,6 +502,25 @@ std::optional<CompilerArgs> parse_args(int argc, char** argv) {
             ++i;
             continue;
         }
+        if (arg == "--version") {
+            args.show_version = true;
+            ++i;
+            continue;
+        }
+        if (arg == "--opt-level") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --opt-level requires one of 0,1,2,3\n";
+                return std::nullopt;
+            }
+            const std::string level = argv[i + 1];
+            if (level != "0" && level != "1" && level != "2" && level != "3") {
+                std::cerr << "Error: invalid --opt-level '" << level << "' (expected 0,1,2,3)\n";
+                return std::nullopt;
+            }
+            args.opt_level = level;
+            i += 2;
+            continue;
+        }
         if (!arg.empty() && arg[0] == '-') {
             std::cerr << "Error: Unknown flag '" << arg << "'\n";
             return std::nullopt;
@@ -335,6 +528,10 @@ std::optional<CompilerArgs> parse_args(int argc, char** argv) {
 
         positional.push_back(arg);
         ++i;
+    }
+
+    if (args.show_version && positional.empty()) {
+        return args;
     }
 
     if (positional.size() != 2) {
@@ -347,16 +544,20 @@ std::optional<CompilerArgs> parse_args(int argc, char** argv) {
     return args;
 }
 
-std::optional<std::filesystem::path> find_exceptions_file(const std::filesystem::path& source_file) {
-    const std::vector<std::filesystem::path> candidates = {
-        source_file.parent_path() / "stdlib" / "exceptions.mtc",
-        std::filesystem::current_path() / "stdlib" / "exceptions.mtc",
-        std::filesystem::path("/mnt/ssd/Coding/mt-lang/compiler/stdlib/exceptions.mtc"),
-    };
+std::optional<std::filesystem::path> find_exceptions_file(
+    const std::filesystem::path& source_file,
+    const std::vector<std::filesystem::path>& search_roots) {
+    std::vector<std::filesystem::path> candidates;
+    std::unordered_set<std::string> seen;
+
+    append_unique_path(&candidates, &seen, source_file.parent_path() / "stdlib" / "exceptions.mtc");
+    for (const auto& root : search_roots) {
+        append_unique_path(&candidates, &seen, root / "stdlib" / "exceptions.mtc");
+    }
 
     for (const auto& path : candidates) {
         if (std::filesystem::exists(path)) {
-            return path;
+            return std::filesystem::absolute(path).lexically_normal();
         }
     }
 
@@ -385,6 +586,10 @@ int main(int argc, char** argv) {
     }
 
     const CompilerArgs args = *parsed;
+    if (args.show_version && args.source_file.empty()) {
+        std::cout << "mtc " << kMtcVersion << "\n";
+        return 0;
+    }
 
     const std::filesystem::path source_path = std::filesystem::absolute(args.source_file);
     std::string source_code;
@@ -400,37 +605,80 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    const std::vector<std::filesystem::path> search_roots = build_module_search_roots(source_path);
     std::unordered_set<std::string> loaded_modules;
-    expand_imports_in_program(&ast, source_path, &loaded_modules);
+    std::vector<std::string> active_stack;
+    std::unordered_set<std::string> active_set;
+    const std::string source_key = normalize_existing_path(source_path);
+    loaded_modules.insert(source_key);
+    active_stack.push_back(source_key);
+    active_set.insert(source_key);
+
+    std::string import_error;
+    if (!expand_imports_in_program(
+            &ast,
+            source_path,
+            search_roots,
+            &loaded_modules,
+            &active_stack,
+            &active_set,
+            &import_error)) {
+        std::cerr << "Error: " << import_error << "\n";
+        return 1;
+    }
 
     if (!args.no_runtime) {
-        const auto exceptions_path = find_exceptions_file(source_path);
+        const auto exceptions_path = find_exceptions_file(source_path, search_roots);
         if (exceptions_path.has_value() && !same_canonical_file(source_path, *exceptions_path)) {
             ASTNode exceptions_ast;
             std::string exceptions_error;
-            if (parse_file_to_ast(*exceptions_path, &exceptions_ast, &exceptions_error)) {
-                try {
-                    expand_imports_in_program(&exceptions_ast, *exceptions_path, &loaded_modules);
-
-                    if (is_node<Program>(ast) && is_node<Program>(exceptions_ast)) {
-                        auto& program = get_node<Program>(ast);
-                        auto& ex_program = get_node<Program>(exceptions_ast);
-
-                        std::vector<ASTNode> merged;
-                        merged.reserve(ex_program.statements.size() + program.statements.size());
-                        for (auto& stmt : ex_program.statements) {
-                            merged.push_back(std::move(stmt));
-                        }
-                        for (auto& stmt : program.statements) {
-                            merged.push_back(std::move(stmt));
-                        }
-                        program.statements = std::move(merged);
+            if (!parse_file_to_ast(*exceptions_path, &exceptions_ast, &exceptions_error)) {
+                std::cerr << "Error: failed to parse runtime exceptions module '"
+                          << exceptions_path->string() << "': " << exceptions_error << "\n";
+                return 1;
+            }
+            try {
+                const std::string exceptions_key = normalize_existing_path(*exceptions_path);
+                bool include_runtime_module = false;
+                if (!loaded_modules.count(exceptions_key)) {
+                    loaded_modules.insert(exceptions_key);
+                    active_stack.push_back(exceptions_key);
+                    active_set.insert(exceptions_key);
+                    const bool expanded = expand_imports_in_program(
+                        &exceptions_ast,
+                        *exceptions_path,
+                        search_roots,
+                        &loaded_modules,
+                        &active_stack,
+                        &active_set,
+                        &import_error);
+                    active_set.erase(exceptions_key);
+                    active_stack.pop_back();
+                    if (!expanded) {
+                        std::cerr << "Error: " << import_error << "\n";
+                        return 1;
                     }
-                } catch (const std::exception& err) {
-                    std::cerr << "Error: failed to load runtime exceptions module: "
-                              << err.what() << "\n";
-                    return 1;
+                    include_runtime_module = true;
                 }
+
+                if (include_runtime_module && is_node<Program>(ast) && is_node<Program>(exceptions_ast)) {
+                    auto& program = get_node<Program>(ast);
+                    auto& ex_program = get_node<Program>(exceptions_ast);
+
+                    std::vector<ASTNode> merged;
+                    merged.reserve(ex_program.statements.size() + program.statements.size());
+                    for (auto& stmt : ex_program.statements) {
+                        merged.push_back(std::move(stmt));
+                    }
+                    for (auto& stmt : program.statements) {
+                        merged.push_back(std::move(stmt));
+                    }
+                    program.statements = std::move(merged);
+                }
+            } catch (const std::exception& err) {
+                std::cerr << "Error: failed to load runtime exceptions module: "
+                          << err.what() << "\n";
+                return 1;
             }
         }
     }
@@ -475,7 +723,8 @@ int main(int argc, char** argv) {
         : std::filesystem::path(out_path.string() + ".o");
 
     const std::string compile_cmd =
-        "clang -x ir -c " + shell_quote(ir_path.string()) + " -o " + shell_quote(obj_path.string());
+        "clang -O" + args.opt_level + " -x ir -c " + shell_quote(ir_path.string()) +
+        " -o " + shell_quote(obj_path.string());
     const int compile_status = run_command(compile_cmd);
 
     if (compile_status != 0) {
@@ -491,7 +740,7 @@ int main(int argc, char** argv) {
     }
 
     std::ostringstream link_cmd;
-    link_cmd << "clang " << shell_quote(obj_path.string());
+    link_cmd << "clang -O" << args.opt_level << " " << shell_quote(obj_path.string());
     for (const auto& extra : args.extra_objects) {
         link_cmd << ' ' << shell_quote(extra);
     }

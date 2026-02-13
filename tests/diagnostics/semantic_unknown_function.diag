@@ -1,0 +1,2 @@
+Error: Unknown function 'missing_fn' at line 1, column 9 in <ROOT>/tests/diagnostics/semantic_unknown_function.mtc
+Error: Type mismatch at line 1, column 5. Cannot assign type unknown to int in <ROOT>/tests/diagnostics/semantic_unknown_function.mtc

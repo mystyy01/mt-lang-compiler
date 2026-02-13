@@ -1,0 +1,4 @@
+# case function_count compile_ms_max compile_rss_kb_max
+small 80 12000 700000
+medium 300 12000 700000
+large 800 18000 900000

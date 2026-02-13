@@ -1,0 +1,4 @@
+string line = read("prompt:")
+array parts = split(line, ",")
+print(parts[0])
+print(length(parts))

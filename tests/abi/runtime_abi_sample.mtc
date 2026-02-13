@@ -1,0 +1,14 @@
+dynamic array nums = [1, 2, 3]
+nums.append(4)
+
+dict<string, int> values = {"k": 1}
+set values["z"] = 9
+
+try {
+    throw new Exception("boom")
+} catch Exception(err) {
+    print("caught")
+}
+
+print(length(nums))
+print(length(values))

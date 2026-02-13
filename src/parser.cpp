@@ -436,6 +436,7 @@ ASTNode Parser::parse_expression() {
 }
 
 ASTNode Parser::parse_external() {
+    const Token start = current_token();
     advance();
     const std::string return_type = current_token().value;
     advance();
@@ -455,7 +456,7 @@ ASTNode Parser::parse_external() {
     expect(T_SYMBOL, ")");
 
     return make_node<ExternalDeclaration>(
-        ExternalDeclaration{return_type, func_name, std::move(params)});
+        ExternalDeclaration{return_type, func_name, std::move(params), start.line, start.column});
 }
 
 ASTNode Parser::parse_statement() {
@@ -698,6 +699,7 @@ ASTNode Parser::parse_break_statement() {
 }
 
 ASTNode Parser::parse_function_declaration() {
+    const Token start = current_token();
     const std::string return_type = current_token().value;
     advance();
 
@@ -721,10 +723,13 @@ ASTNode Parser::parse_function_declaration() {
         func_name,
         std::move(params),
         std::move(body),
+        start.line,
+        start.column,
     });
 }
 
 ASTNode Parser::parse_dynamic_function() {
+    const Token start = current_token();
     expect(T_KEYWORD, "func");
 
     const std::string func_name = current_token().value;
@@ -750,7 +755,7 @@ ASTNode Parser::parse_dynamic_function() {
 
     ASTNode body = make_node<Block>(Block{std::move(statements)});
     return make_node<DynamicFunctionDeclaration>(
-        DynamicFunctionDeclaration{func_name, std::move(params), std::move(body)});
+        DynamicFunctionDeclaration{func_name, std::move(params), std::move(body), start.line, start.column});
 }
 
 Parser::TypeWithElement Parser::parse_type_with_element() {

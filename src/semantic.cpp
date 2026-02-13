@@ -1,6 +1,7 @@
 #include "semantic.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -31,6 +32,125 @@ bool read_file(const std::filesystem::path& path, std::string* out) {
     }
     out->assign((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
     return true;
+}
+
+std::string normalize_existing_path(const std::filesystem::path& path) {
+    try {
+        return std::filesystem::weakly_canonical(path).string();
+    } catch (...) {
+        return std::filesystem::absolute(path).lexically_normal().string();
+    }
+}
+
+void append_unique_path(std::vector<std::filesystem::path>* paths,
+                        std::unordered_set<std::string>* seen,
+                        const std::filesystem::path& path) {
+    if (!paths || !seen || path.empty()) {
+        return;
+    }
+    const std::string key = path.lexically_normal().string();
+    if (seen->insert(key).second) {
+        paths->push_back(path.lexically_normal());
+    }
+}
+
+std::vector<std::string> split_env_paths(const std::string& value) {
+    std::vector<std::string> paths;
+    std::string current;
+    for (char ch : value) {
+        if (ch == ':' || ch == ';') {
+            if (!current.empty()) {
+                paths.push_back(current);
+                current.clear();
+            }
+            continue;
+        }
+        current.push_back(ch);
+    }
+    if (!current.empty()) {
+        paths.push_back(current);
+    }
+    return paths;
+}
+
+std::vector<std::filesystem::path> build_module_search_roots(const std::string& file_path) {
+    std::vector<std::filesystem::path> roots;
+    std::unordered_set<std::string> seen;
+
+    if (!file_path.empty() && file_path != "unknown") {
+        std::filesystem::path parent = std::filesystem::path(file_path).parent_path();
+        while (!parent.empty()) {
+            append_unique_path(&roots, &seen, parent);
+            const std::filesystem::path next = parent.parent_path();
+            if (next == parent) {
+                break;
+            }
+            parent = next;
+        }
+    }
+
+    append_unique_path(&roots, &seen, std::filesystem::current_path());
+
+    const char* env_paths = std::getenv("MTC_PATH");
+    if (env_paths != nullptr) {
+        for (const auto& raw : split_env_paths(env_paths)) {
+            append_unique_path(&roots, &seen, std::filesystem::path(raw));
+        }
+    }
+
+    return roots;
+}
+
+std::optional<std::filesystem::path> resolve_module_path(
+    const std::filesystem::path& rel_path,
+    const std::string& current_file_path) {
+    const std::vector<std::filesystem::path> roots = build_module_search_roots(current_file_path);
+    std::vector<std::filesystem::path> candidates;
+    std::unordered_set<std::string> seen;
+
+    if (!current_file_path.empty() && current_file_path != "unknown") {
+        append_unique_path(
+            &candidates, &seen, std::filesystem::path(current_file_path).parent_path() / rel_path);
+    }
+    append_unique_path(&candidates, &seen, rel_path);
+    for (const auto& root : roots) {
+        append_unique_path(&candidates, &seen, root / rel_path);
+    }
+
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::exists(candidate) && std::filesystem::is_regular_file(candidate)) {
+            return std::filesystem::absolute(candidate).lexically_normal();
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::string short_path_label(const std::string& path_text) {
+    const std::filesystem::path path(path_text);
+    if (!path.filename().empty()) {
+        return path.filename().string();
+    }
+    return path_text;
+}
+
+std::string format_import_cycle(const std::vector<std::string>& stack, const std::string& repeated) {
+    std::ostringstream out;
+    auto start = std::find(stack.begin(), stack.end(), repeated);
+    if (start == stack.end()) {
+        return short_path_label(repeated);
+    }
+
+    bool first = true;
+    for (auto it = start; it != stack.end(); ++it) {
+        if (!first) {
+            out << " -> ";
+        }
+        first = false;
+        out << short_path_label(*it);
+    }
+    out << " -> " << short_path_label(repeated);
+    return out.str();
 }
 
 }  // namespace
@@ -83,7 +203,18 @@ const std::vector<std::unordered_map<std::string, SymbolInfo>>& SymbolTable::get
 }
 
 SemanticAnalyzer::SemanticAnalyzer(std::string file_path_in)
-    : file_path(std::move(file_path_in)), break_depth(0) {
+    : SemanticAnalyzer(
+          std::move(file_path_in),
+          std::make_shared<std::vector<std::string>>()) {}
+
+SemanticAnalyzer::SemanticAnalyzer(
+    std::string file_path_in,
+    std::shared_ptr<std::vector<std::string>> import_stack_paths_in)
+    : file_path(std::move(file_path_in)),
+      break_depth(0),
+      import_stack_paths(
+          import_stack_paths_in ? std::move(import_stack_paths_in)
+                                : std::make_shared<std::vector<std::string>>()) {
     add_builtin_symbols();
 }
 
@@ -841,26 +972,12 @@ std::string SemanticAnalyzer::analyze_from_import(FromImportStatement& node) {
 
     const std::filesystem::path rel_path = path_from_parts(parts);
 
-    std::vector<std::filesystem::path> candidates;
-    candidates.push_back(rel_path);
-
-    if (!file_path.empty() && file_path != "unknown") {
-        const auto base = std::filesystem::path(file_path).parent_path();
-        if (!base.empty()) {
-            candidates.push_back(base / rel_path);
-        }
-    }
-
-    candidates.push_back(std::filesystem::path("/mnt/ssd/Coding/mt-lang/compiler") / rel_path);
-
     std::string module_source;
     std::filesystem::path module_file_path;
-
-    for (const auto& candidate : candidates) {
-        if (read_file(candidate, &module_source)) {
-            module_file_path = candidate;
-            break;
-        }
+    const auto resolved = resolve_module_path(rel_path, file_path);
+    if (resolved.has_value()) {
+        module_file_path = *resolved;
+        read_file(module_file_path, &module_source);
     }
 
     if (module_source.empty()) {
@@ -876,14 +993,33 @@ std::string SemanticAnalyzer::analyze_from_import(FromImportStatement& node) {
     }
 
     try {
-        std::string file_name = module_file_path.string();
+        std::string file_name = normalize_existing_path(module_file_path);
+        if (import_stack_paths) {
+            const auto cycle_it =
+                std::find(import_stack_paths->begin(), import_stack_paths->end(), file_name);
+            if (cycle_it != import_stack_paths->end()) {
+                add_error("Import cycle detected: " + format_import_cycle(*import_stack_paths, file_name));
+                return "";
+            }
+            import_stack_paths->push_back(file_name);
+        }
+
+        struct StackPopGuard {
+            std::shared_ptr<std::vector<std::string>> stack;
+            ~StackPopGuard() {
+                if (stack && !stack->empty()) {
+                    stack->pop_back();
+                }
+            }
+        } pop_guard{import_stack_paths};
+
         Tokenizer tokenizer(module_source, file_name);
         std::vector<Token> tokens = tokenizer.tokenize();
 
         Parser parser(std::move(tokens), file_name);
         ASTNode module_ast = parser.parse_program();
 
-        SemanticAnalyzer module_analyzer(file_name);
+        SemanticAnalyzer module_analyzer(file_name, import_stack_paths);
         module_analyzer.analyze(module_ast);
 
         for (const auto& [class_name, class_info] : module_analyzer.get_classes()) {

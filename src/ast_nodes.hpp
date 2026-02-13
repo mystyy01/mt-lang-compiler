@@ -127,18 +127,24 @@ struct FunctionDeclaration {
     std::string name;
     std::vector<Parameter> parameters;
     ASTNode body;
+    int line = -1;
+    int column = -1;
 };
 
 struct ExternalDeclaration {
     std::string return_type;
     std::string name;
     std::vector<Parameter> parameters;
+    int line = -1;
+    int column = -1;
 };
 
 struct DynamicFunctionDeclaration {
     std::string name;
     std::vector<Parameter> parameters;
     ASTNode body;
+    int line = -1;
+    int column = -1;
 };
 
 struct FromImportStatement {
@@ -462,18 +468,24 @@ inline ASTNode clone_node(const ASTNode& node) {
                 n.name,
                 detail::clone_parameter_vector(n.parameters),
                 clone_node(n.body),
+                n.line,
+                n.column,
             });
         } else if constexpr (std::is_same_v<T, ExternalDeclaration>) {
             return make_node<ExternalDeclaration>(ExternalDeclaration{
                 n.return_type,
                 n.name,
                 detail::clone_parameter_vector(n.parameters),
+                n.line,
+                n.column,
             });
         } else if constexpr (std::is_same_v<T, DynamicFunctionDeclaration>) {
             return make_node<DynamicFunctionDeclaration>(DynamicFunctionDeclaration{
                 n.name,
                 detail::clone_parameter_vector(n.parameters),
                 clone_node(n.body),
+                n.line,
+                n.column,
             });
         } else if constexpr (std::is_same_v<T, FromImportStatement>) {
             return make_node<FromImportStatement>(FromImportStatement{

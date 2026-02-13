@@ -1,0 +1,2 @@
+use import_cycle_b as b
+print(1)

@@ -1,0 +1,1 @@
+Error: Wildcard import not allowed for libc module in <ROOT>/tests/diagnostics/parser_libc_wildcard_error.mtc (Severity: ERROR)

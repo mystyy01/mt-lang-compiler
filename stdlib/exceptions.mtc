@@ -1,0 +1,7 @@
+class Exception {
+    arg string message
+}
+
+class ValueError inherits Exception {
+    arg string message
+}

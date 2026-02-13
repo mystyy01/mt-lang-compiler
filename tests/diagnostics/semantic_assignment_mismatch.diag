@@ -1,0 +1,1 @@
+Error: Type mismatch at line 1, column 5. Cannot assign type string to int in <ROOT>/tests/diagnostics/semantic_assignment_mismatch.mtc

@@ -1,0 +1,16 @@
+int[4096] values = [1, 2, 3, 4]
+
+int i = 0
+while (i < 4096) {
+  set values[i] = i
+  set i = i + 1
+}
+
+int sum = 0
+int j = 0
+while (j < 4096) {
+  set sum = sum + values[j]
+  set j = j + 1
+}
+
+print(sum)
