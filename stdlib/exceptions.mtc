@@ -1,15 +1,44 @@
+from libc use exit
+
 class Exception {
     string message = ""
 
-    func new(string message = "") {
+    func new(string message = ""){
         set this.message = message
+    }
+
+    func raise(){
+        print("Exception: " + this.message)
+        exit(1)
     }
 }
 
-class ValueError inherits Exception {
-    string message = ""
+class ValueError extends Exception {
+    func new(string message = ""){
+        super.new(message)
+    }
+}
 
-    func new(string message = "") {
-        set this.message = message
+class TypeError extends Exception {
+    func new(string message = ""){
+        super.new(message)
+    }
+}
+
+class NullPointerError extends Exception {
+    func new(string message = ""){
+        super.new(message)
+    }
+}
+
+class RuntimeError extends Exception {
+    func new(string message = ""){
+        super.new(message)
+    }
+}
+
+class IndexError extends Exception {
+    func new(string message = ""){
+        super.new(message)
     }
 }

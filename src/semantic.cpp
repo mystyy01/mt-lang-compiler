@@ -1331,8 +1331,8 @@ std::string SemanticAnalyzer::analyze_call_expression(CallExpression& node) {
                 add_error("append() expects exactly 2 arguments" +
                           get_position_info(node.line, node.column));
             }
-            if (func_name == "pop" && node.arguments.size() != 1) {
-                add_error("pop() expects exactly 1 argument" +
+            if (func_name == "pop" && (node.arguments.size() < 1 || node.arguments.size() > 2)) {
+                add_error("pop() expects 1 to 2 arguments" +
                           get_position_info(node.line, node.column));
             }
             if (func_name == "split" && node.arguments.size() != 2) {
@@ -1341,6 +1341,13 @@ std::string SemanticAnalyzer::analyze_call_expression(CallExpression& node) {
             }
             for (auto& arg : node.arguments) {
                 analyze(arg);
+            }
+            if (func_name == "pop" && node.arguments.size() == 2) {
+                const std::string index_type = analyze(node.arguments[1]);
+                if (index_type != "int" && index_type != "any") {
+                    add_error("pop() index must be int" +
+                              get_position_info(node.arguments[1]));
+                }
             }
             return symbol->data_type;
         }
@@ -1452,9 +1459,15 @@ std::string SemanticAnalyzer::analyze_call_expression(CallExpression& node) {
                         return "void";
                     }
                     if (method_name == "pop") {
-                        if (!node.arguments.empty()) {
-                            add_error("array.pop() expects no arguments" +
+                        if (node.arguments.size() > 1) {
+                            add_error("array.pop() expects 0 to 1 arguments" +
                                       get_position_info(node.line, node.column));
+                        } else if (node.arguments.size() == 1) {
+                            const std::string index_type = analyze(node.arguments[0]);
+                            if (index_type != "int" && index_type != "any") {
+                                add_error("array.pop() index must be int" +
+                                          get_position_info(node.arguments[0]));
+                            }
                         }
                         return "any";
                     }
@@ -1497,9 +1510,15 @@ std::string SemanticAnalyzer::analyze_call_expression(CallExpression& node) {
                     return "void";
                 }
                 if (method_name == "pop") {
-                    if (!node.arguments.empty()) {
-                        add_error("array.pop() expects no arguments" +
+                    if (node.arguments.size() > 1) {
+                        add_error("array.pop() expects 0 to 1 arguments" +
                                   get_position_info(node.line, node.column));
+                    } else if (node.arguments.size() == 1) {
+                        const std::string index_type = analyze(node.arguments[0]);
+                        if (index_type != "int" && index_type != "any") {
+                            add_error("array.pop() index must be int" +
+                                      get_position_info(node.arguments[0]));
+                        }
                     }
                     return "any";
                 }

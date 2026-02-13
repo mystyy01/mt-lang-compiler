@@ -1,0 +1,197 @@
+from libc use strlen, strcmp, strncmp, strcpy, malloc, strcat, strstr, sprintf, tolower
+from iter use range
+
+// Split a string by delimiter, returning an array of strings
+// Note: This is a compiler builtin - the implementation is in codegen.py
+// This declaration exists for type checking purposes
+
+// Get the length of a string
+int length(string text) {
+    return strlen(text)
+}
+
+// Check if a string starts with a prefix
+bool starts_with(string text, string prefix) {
+    int prefix_len = strlen(prefix)
+    int cmp = strncmp(text, prefix, prefix_len)
+    if (cmp == 0) {
+        return true
+    }
+    return false
+}
+
+// Concatenate two strings
+string concat(string a, string b) {
+    int len_a = strlen(a)
+    int len_b = strlen(b)
+    int total_len = len_a + len_b + 1
+    string result = malloc(total_len)
+    strcpy(result, a)
+    strcat(result, b)
+    return result
+}
+
+// Compare two strings (returns 0 if equal, negative if a < b, positive if a > b)
+int compare(string a, string b) {
+    return strcmp(a, b)
+}
+
+// Check if two strings are equal
+bool equals(string a, string b) {
+    int cmp = strcmp(a, b)
+    if (cmp == 0) {
+        return true
+    }
+    return false
+}
+
+// Check if string 'text' contains substring 'substr'
+// Returns true if found, false otherwise
+bool contains(string text, string substr) {
+    string result = strstr(text, substr)
+    if (result != null) {
+        return true
+    }
+    return false
+}
+
+// Get the ASCII/Unicode code point of a single character
+int char_code(string char) {
+    // Use strncmp to compare against known characters
+    // Digits 0-9: ASCII 48-57
+    if (strcmp(char, "0") == 0) { return 48 }
+    if (strcmp(char, "1") == 0) { return 49 }
+    if (strcmp(char, "2") == 0) { return 50 }
+    if (strcmp(char, "3") == 0) { return 51 }
+    if (strcmp(char, "4") == 0) { return 52 }
+    if (strcmp(char, "5") == 0) { return 53 }
+    if (strcmp(char, "6") == 0) { return 54 }
+    if (strcmp(char, "7") == 0) { return 55 }
+    if (strcmp(char, "8") == 0) { return 56 }
+    if (strcmp(char, "9") == 0) { return 57 }
+    // Uppercase A-Z: ASCII 65-90
+    if (strcmp(char, "A") == 0) { return 65 }
+    if (strcmp(char, "B") == 0) { return 66 }
+    if (strcmp(char, "C") == 0) { return 67 }
+    if (strcmp(char, "D") == 0) { return 68 }
+    if (strcmp(char, "E") == 0) { return 69 }
+    if (strcmp(char, "F") == 0) { return 70 }
+    if (strcmp(char, "G") == 0) { return 71 }
+    if (strcmp(char, "H") == 0) { return 72 }
+    if (strcmp(char, "I") == 0) { return 73 }
+    if (strcmp(char, "J") == 0) { return 74 }
+    if (strcmp(char, "K") == 0) { return 75 }
+    if (strcmp(char, "L") == 0) { return 76 }
+    if (strcmp(char, "M") == 0) { return 77 }
+    if (strcmp(char, "N") == 0) { return 78 }
+    if (strcmp(char, "O") == 0) { return 79 }
+    if (strcmp(char, "P") == 0) { return 80 }
+    if (strcmp(char, "Q") == 0) { return 81 }
+    if (strcmp(char, "R") == 0) { return 82 }
+    if (strcmp(char, "S") == 0) { return 83 }
+    if (strcmp(char, "T") == 0) { return 84 }
+    if (strcmp(char, "U") == 0) { return 85 }
+    if (strcmp(char, "V") == 0) { return 86 }
+    if (strcmp(char, "W") == 0) { return 87 }
+    if (strcmp(char, "X") == 0) { return 88 }
+    if (strcmp(char, "Y") == 0) { return 89 }
+    if (strcmp(char, "Z") == 0) { return 90 }
+    // Lowercase a-z: ASCII 97-122
+    if (strcmp(char, "a") == 0) { return 97 }
+    if (strcmp(char, "b") == 0) { return 98 }
+    if (strcmp(char, "c") == 0) { return 99 }
+    if (strcmp(char, "d") == 0) { return 100 }
+    if (strcmp(char, "e") == 0) { return 101 }
+    if (strcmp(char, "f") == 0) { return 102 }
+    if (strcmp(char, "g") == 0) { return 103 }
+    if (strcmp(char, "h") == 0) { return 104 }
+    if (strcmp(char, "i") == 0) { return 105 }
+    if (strcmp(char, "j") == 0) { return 106 }
+    if (strcmp(char, "k") == 0) { return 107 }
+    if (strcmp(char, "l") == 0) { return 108 }
+    if (strcmp(char, "m") == 0) { return 109 }
+    if (strcmp(char, "n") == 0) { return 110 }
+    if (strcmp(char, "o") == 0) { return 111 }
+    if (strcmp(char, "p") == 0) { return 112 }
+    if (strcmp(char, "q") == 0) { return 113 }
+    if (strcmp(char, "r") == 0) { return 114 }
+    if (strcmp(char, "s") == 0) { return 115 }
+    if (strcmp(char, "t") == 0) { return 116 }
+    if (strcmp(char, "u") == 0) { return 117 }
+    if (strcmp(char, "v") == 0) { return 118 }
+    if (strcmp(char, "w") == 0) { return 119 }
+    if (strcmp(char, "x") == 0) { return 120 }
+    if (strcmp(char, "y") == 0) { return 121 }
+    if (strcmp(char, "z") == 0) { return 122 }
+    return 0
+}
+
+bool isalnum(string text){
+    if (text.length() == 0){
+        return false
+    }
+    int i = 0
+    while (i < text.length()){
+        string char = text[i]
+        int code = char_code(char)
+        if (code == 0) {
+            return false
+        }
+        set i = i + 1
+    }
+    return true
+}
+bool isdigit(string char){
+    try{
+        int(char)
+        return true
+    }
+    catch{
+        return false
+    }
+}
+bool isalpha(string text){
+    if (text.length() == 0){
+        return false
+    }
+
+    int i = 0
+    while (i < text.length()){
+        string char = text[i]
+        int code = char_code(char)
+
+        // A-Z
+        if (code >= 65 && code <= 90){
+            set i = i + 1
+        } else {
+            // a-z
+            if (code >= 97 && code <= 122){
+                set i = i + 1
+            } else {
+                // anything else = not alpha
+                return false
+            }
+        }
+    }
+
+    return true
+}
+
+string lower(string text) {
+    int len = strlen(text)
+    if (len == 0) {
+        return ""
+    }
+    string result = ""
+    int i = 0
+    while (i < len) {
+        string char = text[i]
+        int code = char_code(char)
+        int lower_code = tolower(code)
+        string lower_char = malloc(2)
+        sprintf(lower_char, "%c", lower_code)
+        set result = concat(result, lower_char)
+        set i = i + 1
+    }
+    return result
+}

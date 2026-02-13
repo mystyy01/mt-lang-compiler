@@ -1,3 +1,100 @@
-bool file_exists(string path) {
+from libc use access, fopen, fclose, fseek, ftell, fread, fputs, malloc
+from strings use split
+
+class File{
+    string path = ""
+    string mode = ""
+
+    func new(string path, string mode){
+        set this.path = path
+        set this.mode = mode
+    }
+
+    string read(){
+        if (this.mode != "r"){
+            return "Cannot read files without read permissions"
+        }
+        string file = fopen(this.path, "r")
+        if (file == null){
+            return "fopen returned null for: " + this.path
+        }
+        fseek(file, 0, 2)
+        int fileSize = ftell(file)
+        if (fileSize < 0){
+            fclose(file)
+            return "ftell returned negative size"
+        }
+        fseek(file, 0, 0)
+        int bufferSize = fileSize + 1
+        string buffer = malloc(bufferSize)
+        if (buffer == null){
+            fclose(file)
+            return "malloc failed"
+        }
+        int bytesRead = fread(buffer, 1, fileSize, file)
+        if (bytesRead != fileSize){
+            fclose(file)
+            return "fread mismatch: expected " + str(fileSize) + ", got " + str(bytesRead)
+        }
+        fclose(file)
+        return buffer
+    }
+    
+    void write(string content){
+        if (this.mode != "w"){
+            print("Cannot write to files without write permissions")
+            return
+        }
+        string file = fopen(this.path, "w")
+        fputs(content, file)
+        fclose(file)
+    }
+    
+    void append(string content){
+        if (this.mode != "a"){
+            print("Cannot append to files without append permissions")
+            return
+        }
+        string file = fopen(this.path, "a")
+        fputs(content, file)
+        fclose(file)
+    }
+    array readlines(){
+        // need to check if files exists other wise we get seg fault
+        if (this.mode != "r"){
+            return []
+        }
+        string file = fopen(this.path, "r")
+        if (file == null){
+            return []
+        }
+        fseek(file, 0, 2)
+        int fileSize = ftell(file)
+        fseek(file, 0, 0)
+        int bufferSize = fileSize + 1
+        string buffer = malloc(bufferSize)
+        if (buffer == null){
+            fclose(file)
+            return []
+        }
+        fread(buffer, 1, fileSize, file)
+        // set buffer[bufferSize] = "\0" doesnt work but we need to add a null byte as a delimiter as we handle it as a string
+
+        fclose(file)
+        array lines = split(buffer, "\n")
+        return lines
+    }
+}
+
+
+// Check if a file exists
+// Returns true if the file exists, false otherwise
+bool file_exists(string filepath){
+    // access(path, 0) returns 0 if file exists, -1 if not
+    // F_OK = 0 (check existence only)
+    int result = access(filepath, 0)
+    if (result == 0){
+        return true
+    }
     return false
 }

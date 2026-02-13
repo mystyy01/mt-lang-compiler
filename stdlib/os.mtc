@@ -1,0 +1,82 @@
+from libc use system, getenv, exit, access, remove, rename, mkdir, rmdir, chdir, unlink, getcwd, malloc
+
+// Run a shell command and return the exit code
+int run(string cmd){
+    return system(cmd)
+}
+
+// Get an environment variable value
+string env(string name){
+    return getenv(name)
+}
+
+// Exit the program with a status code
+func quit(int code){
+    exit(code)
+}
+
+// Check if a file or directory exists
+bool exists(string path){
+    int result = access(path, 0)
+    if (result == 0){
+        return true
+    }
+    return false
+}
+
+// Delete a file
+// Returns true on success, false on failure
+bool remove_file(string path){
+    int result = remove(path)
+    if (result == 0){
+        return true
+    }
+    return false
+}
+
+// Rename/move a file
+// Returns true on success, false on failure
+bool move(string old_path, string new_path){
+    int result = rename(old_path, new_path)
+    if (result == 0){
+        return true
+    }
+    return false
+}
+
+// Create a directory
+// Returns true on success, false on failure
+bool makedir(string path){
+    int result = mkdir(path, 511)
+    if (result == 0){
+        return true
+    }
+    return false
+}
+
+// Remove an empty directory
+// Returns true on success, false on failure
+bool removedir(string path){
+    int result = rmdir(path)
+    if (result == 0){
+        return true
+    }
+    return false
+}
+
+// Get the current working directory
+string cwd(){
+    string buffer = malloc(1024)
+    string result = getcwd(buffer, 1024)
+    return result
+}
+
+// Change the current working directory
+// Returns true on success, false on failure
+bool cd(string path){
+    int result = chdir(path)
+    if (result == 0){
+        return true
+    }
+    return false
+}

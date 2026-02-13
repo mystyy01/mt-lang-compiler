@@ -47,6 +47,7 @@ struct CodegenParameterInfo {
 struct CodegenFunctionInfo {
     std::string name;
     std::string return_type;
+    std::string return_mt_type;
     std::vector<CodegenParameterInfo> parameters;
     bool is_external = false;
     bool is_var_arg = false;
@@ -67,6 +68,7 @@ struct CodegenClassMethodInfo {
     std::string method_name;
     std::string mangled_name;
     std::string return_type;
+    std::string return_mt_type;
     std::vector<CodegenParameterInfo> parameters;
     const MethodDeclaration* ast_node = nullptr;
 };
@@ -125,6 +127,7 @@ private:
     std::unordered_map<std::string, int> class_type_tags;
     std::unordered_map<std::string, StringConstantInfo> string_constants;
     std::vector<ASTNode> top_level_variables;
+    std::unordered_map<std::string, VariableInfo> module_globals;
     std::vector<std::string> global_lines;
     std::vector<std::string> declaration_lines;
     std::vector<std::string> function_lines;

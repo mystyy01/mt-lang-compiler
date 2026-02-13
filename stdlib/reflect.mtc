@@ -1,0 +1,68 @@
+// Reflection utilities for MT language
+//
+// This module provides functions for runtime type introspection.
+// Note: hasattr, classof, and typeof are language builtins - they can be used
+// without importing this file. This file documents them and provides utilities.
+//
+// Builtin functions:
+//   typeof(expr)           - Returns the type name as a string ("int", "float", "string", "bool", "array", "object")
+//   hasattr(obj, "attr")   - Returns true if the class has the named field or method (compile-time check)
+//   classof(obj)           - Returns the class name as a string (e.g., "Person")
+//
+// Example usage:
+//   class Person { arg string name }
+//   Person p = new Person("Alice")
+//
+//   if (hasattr(p, "name")) { ... }     // true - Person has 'name' field
+//   if (hasattr(p, "age")) { ... }      // false - Person has no 'age' field
+//   string cls = classof(p)             // "Person"
+//   string typ = typeof(p)              // "object"
+//   string typ2 = typeof(42)            // "int"
+
+from libc use strcmp
+
+// Check if a value is null
+// Works with any type - compares against the zero/null value for that type
+bool is_null(int val) {
+    return val == null
+}
+
+bool is_null_float(float val) {
+    return val == null
+}
+
+bool is_null_string(string val) {
+    return val == null
+}
+
+bool is_null_bool(bool val) {
+    return val == null
+}
+
+// Check if a string represents a numeric type
+bool is_numeric_type(string type_name) {
+    if (strcmp(type_name, "int") == 0) {
+        return true
+    }
+    if (strcmp(type_name, "float") == 0) {
+        return true
+    }
+    return false
+}
+
+// Check if a string represents a primitive type
+bool is_primitive_type(string type_name) {
+    if (strcmp(type_name, "int") == 0) {
+        return true
+    }
+    if (strcmp(type_name, "float") == 0) {
+        return true
+    }
+    if (strcmp(type_name, "string") == 0) {
+        return true
+    }
+    if (strcmp(type_name, "bool") == 0) {
+        return true
+    }
+    return false
+}
