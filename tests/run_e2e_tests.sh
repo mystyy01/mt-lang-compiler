@@ -77,6 +77,7 @@ cases=(
   arrays_fixed_dynamic
   class_and_hasattr
   classof_basic
+  class_constructor_new
   dict_ops
   dict_literal
   imports_and_io

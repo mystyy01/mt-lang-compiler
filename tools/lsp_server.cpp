@@ -806,6 +806,105 @@ std::size_t offset_from_line_character(const std::string& text, int line, int ch
     return offset;
 }
 
+std::string get_line_text(const std::string& text, int line) {
+    int target_line = std::max(0, line);
+    std::size_t offset = 0;
+    int current_line = 0;
+    while (offset < text.size() && current_line < target_line) {
+        if (text[offset] == '\n') {
+            ++current_line;
+        }
+        ++offset;
+    }
+    if (current_line < target_line) {
+        return "";
+    }
+    std::size_t line_start = offset;
+    while (offset < text.size() && text[offset] != '\n') {
+        ++offset;
+    }
+    return text.substr(line_start, offset - line_start);
+}
+
+enum class ImportCompletionContext {
+    NONE,
+    FROM_MODULE,
+    LIBC_SYMBOLS,
+    MODULE_PATH,
+    MODULE_SYMBOLS,
+};
+
+struct ImportCompletionInfo {
+    ImportCompletionContext context = ImportCompletionContext::NONE;
+    std::string module_name;
+    std::string partial;
+    std::unordered_set<std::string> already_imported;
+};
+
+ImportCompletionInfo detect_import_context(const std::string& line_text, int character) {
+    ImportCompletionInfo info;
+
+    std::size_t len = std::min(static_cast<std::size_t>(std::max(0, character)),
+                               line_text.size());
+    std::string prefix = line_text.substr(0, len);
+
+    // Skip leading whitespace, then expect "from "
+    std::size_t start = 0;
+    while (start < prefix.size() &&
+           std::isspace(static_cast<unsigned char>(prefix[start]))) {
+        ++start;
+    }
+    if (prefix.compare(start, 5, "from ") != 0) {
+        return info;
+    }
+    start += 5;
+
+    // Look for " use " to split module name from symbol list
+    std::size_t use_pos = prefix.find(" use ", start);
+
+    if (use_pos == std::string::npos) {
+        // No "use" yet — classify based on what follows "from "
+        std::string module_part = trim(prefix.substr(start));
+        if (!module_part.empty() && module_part.back() == '.') {
+            // Cursor right after a dot: suggest submodules (e.g. "from core.")
+            info.context = ImportCompletionContext::MODULE_PATH;
+            info.module_name = module_part.substr(0, module_part.size() - 1);
+        } else {
+            // Cursor at/within module name: suggest importable modules (e.g. "from ")
+            info.context = ImportCompletionContext::FROM_MODULE;
+            info.partial = module_part;
+        }
+        return info;
+    }
+
+    // "from <module> use <symbols...>"
+    std::string module_name = trim(prefix.substr(start, use_pos - start));
+    if (module_name.empty()) {
+        return info;
+    }
+    info.module_name = module_name;
+
+    // Collect already-imported names (all comma-separated segments except the last,
+    // which is the partial text the user is currently typing)
+    std::string symbols_text = prefix.substr(use_pos + 5);
+    std::size_t last_comma = symbols_text.rfind(',');
+    if (last_comma != std::string::npos) {
+        std::istringstream ss(symbols_text.substr(0, last_comma));
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            std::string name = trim(token);
+            if (!name.empty()) {
+                info.already_imported.insert(name);
+            }
+        }
+    }
+
+    info.context = (module_name == "libc")
+        ? ImportCompletionContext::LIBC_SYMBOLS
+        : ImportCompletionContext::MODULE_SYMBOLS;
+    return info;
+}
+
 void apply_text_change(std::string* text, const TextChange& change) {
     if (!text) {
         return;
@@ -1573,6 +1672,215 @@ private:
         return std::string("{\"isIncomplete\":false,\"items\":") + items.str() + "}";
     }
 
+    std::string build_libc_completion_result(const ImportCompletionInfo& info) {
+        std::ostringstream items;
+        items << "[";
+        bool first = true;
+        for (const auto& [name, func] : LIBC_FUNCTIONS) {
+            if (info.already_imported.count(name) > 0) {
+                continue;
+            }
+            if (!first) {
+                items << ",";
+            }
+            first = false;
+
+            std::ostringstream detail;
+            detail << "(";
+            for (std::size_t i = 0; i < func.args.size(); ++i) {
+                if (i > 0) {
+                    detail << ", ";
+                }
+                detail << func.args[i];
+            }
+            if (func.var_arg) {
+                if (!func.args.empty()) {
+                    detail << ", ";
+                }
+                detail << "...";
+            }
+            detail << ") -> " << func.ret;
+
+            items << "{"
+                  << "\"label\":\"" << json_escape(name) << "\","
+                  << "\"kind\":3,"
+                  << "\"detail\":\"" << json_escape(detail.str()) << "\""
+                  << "}";
+        }
+        items << "]";
+        return std::string("{\"isIncomplete\":false,\"items\":") + items.str() + "}";
+    }
+
+    std::vector<std::filesystem::path> import_search_bases(const std::string& current_file_path) {
+        std::vector<std::filesystem::path> bases;
+        if (!current_file_path.empty()) {
+            std::filesystem::path current_path(current_file_path);
+            if (current_path.has_parent_path()) {
+                bases.push_back(current_path.parent_path());
+            }
+        }
+        if (!workspace_root_path_.empty()) {
+            std::filesystem::path workspace_path(workspace_root_path_);
+            const std::string ws_str = workspace_path.lexically_normal().string();
+            bool exists = false;
+            for (const auto& base : bases) {
+                if (base.lexically_normal().string() == ws_str) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                bases.push_back(workspace_path);
+            }
+        }
+        return bases;
+    }
+
+    std::string build_module_path_completion_result(const ImportCompletionInfo& info,
+                                                     const std::string& current_file_path,
+                                                     int line, int character) {
+        std::string dir_rel = info.module_name;
+        std::replace(dir_rel.begin(), dir_rel.end(), '.', '/');
+
+        auto bases = import_search_bases(current_file_path);
+
+        std::set<std::string> seen;
+        std::ostringstream items;
+        items << "[";
+        bool first = true;
+        std::error_code ec;
+        for (const auto& base : bases) {
+            std::filesystem::path dir_path = base / dir_rel;
+            if (!std::filesystem::is_directory(dir_path, ec)) {
+                continue;
+            }
+            std::filesystem::directory_iterator dir_it(dir_path, ec);
+            if (ec) {
+                continue;
+            }
+            for (const auto& entry : dir_it) {
+                std::string entry_name;
+                if (entry.is_regular_file(ec) && entry.path().extension() == ".mtc") {
+                    entry_name = entry.path().stem().string();
+                } else if (entry.is_directory(ec)) {
+                    entry_name = entry.path().filename().string();
+                }
+                if (entry_name.empty() || seen.count(entry_name) > 0) {
+                    continue;
+                }
+                seen.insert(entry_name);
+                if (!first) {
+                    items << ",";
+                }
+                first = false;
+                // textEdit tells VS Code to insert at cursor, bypassing word-based filtering
+                items << "{"
+                      << "\"label\":\"" << json_escape(entry_name) << "\","
+                      << "\"kind\":9,"
+                      << "\"textEdit\":{"
+                      << "\"range\":{\"start\":{\"line\":" << line << ",\"character\":" << character
+                      << "},\"end\":{\"line\":" << line << ",\"character\":" << character << "}},"
+                      << "\"newText\":\"" << json_escape(entry_name) << "\""
+                      << "}"
+                      << "}";
+            }
+        }
+        items << "]";
+        return std::string("{\"isIncomplete\":false,\"items\":") + items.str() + "}";
+    }
+
+    std::string build_from_module_completion_result(const std::string& current_file_path) {
+        auto bases = import_search_bases(current_file_path);
+
+        std::set<std::string> seen;
+        seen.insert("libc");
+
+        std::ostringstream items;
+        items << "[";
+        // Always suggest libc
+        items << "{\"label\":\"libc\",\"kind\":9,\"detail\":\"C standard library\"}";
+
+        std::error_code ec;
+        for (const auto& base : bases) {
+            if (!std::filesystem::is_directory(base, ec)) {
+                continue;
+            }
+            std::filesystem::directory_iterator dir_it(base, ec);
+            if (ec) {
+                continue;
+            }
+            for (const auto& entry : dir_it) {
+                std::string entry_name;
+                if (entry.is_regular_file(ec) && entry.path().extension() == ".mtc") {
+                    entry_name = entry.path().stem().string();
+                } else if (entry.is_directory(ec)) {
+                    entry_name = entry.path().filename().string();
+                }
+                if (entry_name.empty() || entry_name[0] == '.' || seen.count(entry_name) > 0) {
+                    continue;
+                }
+                seen.insert(entry_name);
+                items << ",{"
+                      << "\"label\":\"" << json_escape(entry_name) << "\","
+                      << "\"kind\":9"
+                      << "}";
+            }
+        }
+        items << "]";
+        return std::string("{\"isIncomplete\":false,\"items\":") + items.str() + "}";
+    }
+
+    std::string build_module_symbols_completion_result(const ImportCompletionInfo& info,
+                                                       const std::string& current_file_path) {
+        auto resolved = resolve_import_module_uri(current_file_path, workspace_root_path_, info.module_name);
+        if (!resolved.has_value()) {
+            return "{\"isIncomplete\":false,\"items\":[]}";
+        }
+
+        std::set<std::string> labels;
+        auto doc_it = documents_.find(resolved.value());
+        if (doc_it != documents_.end()) {
+            labels.insert(doc_it->second.completion_symbols.begin(),
+                          doc_it->second.completion_symbols.end());
+            for (const auto& def : doc_it->second.definitions) {
+                labels.insert(def.name);
+            }
+        } else {
+            std::string file_path = uri_to_path(resolved.value());
+            std::string text;
+            if (read_file_text(file_path, &text)) {
+                AnalysisResult analysis = analyze_document_text(file_path, text, workspace_root_path_);
+                labels.insert(analysis.completion_symbols.begin(),
+                              analysis.completion_symbols.end());
+                for (const auto& def : analysis.definitions) {
+                    labels.insert(def.name);
+                }
+            }
+        }
+
+        std::ostringstream items;
+        items << "[";
+        bool first = true;
+        for (const auto& label : labels) {
+            if (info.already_imported.count(label) > 0) {
+                continue;
+            }
+            if (KEYWORDS.count(label) > 0) {
+                continue;
+            }
+            if (!first) {
+                items << ",";
+            }
+            first = false;
+            items << "{"
+                  << "\"label\":\"" << json_escape(label) << "\","
+                  << "\"kind\":6"
+                  << "}";
+        }
+        items << "]";
+        return std::string("{\"isIncomplete\":false,\"items\":") + items.str() + "}";
+    }
+
     void handle_initialize(const std::string& id_raw, const std::string& message) {
         auto root_uri = json_get_string(message, "rootUri");
         if (root_uri.has_value()) {
@@ -1676,6 +1984,36 @@ private:
             send_response(id_raw, "{\"isIncomplete\":false,\"items\":[]}");
             return;
         }
+
+        auto line = json_get_int(message, "line");
+        auto character = json_get_int(message, "character");
+
+        if (line.has_value() && character.has_value()) {
+            auto doc_it = documents_.find(uri.value());
+            if (doc_it != documents_.end()) {
+                std::string line_text = get_line_text(doc_it->second.text, line.value());
+                ImportCompletionInfo info = detect_import_context(line_text, character.value());
+
+                switch (info.context) {
+                    case ImportCompletionContext::FROM_MODULE:
+                        send_response(id_raw, build_from_module_completion_result(doc_it->second.path));
+                        return;
+                    case ImportCompletionContext::LIBC_SYMBOLS:
+                        send_response(id_raw, build_libc_completion_result(info));
+                        return;
+                    case ImportCompletionContext::MODULE_PATH:
+                        send_response(id_raw, build_module_path_completion_result(
+                            info, doc_it->second.path, line.value(), character.value()));
+                        return;
+                    case ImportCompletionContext::MODULE_SYMBOLS:
+                        send_response(id_raw, build_module_symbols_completion_result(info, doc_it->second.path));
+                        return;
+                    case ImportCompletionContext::NONE:
+                        break;
+                }
+            }
+        }
+
         send_response(id_raw, build_completion_result(uri.value()));
     }
 

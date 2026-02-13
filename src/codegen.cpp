@@ -1996,6 +1996,43 @@ CodeGenerator::IRValue CodeGenerator::generate_new_expression(NewExpression& nod
                   field.llvm_type + "* " + field_ptr);
     }
 
+    // If the class defines `new(...)`, call it automatically on instantiation.
+    const auto init_it = class_info.methods.find("new");
+    if (init_it != class_info.methods.end()) {
+        const CodegenClassMethodInfo& init_method = init_it->second;
+        const std::size_t expected_params = init_method.parameters.size() > 0
+            ? init_method.parameters.size() - 1 : 0;
+
+        std::vector<ASTNode> arg_nodes;
+        arg_nodes.reserve(node.arguments.size());
+        for (const auto& arg : node.arguments) {
+            arg_nodes.push_back(clone_node(arg));
+        }
+        while (arg_nodes.size() < expected_params) {
+            const std::size_t param_index = arg_nodes.size() + 1;
+            if (param_index >= init_method.parameters.size() ||
+                !init_method.parameters[param_index].default_value) {
+                break;
+            }
+            arg_nodes.push_back(clone_node(init_method.parameters[param_index].default_value));
+        }
+        if (arg_nodes.size() != expected_params) {
+            throw std::runtime_error("Constructor '" + node.class_name + ".new' argument count mismatch");
+        }
+
+        std::vector<IRValue> init_args;
+        init_args.reserve(1 + arg_nodes.size());
+        init_args.push_back(IRValue{"i8*", obj_ptr, true});
+
+        for (std::size_t i = 0; i < arg_nodes.size(); ++i) {
+            const auto& param = init_method.parameters[i + 1];
+            IRValue arg = cast_value(generate_expression(arg_nodes[i]), param.llvm_type);
+            init_args.push_back(std::move(arg));
+        }
+
+        (void)emit_call(init_method.return_type, "@" + init_method.mangled_name, init_args);
+    }
+
     return IRValue{"i8*", obj_ptr, true};
 }
 

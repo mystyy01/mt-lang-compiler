@@ -1177,7 +1177,9 @@ ASTNode Parser::parse_class_declaration() {
             }
 
             if (type_match || is_func) {
-                if (peek_pos < tokens.size() && tokens[peek_pos].type == T_NAME) {
+                if (peek_pos < tokens.size() &&
+                    (tokens[peek_pos].type == T_NAME ||
+                     (tokens[peek_pos].type == T_KEYWORD && tokens[peek_pos].value == "new"))) {
                     ++peek_pos;
                     if (peek_pos < tokens.size() && tokens[peek_pos].type == T_SYMBOL &&
                         tokens[peek_pos].value == "(") {
@@ -1267,8 +1269,17 @@ MethodDeclaration Parser::parse_method_declaration() {
         }
     }
 
-    const std::string method_name = current_token().value;
-    expect(T_NAME);
+    std::string method_name;
+    if (match(T_NAME) || match(T_KEYWORD, "new")) {
+        method_name = current_token().value;
+        advance();
+    } else {
+        const Token& current = current_token();
+        throw CompilerError(
+            "Expected method name" + get_position_info(&current) + " but found '" +
+                current.value + "'",
+            "ERROR", file_path);
+    }
 
     expect(T_SYMBOL, "(");
     std::vector<Parameter> params;

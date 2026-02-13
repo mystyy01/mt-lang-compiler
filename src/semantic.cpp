@@ -569,6 +569,27 @@ std::string SemanticAnalyzer::analyze_new_expression(NewExpression& node) {
                   get_position_info(node.line, node.column));
         return "unknown";
     }
+
+    const auto class_it = classes.find(node.class_name);
+    if (class_it != classes.end()) {
+        const auto ctor_it = class_it->second.methods.find("new");
+        if (ctor_it != class_it->second.methods.end()) {
+            validate_call_arguments(
+                node.class_name + ".new",
+                node.arguments,
+                ctor_it->second.params,
+                true);
+        } else {
+            for (auto& arg : node.arguments) {
+                analyze(arg);
+            }
+        }
+    } else {
+        for (auto& arg : node.arguments) {
+            analyze(arg);
+        }
+    }
+
     return node.class_name;
 }
 

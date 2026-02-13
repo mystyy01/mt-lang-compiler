@@ -1,0 +1,13 @@
+class Counter {
+  int value = 0
+
+  func new(int start = 3) {
+    set this.value = start
+  }
+}
+
+Counter a = new Counter()
+print(a.value)
+
+Counter b = new Counter(9)
+print(b.value)
