@@ -487,6 +487,9 @@ std::string CodeGenerator::generate(ASTNode& root) {
             }
             for (const auto& [method_name, method_info] : class_it->second.methods) {
                 (void)method_name;
+                if (method_info.ast_node == nullptr) {
+                    continue;
+                }
                 emit_class_method_definition(method_info);
             }
         }
@@ -635,10 +638,52 @@ void CodeGenerator::register_class_declaration(ClassDeclaration& node) {
     std::size_t offset = 0;
     std::size_t max_alignment = 1;
 
+    if (!node.inherits_from.empty()) {
+        const auto parent_it = classes.find(node.inherits_from);
+        if (parent_it == classes.end()) {
+            throw std::runtime_error("Unknown parent class '" + node.inherits_from +
+                                     "' for class '" + node.name + "' in codegen");
+        }
+
+        for (const auto& [field_name, parent_field] : parent_it->second.fields) {
+            CodegenClassFieldInfo inherited_field;
+            inherited_field.name = parent_field.name;
+            inherited_field.mt_type = parent_field.mt_type;
+            inherited_field.element_mt_type = parent_field.element_mt_type;
+            inherited_field.llvm_type = parent_field.llvm_type;
+            inherited_field.offset = parent_field.offset;
+            inherited_field.is_constructor_arg = parent_field.is_constructor_arg;
+            inherited_field.initializer = clone_node(parent_field.initializer);
+            class_info.fields[field_name] = std::move(inherited_field);
+        }
+        class_info.methods = parent_it->second.methods;
+
+        // Inherited methods are emitted with the class that declares them.
+        for (auto& [method_name, method_info] : class_info.methods) {
+            (void)method_name;
+            method_info.ast_node = nullptr;
+        }
+
+        offset = parent_it->second.object_size;
+        for (const auto& [field_name, field_info] : class_info.fields) {
+            (void)field_name;
+            const std::size_t size = llvm_type_size(field_info.llvm_type);
+            const std::size_t alignment = std::max<std::size_t>(1, std::min<std::size_t>(size, 8));
+            max_alignment = std::max(max_alignment, alignment);
+            offset = std::max(offset, field_info.offset + size);
+        }
+    }
+
     for (const auto& field : node.fields) {
+        if (class_info.fields.find(field.name) != class_info.fields.end()) {
+            throw std::runtime_error("Field '" + field.name + "' in class '" + node.name +
+                                     "' conflicts with inherited field");
+        }
+
         CodegenClassFieldInfo field_info;
         field_info.name = field.name;
         field_info.mt_type = field.type;
+        field_info.element_mt_type = field.element_type;
         field_info.llvm_type = map_type_to_llvm(field.type);
         field_info.initializer = clone_node(field.initializer);
 
@@ -864,8 +909,10 @@ void CodeGenerator::emit_function_definition(FunctionDeclaration& node) {
             }
             if (param.param_type == "array") {
                 var_it->second.is_dynamic_array = true;
+                var_it->second.dynamic_array_elem_mt_type =
+                    param.element_type.empty() ? "int" : param.element_type;
                 var_it->second.dynamic_array_elem_llvm_type =
-                    map_type_to_llvm(param.element_type.empty() ? "int" : param.element_type);
+                    map_type_to_llvm(var_it->second.dynamic_array_elem_mt_type);
             }
         }
     }
@@ -896,8 +943,10 @@ void CodeGenerator::emit_dynamic_function_definition(DynamicFunctionDeclaration&
             }
             if (param.param_type == "array") {
                 var_it->second.is_dynamic_array = true;
+                var_it->second.dynamic_array_elem_mt_type =
+                    param.element_type.empty() ? "int" : param.element_type;
                 var_it->second.dynamic_array_elem_llvm_type =
-                    map_type_to_llvm(param.element_type.empty() ? "int" : param.element_type);
+                    map_type_to_llvm(var_it->second.dynamic_array_elem_mt_type);
             }
         }
     }
@@ -933,8 +982,10 @@ void CodeGenerator::emit_class_method_definition(const CodegenClassMethodInfo& m
             }
             if (param.param_type == "array") {
                 var_it->second.is_dynamic_array = true;
+                var_it->second.dynamic_array_elem_mt_type =
+                    param.element_type.empty() ? "int" : param.element_type;
                 var_it->second.dynamic_array_elem_llvm_type =
-                    map_type_to_llvm(param.element_type.empty() ? "int" : param.element_type);
+                    map_type_to_llvm(var_it->second.dynamic_array_elem_mt_type);
             }
         }
     }
@@ -3021,6 +3072,138 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
             return IRValue{"i8*", out_buf, true};
         };
 
+    auto emit_array_to_string_from_header =
+        [this, &emit_scalar_to_string](IRValue header_value,
+                                       const std::string& elem_llvm_type,
+                                       const std::string& elem_mt_type,
+                                       const std::string& prefix) -> IRValue {
+            header_value = cast_value(header_value, "i8*");
+
+            const bool elem_is_class =
+                !elem_mt_type.empty() && classes.find(elem_mt_type) != classes.end();
+
+            StringConstantInfo empty_const = get_or_create_string_constant("[]");
+            StringConstantInfo open_const = get_or_create_string_constant("[");
+            StringConstantInfo close_const = get_or_create_string_constant("]");
+            StringConstantInfo comma_const = get_or_create_string_constant(", ");
+            StringConstantInfo null_const = get_or_create_string_constant("null");
+            StringConstantInfo unknown_const = get_or_create_string_constant("<value>");
+            StringConstantInfo class_const =
+                get_or_create_string_constant(elem_is_class ? ("<" + elem_mt_type + ">") : "<ptr>");
+
+            const std::string result_ptr = next_register(prefix + "_result_ptr");
+            emit_line(result_ptr + " = alloca i8*");
+
+            const std::string is_null = next_register(prefix + "_is_null");
+            emit_line(is_null + " = icmp eq i8* " + header_value.value + ", null");
+            const std::string null_label = next_label(prefix + "_null");
+            const std::string build_label = next_label(prefix + "_build");
+            const std::string end_label = next_label(prefix + "_end");
+            emit_line("br i1 " + is_null + ", label %" + null_label + ", label %" + build_label);
+
+            emit_label(null_label);
+            emit_line("store i8* " + string_constant_gep(empty_const) + ", i8** " + result_ptr);
+            emit_line("br label %" + end_label);
+
+            emit_label(build_label);
+            const std::string len_slot = next_register(prefix + "_len_slot");
+            emit_line(len_slot + " = bitcast i8* " + header_value.value + " to i64*");
+            const std::string len = next_register(prefix + "_len");
+            emit_line(len + " = load i64, i64* " + len_slot);
+
+            const std::string est_body = next_register(prefix + "_est_body");
+            emit_line(est_body + " = mul i64 " + len + ", 64");
+            const std::string est_total = next_register(prefix + "_est_total");
+            emit_line(est_total + " = add i64 " + est_body + ", 8");
+            const std::string out_buf = next_register(prefix + "_buf");
+            emit_line(out_buf + " = call i8* @malloc(i64 " + est_total + ")");
+
+            (void)emit_call(
+                "i8*", "@strcpy",
+                {IRValue{"i8*", out_buf, true}, IRValue{"i8*", string_constant_gep(open_const), true}});
+
+            const std::string data_slot_raw = next_register(prefix + "_data_slot_raw");
+            emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + header_value.value + ", i64 16");
+            const std::string data_slot = next_register(prefix + "_data_slot");
+            emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
+            const std::string data_raw = next_register(prefix + "_data_raw");
+            emit_line(data_raw + " = load i8*, i8** " + data_slot);
+            const std::string typed_data = next_register(prefix + "_typed_data");
+            emit_line(typed_data + " = bitcast i8* " + data_raw + " to " + elem_llvm_type + "*");
+
+            const std::string idx_ptr = next_register(prefix + "_idx_ptr");
+            emit_line(idx_ptr + " = alloca i64");
+            emit_line("store i64 0, i64* " + idx_ptr);
+
+            const std::string cond_label = next_label(prefix + "_cond");
+            const std::string body_label = next_label(prefix + "_body");
+            const std::string first_label = next_label(prefix + "_first");
+            const std::string sep_label = next_label(prefix + "_sep");
+            const std::string loop_end_label = next_label(prefix + "_loop_end");
+            emit_line("br label %" + cond_label);
+
+            emit_label(cond_label);
+            const std::string idx = next_register(prefix + "_idx");
+            emit_line(idx + " = load i64, i64* " + idx_ptr);
+            const std::string cond = next_register(prefix + "_cond_cmp");
+            emit_line(cond + " = icmp slt i64 " + idx + ", " + len);
+            emit_line("br i1 " + cond + ", label %" + body_label + ", label %" + loop_end_label);
+
+            emit_label(body_label);
+            const std::string is_first = next_register(prefix + "_is_first");
+            emit_line(is_first + " = icmp eq i64 " + idx + ", 0");
+            emit_line("br i1 " + is_first + ", label %" + first_label + ", label %" + sep_label);
+
+            emit_label(sep_label);
+            (void)emit_call("i8*", "@strcat",
+                            {IRValue{"i8*", out_buf, true}, IRValue{"i8*", string_constant_gep(comma_const), true}});
+            emit_line("br label %" + first_label);
+
+            emit_label(first_label);
+            const std::string elem_ptr = next_register(prefix + "_elem_ptr");
+            emit_line(elem_ptr + " = getelementptr inbounds " + elem_llvm_type + ", " +
+                      elem_llvm_type + "* " + typed_data + ", i64 " + idx);
+            const std::string elem_val = next_register(prefix + "_elem_val");
+            emit_line(elem_val + " = load " + elem_llvm_type + ", " + elem_llvm_type + "* " + elem_ptr);
+
+            if (elem_is_class) {
+                const std::string elem_is_null = next_register(prefix + "_elem_is_null");
+                emit_line(elem_is_null + " = icmp eq i8* " + elem_val + ", null");
+                const std::string elem_str = next_register(prefix + "_elem_str");
+                emit_line(elem_str + " = select i1 " + elem_is_null + ", i8* " +
+                          string_constant_gep(null_const) + ", i8* " + string_constant_gep(class_const));
+                (void)emit_call("i8*", "@strcat",
+                                {IRValue{"i8*", out_buf, true}, IRValue{"i8*", elem_str, true}});
+            } else if (elem_llvm_type == "i32" || elem_llvm_type == "i64" ||
+                       elem_llvm_type == "double" || elem_llvm_type == "i1" ||
+                       elem_llvm_type == "i8*") {
+                const std::string elem_str =
+                    emit_scalar_to_string(elem_llvm_type, elem_val, prefix + "_elem_str");
+                (void)emit_call("i8*", "@strcat",
+                                {IRValue{"i8*", out_buf, true}, IRValue{"i8*", elem_str, true}});
+            } else {
+                (void)emit_call("i8*", "@strcat",
+                                {IRValue{"i8*", out_buf, true},
+                                 IRValue{"i8*", string_constant_gep(unknown_const), true}});
+            }
+
+            const std::string next_idx = next_register(prefix + "_next_idx");
+            emit_line(next_idx + " = add i64 " + idx + ", 1");
+            emit_line("store i64 " + next_idx + ", i64* " + idx_ptr);
+            emit_line("br label %" + cond_label);
+
+            emit_label(loop_end_label);
+            (void)emit_call("i8*", "@strcat",
+                            {IRValue{"i8*", out_buf, true}, IRValue{"i8*", string_constant_gep(close_const), true}});
+            emit_line("store i8* " + out_buf + ", i8** " + result_ptr);
+            emit_line("br label %" + end_label);
+
+            emit_label(end_label);
+            const std::string result = next_register(prefix + "_result");
+            emit_line(result + " = load i8*, i8** " + result_ptr);
+            return IRValue{"i8*", result, true};
+        };
+
     if (node.callee && is_node<MemberExpression>(node.callee)) {
         auto& member = get_node<MemberExpression>(node.callee);
         const std::string method_name = member.property;
@@ -3050,6 +3233,74 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
                     }
                 }
             }
+        }
+
+        if (member.object && is_node<Identifier>(member.object) &&
+            get_node<Identifier>(member.object).name == "super" && method_name == "new") {
+            const VariableInfo* this_var = resolve_variable("this");
+            if (!this_var || this_var->class_name.empty()) {
+                throw std::runtime_error("super.new() can only be used inside class methods");
+            }
+
+            const auto class_it = classes.find(this_var->class_name);
+            if (class_it == classes.end()) {
+                throw std::runtime_error("Unknown class '" + this_var->class_name +
+                                         "' while lowering super.new()");
+            }
+            if (class_it->second.parent_class.empty()) {
+                throw std::runtime_error("Class '" + this_var->class_name +
+                                         "' does not extend another class");
+            }
+
+            const std::string parent_class = class_it->second.parent_class;
+            const auto parent_it = classes.find(parent_class);
+            if (parent_it == classes.end()) {
+                throw std::runtime_error("Unknown parent class '" + parent_class + "'");
+            }
+
+            const auto parent_ctor_it = parent_it->second.methods.find("new");
+            if (parent_ctor_it == parent_it->second.methods.end()) {
+                if (!node.arguments.empty()) {
+                    throw std::runtime_error("Parent constructor '" + parent_class +
+                                             ".new' does not exist but arguments were provided");
+                }
+                return IRValue{"void", "", true};
+            }
+
+            const CodegenClassMethodInfo& parent_ctor = parent_ctor_it->second;
+            const std::size_t expected_params = parent_ctor.parameters.size() > 0
+                ? parent_ctor.parameters.size() - 1 : 0;
+
+            std::vector<ASTNode> arg_nodes;
+            arg_nodes.reserve(node.arguments.size());
+            for (const auto& arg : node.arguments) {
+                arg_nodes.push_back(clone_node(arg));
+            }
+            while (arg_nodes.size() < expected_params) {
+                const std::size_t param_index = arg_nodes.size() + 1;
+                if (param_index >= parent_ctor.parameters.size() ||
+                    !parent_ctor.parameters[param_index].default_value) {
+                    break;
+                }
+                arg_nodes.push_back(clone_node(parent_ctor.parameters[param_index].default_value));
+            }
+            if (arg_nodes.size() != expected_params) {
+                throw std::runtime_error("Method '" + parent_class + ".new' argument count mismatch");
+            }
+
+            const std::string this_reg = next_register("super_this");
+            emit_line(this_reg + " = load i8*, i8** " + this_var->ptr_value);
+
+            std::vector<IRValue> args;
+            args.reserve(1 + arg_nodes.size());
+            args.push_back(IRValue{"i8*", this_reg, true});
+            for (std::size_t i = 0; i < arg_nodes.size(); ++i) {
+                const auto& param = parent_ctor.parameters[i + 1];
+                IRValue arg = cast_value(generate_expression(arg_nodes[i]), param.llvm_type);
+                args.push_back(std::move(arg));
+            }
+
+            return emit_call(parent_ctor.return_type, "@" + parent_ctor.mangled_name, args);
         }
 
         // Support module-style calls from `use module as alias`: alias.func(...)
@@ -3278,16 +3529,64 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
         }
 
         IRValue arg;
-        bool handled_dict = false;
+        bool handled_special = false;
         if (node.arguments[0] && is_node<Identifier>(node.arguments[0])) {
             const std::string object_name = get_node<Identifier>(node.arguments[0]).name;
             const VariableInfo* var = resolve_variable(object_name);
             if (var && var->is_dict) {
                 arg = emit_dict_to_string(object_name, var);
-                handled_dict = true;
+                handled_special = true;
+            } else if (var && var->is_dynamic_array) {
+                const std::string header = next_register(object_name + "_arr_hdr");
+                emit_line(header + " = load i8*, i8** " + var->ptr_value);
+                arg = emit_array_to_string_from_header(
+                    IRValue{"i8*", header, true},
+                    var->dynamic_array_elem_llvm_type.empty() ? "i8*" : var->dynamic_array_elem_llvm_type,
+                    var->dynamic_array_elem_mt_type,
+                    object_name + "_arr_print");
+                handled_special = true;
+            } else if (var && var->is_fixed_array) {
+                StringConstantInfo arr_const = get_or_create_string_constant(
+                    "[array len=" + std::to_string(var->fixed_array_size) + "]");
+                arg = IRValue{"i8*", string_constant_gep(arr_const), true};
+                handled_special = true;
             }
         }
-        if (!handled_dict) {
+        if (!handled_special && node.arguments[0] && is_node<MemberExpression>(node.arguments[0])) {
+            const auto& member_arg = get_node<MemberExpression>(node.arguments[0]);
+            const VariableInfo* owner_var = nullptr;
+            if (member_arg.object && is_node<Identifier>(member_arg.object)) {
+                owner_var = resolve_variable(get_node<Identifier>(member_arg.object).name);
+            } else if (member_arg.object && is_node<ThisExpression>(member_arg.object)) {
+                owner_var = resolve_variable("this");
+            }
+            if (owner_var && !owner_var->class_name.empty()) {
+                const auto class_it = classes.find(owner_var->class_name);
+                if (class_it != classes.end()) {
+                    const auto field_it = class_it->second.fields.find(member_arg.property);
+                    if (field_it != class_it->second.fields.end() &&
+                        field_it->second.mt_type == "array") {
+                        IRValue header_value =
+                            cast_value(generate_expression(node.arguments[0]), "i8*");
+                        std::string elem_mt_type = field_it->second.element_mt_type;
+                        if (elem_mt_type.empty()) {
+                            elem_mt_type = "any";
+                        }
+                        std::string elem_llvm_type = map_type_to_llvm(elem_mt_type);
+                        if (elem_llvm_type == "void") {
+                            elem_llvm_type = "i8*";
+                        }
+                        arg = emit_array_to_string_from_header(
+                            header_value,
+                            elem_llvm_type,
+                            elem_mt_type,
+                            owner_var->class_name + "_" + member_arg.property + "_print");
+                        handled_special = true;
+                    }
+                }
+            }
+        }
+        if (!handled_special) {
             arg = generate_expression(node.arguments[0]);
         }
         std::string fmt = "%d\n";
@@ -3316,7 +3615,65 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
             throw std::runtime_error("str() takes exactly one argument");
         }
 
-        IRValue arg = generate_expression(node.arguments[0]);
+        bool handled_special = false;
+        IRValue arg;
+        if (node.arguments[0] && is_node<Identifier>(node.arguments[0])) {
+            const std::string object_name = get_node<Identifier>(node.arguments[0]).name;
+            const VariableInfo* var = resolve_variable(object_name);
+            if (var && var->is_dynamic_array) {
+                const std::string header = next_register(object_name + "_arr_hdr");
+                emit_line(header + " = load i8*, i8** " + var->ptr_value);
+                arg = emit_array_to_string_from_header(
+                    IRValue{"i8*", header, true},
+                    var->dynamic_array_elem_llvm_type.empty() ? "i8*" : var->dynamic_array_elem_llvm_type,
+                    var->dynamic_array_elem_mt_type,
+                    object_name + "_arr_str");
+                handled_special = true;
+            } else if (var && var->is_fixed_array) {
+                StringConstantInfo arr_const = get_or_create_string_constant(
+                    "[array len=" + std::to_string(var->fixed_array_size) + "]");
+                arg = IRValue{"i8*", string_constant_gep(arr_const), true};
+                handled_special = true;
+            }
+        }
+        if (!handled_special && node.arguments[0] && is_node<MemberExpression>(node.arguments[0])) {
+            const auto& member_arg = get_node<MemberExpression>(node.arguments[0]);
+            const VariableInfo* owner_var = nullptr;
+            if (member_arg.object && is_node<Identifier>(member_arg.object)) {
+                owner_var = resolve_variable(get_node<Identifier>(member_arg.object).name);
+            } else if (member_arg.object && is_node<ThisExpression>(member_arg.object)) {
+                owner_var = resolve_variable("this");
+            }
+            if (owner_var && !owner_var->class_name.empty()) {
+                const auto class_it = classes.find(owner_var->class_name);
+                if (class_it != classes.end()) {
+                    const auto field_it = class_it->second.fields.find(member_arg.property);
+                    if (field_it != class_it->second.fields.end() &&
+                        field_it->second.mt_type == "array") {
+                        std::string elem_mt_type = field_it->second.element_mt_type;
+                        if (elem_mt_type.empty()) {
+                            elem_mt_type = "any";
+                        }
+                        std::string elem_llvm_type = map_type_to_llvm(elem_mt_type);
+                        if (elem_llvm_type == "void") {
+                            elem_llvm_type = "i8*";
+                        }
+                        IRValue header_value =
+                            cast_value(generate_expression(node.arguments[0]), "i8*");
+                        arg = emit_array_to_string_from_header(
+                            header_value,
+                            elem_llvm_type,
+                            elem_mt_type,
+                            owner_var->class_name + "_" + member_arg.property + "_str");
+                        handled_special = true;
+                    }
+                }
+            }
+        }
+
+        if (!handled_special) {
+            arg = generate_expression(node.arguments[0]);
+        }
         if (arg.type == "i8*") {
             return arg;
         }
@@ -3795,6 +4152,7 @@ void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
                 "",
                 "",
                 "",
+                inferred_element_type,
             });
             return;
         }
@@ -3882,6 +4240,7 @@ void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
             "",
             "",
             "",
+            element_type,
         });
 
         if (node.value) {

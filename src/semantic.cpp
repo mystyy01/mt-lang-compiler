@@ -153,6 +153,142 @@ std::string format_import_cycle(const std::vector<std::string>& stack, const std
     return out.str();
 }
 
+bool is_super_new_call(const ASTNode& node) {
+    if (!node || !is_node<CallExpression>(node)) {
+        return false;
+    }
+    const auto& call = get_node<CallExpression>(node);
+    if (!call.callee || !is_node<MemberExpression>(call.callee)) {
+        return false;
+    }
+    const auto& member = get_node<MemberExpression>(call.callee);
+    if (!member.object || !is_node<Identifier>(member.object)) {
+        return false;
+    }
+    return get_node<Identifier>(member.object).name == "super" && member.property == "new";
+}
+
+bool contains_super_new_call(const ASTNode& node) {
+    if (!node) {
+        return false;
+    }
+    if (is_super_new_call(node)) {
+        return true;
+    }
+    if (is_node<CallExpression>(node)) {
+        const auto& call = get_node<CallExpression>(node);
+        if (contains_super_new_call(call.callee)) {
+            return true;
+        }
+        for (const auto& arg : call.arguments) {
+            if (contains_super_new_call(arg)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (is_node<Block>(node)) {
+        const auto& block = get_node<Block>(node);
+        for (const auto& statement : block.statements) {
+            if (contains_super_new_call(statement)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (is_node<ExpressionStatement>(node)) {
+        return contains_super_new_call(get_node<ExpressionStatement>(node).expression);
+    }
+    if (is_node<SetStatement>(node)) {
+        const auto& set = get_node<SetStatement>(node);
+        return contains_super_new_call(set.target) || contains_super_new_call(set.value);
+    }
+    if (is_node<VariableDeclaration>(node)) {
+        return contains_super_new_call(get_node<VariableDeclaration>(node).value);
+    }
+    if (is_node<ReturnStatement>(node)) {
+        return contains_super_new_call(get_node<ReturnStatement>(node).value);
+    }
+    if (is_node<BinaryExpression>(node)) {
+        const auto& binary = get_node<BinaryExpression>(node);
+        return contains_super_new_call(binary.left) || contains_super_new_call(binary.right);
+    }
+    if (is_node<InExpression>(node)) {
+        const auto& in_expr = get_node<InExpression>(node);
+        return contains_super_new_call(in_expr.item) || contains_super_new_call(in_expr.container);
+    }
+    if (is_node<ArrayLiteral>(node)) {
+        const auto& arr = get_node<ArrayLiteral>(node);
+        for (const auto& element : arr.elements) {
+            if (contains_super_new_call(element)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (is_node<DictLiteral>(node)) {
+        const auto& dict = get_node<DictLiteral>(node);
+        for (const auto& key : dict.keys) {
+            if (contains_super_new_call(key)) {
+                return true;
+            }
+        }
+        for (const auto& value : dict.values) {
+            if (contains_super_new_call(value)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (is_node<MemberExpression>(node)) {
+        return contains_super_new_call(get_node<MemberExpression>(node).object);
+    }
+    if (is_node<IndexExpression>(node)) {
+        const auto& index = get_node<IndexExpression>(node);
+        return contains_super_new_call(index.object) || contains_super_new_call(index.index);
+    }
+    if (is_node<TypeofExpression>(node)) {
+        return contains_super_new_call(get_node<TypeofExpression>(node).argument);
+    }
+    if (is_node<HasattrExpression>(node)) {
+        return contains_super_new_call(get_node<HasattrExpression>(node).obj);
+    }
+    if (is_node<ClassofExpression>(node)) {
+        return contains_super_new_call(get_node<ClassofExpression>(node).argument);
+    }
+    if (is_node<IfStatement>(node)) {
+        const auto& if_stmt = get_node<IfStatement>(node);
+        return contains_super_new_call(if_stmt.condition) ||
+               contains_super_new_call(if_stmt.then_body) ||
+               contains_super_new_call(if_stmt.else_body);
+    }
+    if (is_node<WhileStatement>(node)) {
+        const auto& while_stmt = get_node<WhileStatement>(node);
+        return contains_super_new_call(while_stmt.condition) ||
+               contains_super_new_call(while_stmt.then_body);
+    }
+    if (is_node<ForInStatement>(node)) {
+        const auto& for_stmt = get_node<ForInStatement>(node);
+        return contains_super_new_call(for_stmt.iterable) ||
+               contains_super_new_call(for_stmt.body);
+    }
+    if (is_node<TryStatement>(node)) {
+        const auto& try_stmt = get_node<TryStatement>(node);
+        if (contains_super_new_call(try_stmt.try_block)) {
+            return true;
+        }
+        for (const auto& catch_block : try_stmt.catch_blocks) {
+            if (contains_super_new_call(catch_block.body)) {
+                return true;
+            }
+        }
+    }
+    if (is_node<ThrowStatement>(node)) {
+        return contains_super_new_call(get_node<ThrowStatement>(node).expression);
+    }
+    return false;
+}
+
 }  // namespace
 
 SymbolTable::SymbolTable() {
@@ -310,6 +446,8 @@ void SemanticAnalyzer::validate_call_arguments(const std::string& callable_name,
                                                std::vector<ASTNode>& arguments,
                                                const std::vector<FunctionParameterInfo>& parameters,
                                                bool is_method) {
+    const std::size_t original_num_args = arguments.size();
+
     while (arguments.size() < parameters.size() &&
            parameters[arguments.size()].default_value != nullptr) {
         arguments.push_back(clone_node(parameters[arguments.size()].default_value));
@@ -337,6 +475,14 @@ void SemanticAnalyzer::validate_call_arguments(const std::string& callable_name,
         const std::string expected = parameters[i].param_type.empty()
                                      ? "any"
                                      : parameters[i].param_type;
+
+        // Defaults are declared at the callable site and may reference symbols that are
+        // not in scope at the call site (e.g. imported constructor defaults in the LSP).
+        // If the argument came from a default value insertion, trust its declared type.
+        if (i >= original_num_args && parameters[i].default_value != nullptr) {
+            continue;
+        }
+
         const std::string arg_type = analyze(arguments[i]);
 
         if (expected != "any" && arg_type != expected && arg_type != "any" && arg_type != "null") {
@@ -494,7 +640,45 @@ std::string SemanticAnalyzer::analyze_class_declaration(ClassDeclaration& node) 
     class_info.data_type = node.name;
     class_info.parent_class = node.inherits_from;
 
+    if (!node.inherits_from.empty()) {
+        const auto parent_it = classes.find(node.inherits_from);
+        if (parent_it == classes.end()) {
+            add_error("Unknown parent class '" + node.inherits_from + "' for class '" +
+                      node.name + "'" + get_position_info(node.line, node.column));
+        } else {
+            class_info.fields = parent_it->second.fields;
+            class_info.methods = parent_it->second.methods;
+        }
+
+        bool has_new_method = false;
+        for (const auto& method : node.methods) {
+            if (method.name == "new") {
+                has_new_method = true;
+                break;
+            }
+        }
+        if (!has_new_method) {
+            add_error("Class '" + node.name + "' extends '" + node.inherits_from +
+                      "' and must define new(...) that calls super.new(...)" +
+                      get_position_info(node.line, node.column));
+        }
+    }
+
     for (const auto& field : node.fields) {
+        bool duplicate = false;
+        for (const auto& existing_field : class_info.fields) {
+            if (existing_field.name == field.name) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            add_error("Field '" + field.name + "' in class '" + node.name +
+                      "' conflicts with inherited field of the same name" +
+                      get_position_info(field.line, field.column));
+            continue;
+        }
+
         class_info.fields.push_back(ClassFieldInfo{
             field.name,
             field.type,
@@ -559,6 +743,18 @@ std::string SemanticAnalyzer::analyze_method_declaration(MethodDeclaration& node
         auto& block = get_node<Block>(node.body);
         for (auto& statement : block.statements) {
             analyze(statement);
+        }
+    }
+
+    if (node.name == "new" && !current_class.empty()) {
+        const auto class_it = classes.find(current_class);
+        if (class_it != classes.end() && !class_it->second.parent_class.empty()) {
+            if (!contains_super_new_call(node.body)) {
+                add_error("Constructor '" + current_class +
+                          ".new' must call super.new(...) because it extends '" +
+                          class_it->second.parent_class + "'" +
+                          get_position_info(node.line, node.column));
+            }
         }
     }
 
@@ -1163,6 +1359,53 @@ std::string SemanticAnalyzer::analyze_call_expression(CallExpression& node) {
 
         if (member.object && is_node<StringLiteral>(member.object) && method_name == "length") {
             return "int";
+        }
+
+        if (member.object && is_node<Identifier>(member.object) &&
+            get_node<Identifier>(member.object).name == "super" && method_name == "new") {
+            if (current_class.empty()) {
+                add_error("super.new(...) can only be used inside class methods" +
+                          get_position_info(node.line, node.column));
+                return "unknown";
+            }
+
+            const auto class_it = classes.find(current_class);
+            if (class_it == classes.end()) {
+                add_error("Unknown current class '" + current_class + "'" +
+                          get_position_info(node.line, node.column));
+                return "unknown";
+            }
+
+            if (class_it->second.parent_class.empty()) {
+                add_error("Class '" + current_class + "' does not extend another class, so super.new(...) is invalid" +
+                          get_position_info(node.line, node.column));
+                return "unknown";
+            }
+
+            const std::string parent_name = class_it->second.parent_class;
+            const auto parent_it = classes.find(parent_name);
+            if (parent_it == classes.end()) {
+                add_error("Unknown parent class '" + parent_name + "'" +
+                          get_position_info(node.line, node.column));
+                return "unknown";
+            }
+
+            const auto ctor_it = parent_it->second.methods.find("new");
+            if (ctor_it == parent_it->second.methods.end()) {
+                if (!node.arguments.empty()) {
+                    add_error("Method '" + parent_name + ".new' expects 0 to 0 arguments, got " +
+                              std::to_string(node.arguments.size()) +
+                              get_position_info(node.line, node.column));
+                }
+                return "void";
+            }
+
+            validate_call_arguments(
+                parent_name + ".new",
+                node.arguments,
+                ctor_it->second.params,
+                true);
+            return ctor_it->second.return_type.empty() ? "void" : ctor_it->second.return_type;
         }
 
         if (member.object && is_node<ThisExpression>(member.object) && !current_class.empty()) {

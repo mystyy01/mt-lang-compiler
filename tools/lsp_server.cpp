@@ -1292,10 +1292,12 @@ AnalysisResult analyze_document_text(const std::string& path,
         Parser parser(std::move(tokens), file_path);
         ASTNode root = parser.parse_program();
 
-        collect_symbols_from_ast(root, &result.completion_symbols, &result.definitions, &result.symbols);
-
         SemanticAnalyzer analyzer(file_path);
         analyzer.analyze(root);
+
+        // Collect symbols after semantic analysis so inferred class fields
+        // (e.g. from `set this.foo = ...`) are visible to the LSP index.
+        collect_symbols_from_ast(root, &result.completion_symbols, &result.definitions, &result.symbols);
 
         const auto& scopes = analyzer.get_symbol_table().get_scopes();
         if (!scopes.empty()) {

@@ -55,6 +55,7 @@ struct CodegenFunctionInfo {
 struct CodegenClassFieldInfo {
     std::string name;
     std::string mt_type;
+    std::string element_mt_type = "";
     std::string llvm_type;
     std::size_t offset = 0;
     bool is_constructor_arg = false;
@@ -107,6 +108,7 @@ private:
         std::string dict_value_llvm_type;
         std::string dict_key_mt_type;
         std::string dict_value_mt_type;
+        std::string dynamic_array_elem_mt_type = "";
     };
 
     struct StringConstantInfo {
