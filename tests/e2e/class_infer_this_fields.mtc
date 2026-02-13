@@ -1,0 +1,20 @@
+class ComponentField {
+  func new(string type, string value) {
+    set this.type = type
+    set this.value = value
+  }
+}
+
+class Component {
+  func new(string name, array<ComponentField> fields = []) {
+    set this.name = name
+    set this.fields = fields
+  }
+}
+
+ComponentField f = new ComponentField("text", "abc")
+Component c = new Component("player")
+print(c.name)
+print(c.fields.length())
+print(f.type)
+print(f.value)

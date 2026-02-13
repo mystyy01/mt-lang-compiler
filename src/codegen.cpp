@@ -640,7 +640,6 @@ void CodeGenerator::register_class_declaration(ClassDeclaration& node) {
         field_info.name = field.name;
         field_info.mt_type = field.type;
         field_info.llvm_type = map_type_to_llvm(field.type);
-        field_info.is_constructor_arg = field.is_constructor_arg;
         field_info.initializer = clone_node(field.initializer);
 
         const std::size_t size = llvm_type_size(field_info.llvm_type);
@@ -649,10 +648,6 @@ void CodeGenerator::register_class_declaration(ClassDeclaration& node) {
         field_info.offset = offset;
         offset += size;
         max_alignment = std::max(max_alignment, alignment);
-
-        if (field_info.is_constructor_arg) {
-            class_info.constructor_arg_fields.push_back(field_info.name);
-        }
 
         class_info.fields[field_info.name] = std::move(field_info);
     }
@@ -1978,24 +1973,6 @@ CodeGenerator::IRValue CodeGenerator::generate_new_expression(NewExpression& nod
                   field.llvm_type + "* " + field_ptr);
     }
 
-    // Constructor args map to `arg` fields in declaration order.
-    const std::size_t ctor_count = std::min(node.arguments.size(), class_info.constructor_arg_fields.size());
-    for (std::size_t i = 0; i < ctor_count; ++i) {
-        const auto fit = class_info.fields.find(class_info.constructor_arg_fields[i]);
-        if (fit == class_info.fields.end()) {
-            continue;
-        }
-        const auto& field = fit->second;
-        IRValue arg = cast_value(generate_expression(node.arguments[i]), field.llvm_type);
-        const std::string field_raw = next_register(node.class_name + "_ctor_field_raw");
-        emit_line(field_raw + " = getelementptr inbounds i8, i8* " + obj_ptr + ", i64 " +
-                  std::to_string(field.offset));
-        const std::string field_ptr = next_register(node.class_name + "_ctor_field_ptr");
-        emit_line(field_ptr + " = bitcast i8* " + field_raw + " to " + field.llvm_type + "*");
-        emit_line("store " + field.llvm_type + " " + arg.value + ", " +
-                  field.llvm_type + "* " + field_ptr);
-    }
-
     // If the class defines `new(...)`, call it automatically on instantiation.
     const auto init_it = class_info.methods.find("new");
     if (init_it != class_info.methods.end()) {
@@ -2031,6 +2008,9 @@ CodeGenerator::IRValue CodeGenerator::generate_new_expression(NewExpression& nod
         }
 
         (void)emit_call(init_method.return_type, "@" + init_method.mangled_name, init_args);
+    } else if (!node.arguments.empty()) {
+        throw std::runtime_error(
+            "Class '" + node.class_name + "' has no new() constructor but arguments were provided");
     }
 
     return IRValue{"i8*", obj_ptr, true};

@@ -108,6 +108,26 @@ void test_dynamic_array_methods_semantics() {
     expect(errors.empty(), "expected dynamic array methods to pass semantic analysis");
 }
 
+void test_this_field_inference_semantics() {
+    const auto errors = analyze_source(
+        "class Component {\n"
+        "  func new(string name) { set this.name = name }\n"
+        "}\n"
+        "Component c = new Component(\"ok\")\n"
+        "string n = c.name\n");
+
+    expect(errors.empty(), "expected set this.field inference to pass semantic analysis");
+}
+
+void test_missing_new_constructor_rejects_args() {
+    const auto errors = analyze_source(
+        "class Box { int value = 0 }\n"
+        "Box b = new Box(1)\n");
+
+    expect(contains_error(errors, "has no new() constructor"),
+           "expected constructor-argument rejection when new() is missing");
+}
+
 }  // namespace
 
 int main() {
@@ -118,6 +138,8 @@ int main() {
     test_fixed_array_initializer_bounds();
     test_dynamic_array_keyword_semantics();
     test_dynamic_array_methods_semantics();
+    test_this_field_inference_semantics();
+    test_missing_new_constructor_rejects_args();
     std::cout << "All semantic tests passed\n";
     return 0;
 }

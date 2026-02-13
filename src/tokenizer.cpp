@@ -2,7 +2,7 @@
 #include <cctype>
 #include <iostream>
 
-const std::unordered_set<std::string> KEYWORDS = {"from", "use", "as", "int", "float", "void", "array", "dict", "string", "if", "elif", "else", "for", "in", "set", "return", "typeof", "hasattr", "classof", "while", "bool", "true", "false", "func", "class", "new", "this", "static", "virtual", "arg", "null", "try", "catch", "throw", "except", "break", "external", "dynamic"};
+const std::unordered_set<std::string> KEYWORDS = {"from", "use", "as", "int", "float", "void", "array", "dict", "string", "if", "elif", "else", "for", "in", "set", "return", "typeof", "hasattr", "classof", "while", "bool", "true", "false", "func", "class", "new", "this", "static", "virtual", "null", "try", "catch", "throw", "except", "break", "external", "dynamic"};
 const std::unordered_set<std::string> SINGLE_CHAR_SYMBOLS = {"(", ")", "[", "]", "{", "}", ",", ".", ":", "!", "+", "-", "*", "/", "=", ">", "<"};
 const std::unordered_set<std::string> DOUBLE_CHAR_SYMBOLS = {"==", "!=", "+=", ">=", "<=", "&&", "||"};
 const std::unordered_set<std::string> QUOTES = {"\"", "'"};

@@ -211,6 +211,7 @@ SemanticAnalyzer::SemanticAnalyzer(
     std::string file_path_in,
     std::shared_ptr<std::vector<std::string>> import_stack_paths_in)
     : file_path(std::move(file_path_in)),
+      current_class_declaration(nullptr),
       break_depth(0),
       import_stack_paths(
           import_stack_paths_in ? std::move(import_stack_paths_in)
@@ -484,7 +485,9 @@ std::string SemanticAnalyzer::analyze_class_declaration(ClassDeclaration& node) 
     symbol_table.declare(node.name, "class", node.name);
 
     const std::string previous_class = current_class;
+    ClassDeclaration* previous_class_declaration = current_class_declaration;
     current_class = node.name;
+    current_class_declaration = &node;
 
     ClassInfo class_info;
     class_info.symbol_type = "class";
@@ -522,6 +525,7 @@ std::string SemanticAnalyzer::analyze_class_declaration(ClassDeclaration& node) 
     symbol_table.exit_scope();
 
     current_class = previous_class;
+    current_class_declaration = previous_class_declaration;
     return "";
 }
 
@@ -582,6 +586,12 @@ std::string SemanticAnalyzer::analyze_new_expression(NewExpression& node) {
         } else {
             for (auto& arg : node.arguments) {
                 analyze(arg);
+            }
+            if (!node.arguments.empty()) {
+                add_error(
+                    "Class '" + node.class_name + "' has no new() constructor, got " +
+                    std::to_string(node.arguments.size()) + " argument(s)" +
+                    get_position_info(node.line, node.column));
             }
         }
     } else {
@@ -1394,8 +1404,84 @@ std::string SemanticAnalyzer::analyze_for_in_statement(ForInStatement& node) {
 }
 
 std::string SemanticAnalyzer::analyze_set_statement(SetStatement& node) {
-    const std::string target_type = analyze(node.target);
     const std::string value_type = analyze(node.value);
+
+    // Support Python-like field definition flow:
+    // `set this.foo = value` defines `foo` on the class when missing.
+    if (node.target && is_node<MemberExpression>(node.target)) {
+        auto& member = get_node<MemberExpression>(node.target);
+        if (member.object && is_node<ThisExpression>(member.object) && !current_class.empty()) {
+            auto class_it = classes.find(current_class);
+            if (class_it != classes.end()) {
+                bool has_field = false;
+                for (const auto& field : class_it->second.fields) {
+                    if (field.name == member.property) {
+                        has_field = true;
+                        break;
+                    }
+                }
+
+                if (!has_field) {
+                    std::string inferred_type = value_type;
+                    if (inferred_type.empty() || inferred_type == "unknown" || inferred_type == "null") {
+                        inferred_type = "any";
+                    }
+
+                    std::string inferred_element_type;
+                    if (inferred_type == "array") {
+                        if (node.value && is_node<ArrayLiteral>(node.value)) {
+                            auto& literal = get_node<ArrayLiteral>(node.value);
+                            if (!literal.elements.empty()) {
+                                inferred_element_type = analyze(literal.elements[0]);
+                            }
+                        } else if (node.value && is_node<Identifier>(node.value)) {
+                            const auto& identifier = get_node<Identifier>(node.value);
+                            const SymbolInfo* symbol = symbol_table.lookup(identifier.name);
+                            if (symbol != nullptr && !symbol->element_type.empty()) {
+                                inferred_element_type = symbol->element_type;
+                            }
+                        }
+                        if (inferred_element_type.empty() || inferred_element_type == "unknown") {
+                            inferred_element_type = "any";
+                        }
+                    }
+
+                    class_it->second.fields.push_back(ClassFieldInfo{
+                        member.property,
+                        inferred_type,
+                        false,
+                        inferred_element_type,
+                    });
+
+                    symbol_table.declare(
+                        member.property, "field", inferred_type, {}, inferred_element_type);
+
+                    if (current_class_declaration != nullptr) {
+                        bool ast_has_field = false;
+                        for (const auto& field : current_class_declaration->fields) {
+                            if (field.name == member.property) {
+                                ast_has_field = true;
+                                break;
+                            }
+                        }
+                        if (!ast_has_field) {
+                            current_class_declaration->fields.push_back(FieldDeclaration{
+                                member.property,
+                                inferred_type,
+                                nullptr,
+                                false,
+                                inferred_element_type,
+                                node.line,
+                                node.column,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    const std::string target_type = analyze(node.target);
 
     if (!target_type.empty() && !value_type.empty() &&
         target_type != value_type && value_type != "any" && target_type != "any" &&

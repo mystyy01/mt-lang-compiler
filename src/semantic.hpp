@@ -114,6 +114,7 @@ private:
     std::vector<std::string> errors;
     std::string file_path;
     std::string current_class;
+    ClassDeclaration* current_class_declaration;
     int break_depth;
     std::shared_ptr<std::vector<std::string>> import_stack_paths;
 

@@ -1,8 +1,11 @@
 class Box {
-    arg int value
+    int value = 0
+
+    func new(int value) {
+        set this.value = value
+    }
 }
 
 Box b = new Box(9)
 print(classof(b))
 print(hasattr(b, "value"))
-

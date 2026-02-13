@@ -1,6 +1,10 @@
 class Counter {
-    arg int seed
+    int seed = 0
     int value = 0
+
+    func new(int seed) {
+        set this.seed = seed
+    }
 
     int next(int step) {
         set this.value = this.value + step
@@ -14,4 +18,3 @@ print(c.next(2))
 print(hasattr(c, "seed"))
 print(hasattr(c, "next"))
 print(hasattr(c, "missing"))
-

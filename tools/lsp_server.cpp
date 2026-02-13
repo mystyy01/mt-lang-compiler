@@ -1259,7 +1259,9 @@ void collect_occurrences_from_tokens(const std::vector<Token>& tokens,
         return;
     }
     for (const auto& token : tokens) {
-        if (token.type != T_NAME || token.value.empty()) {
+        const bool is_identifier_token = token.type == T_NAME;
+        const bool is_constructor_name = token.type == T_KEYWORD && token.value == "new";
+        if ((!is_identifier_token && !is_constructor_name) || token.value.empty()) {
             continue;
         }
         occurrences->push_back(SymbolOccurrence{

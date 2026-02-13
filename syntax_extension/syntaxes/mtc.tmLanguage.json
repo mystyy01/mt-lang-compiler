@@ -58,7 +58,7 @@
       "name": "keyword.other.mtc"
     },
     {
-      "match": "\\b(arg|classof|except|external|hasattr|null|typeof)\\b",
+      "match": "\\b(classof|except|external|hasattr|null|typeof)\\b",
       "name": "support.function.builtin.mtc"
     },
     {

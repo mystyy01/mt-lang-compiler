@@ -162,8 +162,11 @@ void test_dynamic_array_keyword_codegen() {
 void test_class_codegen() {
     const std::string ir = generate_ir(
         "class Counter {\n"
-        "  arg int seed\n"
+        "  int seed = 0\n"
         "  int value = 0\n"
+        "  func new(int seed) {\n"
+        "    set this.seed = seed\n"
+        "  }\n"
         "  int next(int step) {\n"
         "    set this.value = this.value + step\n"
         "    return this.value\n"

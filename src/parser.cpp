@@ -1126,13 +1126,6 @@ ASTNode Parser::parse_class_declaration() {
         if (peek_pos < tokens.size()) {
             Token token = tokens[peek_pos];
 
-            if (token.type == T_KEYWORD && token.value == "arg") {
-                ++peek_pos;
-                if (peek_pos < tokens.size()) {
-                    token = tokens[peek_pos];
-                }
-            }
-
             if (token.type == T_KEYWORD &&
                 (token.value == "int" || token.value == "float" || token.value == "void" ||
                  token.value == "string" || token.value == "bool" || token.value == "array" ||
@@ -1211,12 +1204,6 @@ ASTNode Parser::parse_class_declaration() {
 }
 
 FieldDeclaration Parser::parse_field_declaration() {
-    bool is_constructor_arg = false;
-    if (match(T_KEYWORD, "arg")) {
-        advance();
-        is_constructor_arg = true;
-    }
-
     const Token type_token = current_token();
     TypeWithElement type_info = parse_type_with_element();
 
@@ -1233,7 +1220,7 @@ FieldDeclaration Parser::parse_field_declaration() {
         field_name,
         type_info.base_type,
         std::move(initializer),
-        is_constructor_arg,
+        false,
         type_info.element_type.value_or(""),
         type_token.line,
         type_token.column,

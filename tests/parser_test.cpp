@@ -130,7 +130,7 @@ void test_dynamic_array_keyword_declaration() {
 void test_class_declaration() {
     ASTNode root = parse_source(
         "class Counter {\n"
-        "  arg int seed\n"
+        "  int seed = 0\n"
         "  int value = 0\n"
         "  int next(int step) {\n"
         "    return step\n"
@@ -144,7 +144,7 @@ void test_class_declaration() {
     const auto& class_decl = get_node<ClassDeclaration>(program.statements[0]);
     expect(class_decl.name == "Counter", "expected class name Counter");
     expect(class_decl.fields.size() == 2, "expected two class fields");
-    expect(class_decl.fields[0].is_constructor_arg, "expected first field to be constructor arg");
+    expect(!class_decl.fields[0].is_constructor_arg, "expected first field to be a regular field");
     expect(class_decl.methods.size() == 1, "expected one class method");
 }
 

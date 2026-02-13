@@ -78,6 +78,7 @@ cases=(
   class_and_hasattr
   classof_basic
   class_constructor_new
+  class_infer_this_fields
   dict_ops
   dict_literal
   imports_and_io
