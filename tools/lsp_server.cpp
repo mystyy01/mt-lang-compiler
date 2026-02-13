@@ -442,6 +442,165 @@ std::vector<std::string> list_workspace_mtc_files(const std::string& root_path) 
     return paths;
 }
 
+void append_unique_path(std::vector<std::filesystem::path>* paths,
+                        std::unordered_set<std::string>* seen,
+                        const std::filesystem::path& path) {
+    if (!paths || !seen || path.empty()) {
+        return;
+    }
+    const std::filesystem::path normalized = path.lexically_normal();
+    const std::string key = normalized.string();
+    if (key.empty()) {
+        return;
+    }
+    if (seen->insert(key).second) {
+        paths->push_back(normalized);
+    }
+}
+
+std::vector<std::string> split_env_paths(const std::string& value) {
+    std::vector<std::string> paths;
+    std::string current;
+    for (char ch : value) {
+        if (ch == ':' || ch == ';') {
+            if (!current.empty()) {
+                paths.push_back(current);
+                current.clear();
+            }
+            continue;
+        }
+        current.push_back(ch);
+    }
+    if (!current.empty()) {
+        paths.push_back(current);
+    }
+    return paths;
+}
+
+void append_existing_dir(std::vector<std::filesystem::path>* paths,
+                         std::unordered_set<std::string>* seen,
+                         const std::filesystem::path& path) {
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || !std::filesystem::is_directory(path, ec)) {
+        return;
+    }
+    append_unique_path(paths, seen, path);
+}
+
+std::vector<std::filesystem::path> default_stdlib_roots(const std::string& workspace_root_path) {
+    std::vector<std::filesystem::path> roots;
+    std::unordered_set<std::string> seen;
+
+    if (!workspace_root_path.empty()) {
+        append_existing_dir(
+            &roots, &seen, std::filesystem::path(workspace_root_path) / "stdlib");
+    }
+
+    append_existing_dir(&roots, &seen, std::filesystem::current_path() / "stdlib");
+
+#if defined(__linux__)
+    std::error_code ec;
+    const std::filesystem::path proc_self_exe = "/proc/self/exe";
+    if (std::filesystem::exists(proc_self_exe, ec)) {
+        std::filesystem::path exe_path = std::filesystem::read_symlink(proc_self_exe, ec);
+        if (!ec && !exe_path.empty()) {
+            exe_path = std::filesystem::absolute(exe_path).lexically_normal();
+            const std::filesystem::path exe_dir = exe_path.parent_path();
+            append_existing_dir(&roots, &seen, exe_dir / "../stdlib");
+            append_existing_dir(&roots, &seen, exe_dir / "stdlib");
+        }
+    }
+#endif
+
+    return roots;
+}
+
+std::vector<std::filesystem::path> build_import_search_bases(const std::string& current_file_path,
+                                                             const std::string& workspace_root_path) {
+    std::vector<std::filesystem::path> bases;
+    std::unordered_set<std::string> seen;
+
+    if (!current_file_path.empty() && current_file_path != "unknown") {
+        std::filesystem::path parent = std::filesystem::path(current_file_path).parent_path();
+        while (!parent.empty()) {
+            append_unique_path(&bases, &seen, parent);
+            const std::filesystem::path next = parent.parent_path();
+            if (next == parent) {
+                break;
+            }
+            parent = next;
+        }
+    }
+
+    if (!workspace_root_path.empty()) {
+        append_unique_path(&bases, &seen, std::filesystem::path(workspace_root_path));
+    }
+
+    append_unique_path(&bases, &seen, std::filesystem::current_path());
+
+    const char* env_paths = std::getenv("MTC_PATH");
+    if (env_paths != nullptr && std::strlen(env_paths) > 0) {
+        for (const auto& raw : split_env_paths(env_paths)) {
+            append_unique_path(&bases, &seen, std::filesystem::path(raw));
+        }
+    }
+
+    for (const auto& root : default_stdlib_roots(workspace_root_path)) {
+        append_unique_path(&bases, &seen, root);
+    }
+
+    return bases;
+}
+
+std::string join_paths(const std::vector<std::filesystem::path>& paths) {
+    std::ostringstream out;
+#if defined(_WIN32)
+    const char separator = ';';
+#else
+    const char separator = ':';
+#endif
+    bool first = true;
+    for (const auto& path : paths) {
+        const std::string text = path.lexically_normal().string();
+        if (text.empty()) {
+            continue;
+        }
+        if (!first) {
+            out << separator;
+        }
+        first = false;
+        out << text;
+    }
+    return out.str();
+}
+
+void ensure_mtc_path_initialized(const std::string& workspace_root_path) {
+    std::vector<std::filesystem::path> values;
+    std::unordered_set<std::string> seen;
+
+    const char* existing = std::getenv("MTC_PATH");
+    if (existing != nullptr && std::strlen(existing) > 0) {
+        for (const auto& raw : split_env_paths(existing)) {
+            append_unique_path(&values, &seen, std::filesystem::path(raw));
+        }
+    }
+
+    for (const auto& root : default_stdlib_roots(workspace_root_path)) {
+        append_unique_path(&values, &seen, root);
+    }
+
+    const std::string combined = join_paths(values);
+    if (combined.empty()) {
+        return;
+    }
+
+#if defined(_WIN32)
+    _putenv_s("MTC_PATH", combined.c_str());
+#else
+    setenv("MTC_PATH", combined.c_str(), 1);
+#endif
+}
+
 bool token_is_keyword(const Token& token, const std::string& keyword) {
     return token.type == T_KEYWORD && token.value == keyword;
 }
@@ -512,27 +671,7 @@ std::optional<std::string> resolve_import_module_uri(const std::string& current_
         add_candidate(dotted_path + ".mtc");
     }
 
-    std::vector<std::filesystem::path> bases;
-    if (!current_file_path.empty()) {
-        std::filesystem::path current_path(current_file_path);
-        if (current_path.has_parent_path()) {
-            bases.push_back(current_path.parent_path());
-        }
-    }
-    if (!workspace_root_path.empty()) {
-        std::filesystem::path workspace_path(workspace_root_path);
-        const std::string workspace_string = workspace_path.lexically_normal().string();
-        bool exists = false;
-        for (const auto& base : bases) {
-            if (base.lexically_normal().string() == workspace_string) {
-                exists = true;
-                break;
-            }
-        }
-        if (!exists) {
-            bases.push_back(workspace_path);
-        }
-    }
+    const auto bases = build_import_search_bases(current_file_path, workspace_root_path);
 
     std::error_code ec;
     for (const auto& rel : relative_candidates) {
@@ -1716,28 +1855,7 @@ private:
     }
 
     std::vector<std::filesystem::path> import_search_bases(const std::string& current_file_path) {
-        std::vector<std::filesystem::path> bases;
-        if (!current_file_path.empty()) {
-            std::filesystem::path current_path(current_file_path);
-            if (current_path.has_parent_path()) {
-                bases.push_back(current_path.parent_path());
-            }
-        }
-        if (!workspace_root_path_.empty()) {
-            std::filesystem::path workspace_path(workspace_root_path_);
-            const std::string ws_str = workspace_path.lexically_normal().string();
-            bool exists = false;
-            for (const auto& base : bases) {
-                if (base.lexically_normal().string() == ws_str) {
-                    exists = true;
-                    break;
-                }
-            }
-            if (!exists) {
-                bases.push_back(workspace_path);
-            }
-        }
-        return bases;
+        return build_import_search_bases(current_file_path, workspace_root_path_);
     }
 
     std::string build_module_path_completion_result(const ImportCompletionInfo& info,
@@ -1890,6 +2008,7 @@ private:
         if (root_uri.has_value()) {
             workspace_root_path_ = uri_to_path(root_uri.value());
         }
+        ensure_mtc_path_initialized(workspace_root_path_);
         const std::string capabilities =
             "{"
             "\"capabilities\":{"

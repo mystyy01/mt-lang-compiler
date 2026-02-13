@@ -4005,31 +4005,155 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
         }
 
         IRValue text = cast_value(generate_expression(node.arguments[0]), "i8*");
-        (void)cast_value(generate_expression(node.arguments[1]), "i8*");
+        IRValue sep = cast_value(generate_expression(node.arguments[1]), "i8*");
+        IRValue text_len = emit_call("i64", "@strlen", {text});
+        IRValue sep_len = emit_call("i64", "@strlen", {sep});
+
+        const std::string sep_is_empty = next_register("split_sep_is_empty");
+        emit_line(sep_is_empty + " = icmp eq i64 " + sep_len.value + ", 0");
+        const std::string error_label = next_label("split_error");
+        const std::string count_init_label = next_label("split_count_init");
+        emit_line("br i1 " + sep_is_empty + ", label %" + error_label + ", label %" + count_init_label);
+
+        emit_label(error_label);
+        StringConstantInfo err_msg = get_or_create_string_constant("split() separator must not be empty");
+        IRValue err_msg_arg{"i8*", string_constant_gep(err_msg), true};
+        IRValue err_code_arg{"i32", "1002", true};
+        (void)emit_call("void", "@__mt_runtime_panic", {err_msg_arg, err_code_arg}, true);
+        emit_line("unreachable");
+
+        emit_label(count_init_label);
+        const std::string text_bytes = next_register("split_text_bytes");
+        emit_line(text_bytes + " = add i64 " + text_len.value + ", 1");
+
+        const std::string work_count = next_register("split_work_count");
+        emit_line(work_count + " = call i8* @malloc(i64 " + text_bytes + ")");
+        (void)emit_call("i8*", "@strcpy", {IRValue{"i8*", work_count, true}, text}, true);
+
+        const std::string work_store = next_register("split_work_store");
+        emit_line(work_store + " = call i8* @malloc(i64 " + text_bytes + ")");
+        (void)emit_call("i8*", "@strcpy", {IRValue{"i8*", work_store, true}, text}, true);
+
+        const std::string count_slot = next_register("split_count_slot");
+        emit_line(count_slot + " = alloca i64");
+        emit_line("store i64 0, i64* " + count_slot);
+        const std::string scan_ptr_slot = next_register("split_scan_ptr_slot");
+        emit_line(scan_ptr_slot + " = alloca i8*");
+        emit_line("store i8* " + work_count + ", i8** " + scan_ptr_slot);
+
+        const std::string count_cond_label = next_label("split_count_cond");
+        const std::string count_body_label = next_label("split_count_body");
+        const std::string count_done_label = next_label("split_count_done");
+        emit_line("br label %" + count_cond_label);
+
+        emit_label(count_cond_label);
+        const std::string scan_ptr = next_register("split_scan_ptr");
+        emit_line(scan_ptr + " = load i8*, i8** " + scan_ptr_slot);
+        const std::string found = next_register("split_found");
+        emit_line(found + " = call i8* @strstr(i8* " + scan_ptr + ", i8* " + sep.value + ")");
+        const std::string has_found = next_register("split_has_found");
+        emit_line(has_found + " = icmp ne i8* " + found + ", null");
+        emit_line("br i1 " + has_found + ", label %" + count_body_label + ", label %" + count_done_label);
+
+        emit_label(count_body_label);
+        const std::string cur_count = next_register("split_cur_count");
+        emit_line(cur_count + " = load i64, i64* " + count_slot);
+        const std::string next_count = next_register("split_next_count");
+        emit_line(next_count + " = add i64 " + cur_count + ", 1");
+        emit_line("store i64 " + next_count + ", i64* " + count_slot);
+        const std::string next_scan_ptr = next_register("split_next_scan_ptr");
+        emit_line(next_scan_ptr + " = getelementptr inbounds i8, i8* " + found + ", i64 " + sep_len.value);
+        emit_line("store i8* " + next_scan_ptr + ", i8** " + scan_ptr_slot);
+        emit_line("br label %" + count_cond_label);
+
+        emit_label(count_done_label);
+        const std::string split_count = next_register("split_count");
+        emit_line(split_count + " = load i64, i64* " + count_slot);
+        const std::string token_count = next_register("split_token_count");
+        emit_line(token_count + " = add i64 " + split_count + ", 1");
 
         const std::string header_raw = next_register("split_arr_hdr_raw");
         emit_line(header_raw + " = call i8* @malloc(i64 24)");
-
         const std::string len_slot = next_register("split_arr_len_slot");
         emit_line(len_slot + " = bitcast i8* " + header_raw + " to i64*");
-        emit_line("store i64 1, i64* " + len_slot);
-
+        emit_line("store i64 " + token_count + ", i64* " + len_slot);
         const std::string cap_slot = next_register("split_arr_cap_slot");
         emit_line(cap_slot + " = getelementptr inbounds i64, i64* " + len_slot + ", i64 1");
-        emit_line("store i64 1, i64* " + cap_slot);
+        emit_line("store i64 " + token_count + ", i64* " + cap_slot);
 
         const std::string data_slot_raw = next_register("split_arr_data_slot_raw");
         emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + header_raw + ", i64 16");
         const std::string data_slot = next_register("split_arr_data_slot");
         emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
-
+        const std::string data_bytes = next_register("split_data_bytes");
+        emit_line(data_bytes + " = mul i64 " + token_count + ", 8");
         const std::string data_raw = next_register("split_arr_data_raw");
-        emit_line(data_raw + " = call i8* @malloc(i64 8)");
+        emit_line(data_raw + " = call i8* @malloc(i64 " + data_bytes + ")");
         emit_line("store i8* " + data_raw + ", i8** " + data_slot);
-
         const std::string typed_data = next_register("split_arr_typed_data");
         emit_line(typed_data + " = bitcast i8* " + data_raw + " to i8**");
-        emit_line("store i8* " + text.value + ", i8** " + typed_data);
+
+        const std::string idx_slot = next_register("split_idx_slot");
+        emit_line(idx_slot + " = alloca i64");
+        emit_line("store i64 0, i64* " + idx_slot);
+        const std::string cursor_slot = next_register("split_cursor_slot");
+        emit_line(cursor_slot + " = alloca i8*");
+        emit_line("store i8* " + work_store + ", i8** " + cursor_slot);
+
+        const std::string fill_cond_label = next_label("split_fill_cond");
+        const std::string fill_body_label = next_label("split_fill_body");
+        const std::string fill_last_label = next_label("split_fill_last");
+        const std::string fill_done_label = next_label("split_fill_done");
+        emit_line("br label %" + fill_cond_label);
+
+        emit_label(fill_cond_label);
+        const std::string cursor = next_register("split_cursor");
+        emit_line(cursor + " = load i8*, i8** " + cursor_slot);
+        const std::string fill_found = next_register("split_fill_found");
+        emit_line(fill_found + " = call i8* @strstr(i8* " + cursor + ", i8* " + sep.value + ")");
+        const std::string fill_has_found = next_register("split_fill_has_found");
+        emit_line(fill_has_found + " = icmp ne i8* " + fill_found + ", null");
+        emit_line("br i1 " + fill_has_found + ", label %" + fill_body_label + ", label %" + fill_last_label);
+
+        emit_label(fill_body_label);
+        emit_line("store i8 0, i8* " + fill_found);
+        const std::string part_len = next_register("split_part_len");
+        emit_line(part_len + " = call i64 @strlen(i8* " + cursor + ")");
+        const std::string part_bytes = next_register("split_part_bytes");
+        emit_line(part_bytes + " = add i64 " + part_len + ", 1");
+        const std::string part_copy = next_register("split_part_copy");
+        emit_line(part_copy + " = call i8* @malloc(i64 " + part_bytes + ")");
+        (void)emit_call("i8*", "@strcpy", {IRValue{"i8*", part_copy, true}, IRValue{"i8*", cursor, true}}, true);
+
+        const std::string idx = next_register("split_idx");
+        emit_line(idx + " = load i64, i64* " + idx_slot);
+        const std::string elem_ptr = next_register("split_elem_ptr");
+        emit_line(elem_ptr + " = getelementptr inbounds i8*, i8** " + typed_data + ", i64 " + idx);
+        emit_line("store i8* " + part_copy + ", i8** " + elem_ptr);
+        const std::string idx_next = next_register("split_idx_next");
+        emit_line(idx_next + " = add i64 " + idx + ", 1");
+        emit_line("store i64 " + idx_next + ", i64* " + idx_slot);
+        const std::string cursor_next = next_register("split_cursor_next");
+        emit_line(cursor_next + " = getelementptr inbounds i8, i8* " + fill_found + ", i64 " + sep_len.value);
+        emit_line("store i8* " + cursor_next + ", i8** " + cursor_slot);
+        emit_line("br label %" + fill_cond_label);
+
+        emit_label(fill_last_label);
+        const std::string last_len = next_register("split_last_len");
+        emit_line(last_len + " = call i64 @strlen(i8* " + cursor + ")");
+        const std::string last_bytes = next_register("split_last_bytes");
+        emit_line(last_bytes + " = add i64 " + last_len + ", 1");
+        const std::string last_copy = next_register("split_last_copy");
+        emit_line(last_copy + " = call i8* @malloc(i64 " + last_bytes + ")");
+        (void)emit_call("i8*", "@strcpy", {IRValue{"i8*", last_copy, true}, IRValue{"i8*", cursor, true}}, true);
+        const std::string last_idx = next_register("split_last_idx");
+        emit_line(last_idx + " = load i64, i64* " + idx_slot);
+        const std::string last_elem_ptr = next_register("split_last_elem_ptr");
+        emit_line(last_elem_ptr + " = getelementptr inbounds i8*, i8** " + typed_data + ", i64 " + last_idx);
+        emit_line("store i8* " + last_copy + ", i8** " + last_elem_ptr);
+        emit_line("br label %" + fill_done_label);
+
+        emit_label(fill_done_label);
         return IRValue{"i8*", header_raw, true};
     }
 
