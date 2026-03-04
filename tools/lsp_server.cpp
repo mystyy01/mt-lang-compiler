@@ -100,6 +100,17 @@ std::string trim(const std::string& input) {
     return input.substr(start, end - start);
 }
 
+std::string strip_surrounding_quotes(const std::string& input) {
+    if (input.size() >= 2) {
+        const char first = input.front();
+        const char last = input.back();
+        if ((first == '"' || first == '\x27') && last == first) {
+            return input.substr(1, input.size() - 2);
+        }
+    }
+    return input;
+}
+
 std::string json_escape(const std::string& input) {
     std::string out;
     out.reserve(input.size() + 16);
@@ -639,12 +650,28 @@ std::size_t parse_qualified_module_name(const std::vector<Token>& tokens,
     return index;
 }
 
+std::size_t parse_string_module_name(const std::vector<Token>& tokens,
+                                     std::size_t start_index,
+                                     std::string* out_module_name,
+                                     std::vector<std::size_t>* out_name_token_indices) {
+    if (!out_module_name || !out_name_token_indices || start_index >= tokens.size()) {
+        return std::string::npos;
+    }
+    if (tokens[start_index].type != T_STRING) {
+        return std::string::npos;
+    }
+    *out_module_name = tokens[start_index].value;
+    out_name_token_indices->assign(1, start_index);
+    return start_index;
+}
+
 std::optional<std::string> resolve_import_module_uri(const std::string& current_file_path,
                                                      const std::string& workspace_root_path,
                                                      const std::string& module_name) {
     if (module_name.empty()) {
         return std::nullopt;
     }
+    const std::string normalized_module_name = strip_surrounding_quotes(module_name);
 
     std::vector<std::string> relative_candidates;
     auto add_candidate = [&relative_candidates](const std::string& value) {
@@ -657,13 +684,13 @@ std::optional<std::string> resolve_import_module_uri(const std::string& current_
         }
     };
 
-    if (module_name.size() >= 4 && module_name.substr(module_name.size() - 4) == ".mtc") {
-        add_candidate(module_name);
+    if (normalized_module_name.size() >= 4 && normalized_module_name.substr(normalized_module_name.size() - 4) == ".mtc") {
+        add_candidate(normalized_module_name);
     } else {
-        add_candidate(module_name + ".mtc");
+        add_candidate(normalized_module_name + ".mtc");
     }
 
-    std::string dotted_path = module_name;
+    std::string dotted_path = normalized_module_name;
     std::replace(dotted_path.begin(), dotted_path.end(), '.', '/');
     if (dotted_path.size() >= 4 && dotted_path.substr(dotted_path.size() - 4) == ".mtc") {
         add_candidate(dotted_path);
@@ -777,8 +804,11 @@ void collect_import_links_from_tokens(const std::vector<Token>& tokens,
         if (token_is_keyword(token, "from")) {
             std::string module_name;
             std::vector<std::size_t> module_name_tokens;
-            const std::size_t module_end =
+            std::size_t module_end =
                 parse_qualified_module_name(tokens, i + 1, &module_name, &module_name_tokens);
+            if (module_end == std::string::npos) {
+                module_end = parse_string_module_name(tokens, i + 1, &module_name, &module_name_tokens);
+            }
             if (module_end == std::string::npos) {
                 continue;
             }
@@ -970,6 +1000,7 @@ enum class ImportCompletionContext {
     FROM_MODULE,
     LIBC_SYMBOLS,
     MODULE_PATH,
+    FROM_STRING_PATH,
     MODULE_SYMBOLS,
 };
 
@@ -978,6 +1009,7 @@ struct ImportCompletionInfo {
     std::string module_name;
     std::string partial;
     std::unordered_set<std::string> already_imported;
+    int replace_start_character = -1;
 };
 
 ImportCompletionInfo detect_import_context(const std::string& line_text, int character) {
@@ -997,6 +1029,35 @@ ImportCompletionInfo detect_import_context(const std::string& line_text, int cha
         return info;
     }
     start += 5;
+
+    std::size_t module_start = start;
+    if (module_start + 1 < prefix.size() &&
+        prefix[module_start] == '\\' &&
+        (prefix[module_start + 1] == '"' || prefix[module_start + 1] == '\x27')) {
+        module_start += 1;
+    }
+
+    if (module_start < prefix.size() &&
+        (prefix[module_start] == '"' || prefix[module_start] == '\x27')) {
+        const char quote_char = prefix[module_start];
+        const std::size_t close_quote = prefix.find(quote_char, module_start + 1);
+        if (close_quote == std::string::npos) {
+            const std::string string_partial = prefix.substr(module_start + 1);
+            const std::size_t slash_pos = string_partial.find_last_of("/\\");
+            int replace_len = static_cast<int>(string_partial.size());
+            if (slash_pos != std::string::npos) {
+                replace_len = static_cast<int>(string_partial.size() - slash_pos - 1);
+            }
+
+            info.context = ImportCompletionContext::FROM_STRING_PATH;
+            info.partial = string_partial;
+            info.replace_start_character = character - replace_len;
+            if (info.replace_start_character < 0) {
+                info.replace_start_character = 0;
+            }
+            return info;
+        }
+    }
 
     // Look for " use " to split module name from symbol list
     std::size_t use_pos = prefix.find(" use ", start);
@@ -1021,6 +1082,7 @@ ImportCompletionInfo detect_import_context(const std::string& line_text, int cha
     if (module_name.empty()) {
         return info;
     }
+    module_name = strip_surrounding_quotes(module_name);
     info.module_name = module_name;
 
     // Collect already-imported names (all comma-separated segments except the last,
@@ -1952,6 +2014,85 @@ private:
         return std::string("{\"isIncomplete\":false,\"items\":") + items.str() + "}";
     }
 
+    std::string build_from_string_path_completion_result(const ImportCompletionInfo& info,
+                                                         const std::string& current_file_path,
+                                                         int line,
+                                                         int character) {
+        const std::string& typed = info.partial;
+        std::string dir_part;
+        std::string name_prefix;
+
+        const std::size_t slash_pos = typed.find_last_of("/\\");
+        if (slash_pos != std::string::npos) {
+            dir_part = typed.substr(0, slash_pos + 1);
+            name_prefix = typed.substr(slash_pos + 1);
+        } else {
+            name_prefix = typed;
+        }
+
+        std::vector<std::filesystem::path> candidate_dirs;
+        std::unordered_set<std::string> seen_dirs;
+        std::error_code ec;
+
+        const std::filesystem::path dir_rel(dir_part);
+        if (dir_rel.is_absolute()) {
+            append_unique_path(&candidate_dirs, &seen_dirs, dir_rel);
+        } else {
+            auto bases = import_search_bases(current_file_path);
+            for (const auto& base : bases) {
+                append_unique_path(&candidate_dirs, &seen_dirs, (base / dir_rel).lexically_normal());
+            }
+        }
+
+        std::set<std::string> seen_items;
+        std::ostringstream items;
+        items << "[";
+        bool first = true;
+
+        for (const auto& dir_path : candidate_dirs) {
+            if (!std::filesystem::is_directory(dir_path, ec)) {
+                continue;
+            }
+            std::filesystem::directory_iterator dir_it(dir_path, ec);
+            if (ec) {
+                continue;
+            }
+
+            for (const auto& entry : dir_it) {
+                std::string entry_name;
+                int kind = 17;  // File
+                if (entry.is_regular_file(ec) && entry.path().extension() == ".mtc") {
+                    entry_name = entry.path().filename().string();
+                } else if (entry.is_directory(ec)) {
+                    entry_name = entry.path().filename().string() + "/";
+                    kind = 19;  // Folder
+                }
+
+                if (entry_name.empty() || seen_items.count(entry_name) > 0) {
+                    continue;
+                }
+                if (!name_prefix.empty() && entry_name.rfind(name_prefix, 0) != 0) {
+                    continue;
+                }
+
+                seen_items.insert(entry_name);
+                if (!first) items << ",";
+                first = false;
+                items << "{"
+                      << "\"label\":\"" << json_escape(entry_name) << "\","
+                      << "\"kind\":" << kind << ","
+                      << "\"textEdit\":{"
+                      << "\"range\":{\"start\":{\"line\":" << line << ",\"character\":" << info.replace_start_character
+                      << "},\"end\":{\"line\":" << line << ",\"character\":" << character << "}},"
+                      << "\"newText\":\"" << json_escape(entry_name) << "\""
+                      << "}}";
+            }
+        }
+
+        items << "]";
+        return std::string("{\"isIncomplete\":false,\"items\":") + items.str() + "}";
+    }
+
     std::string build_module_symbols_completion_result(const ImportCompletionInfo& info,
                                                        const std::string& current_file_path) {
         auto resolved = resolve_import_module_uri(current_file_path, workspace_root_path_, info.module_name);
@@ -2013,7 +2154,7 @@ private:
             "{"
             "\"capabilities\":{"
             "\"textDocumentSync\":{\"openClose\":true,\"change\":2,\"save\":{\"includeText\":false}},"
-            "\"completionProvider\":{\"resolveProvider\":false,\"triggerCharacters\":[\".\"]},"
+            "\"completionProvider\":{\"resolveProvider\":false,\"triggerCharacters\":[\".\",\"/\"]},"
             "\"definitionProvider\":true,"
             "\"hoverProvider\":true,"
             "\"referencesProvider\":true,"
@@ -2126,6 +2267,10 @@ private:
                         return;
                     case ImportCompletionContext::MODULE_PATH:
                         send_response(id_raw, build_module_path_completion_result(
+                            info, doc_it->second.path, line.value(), character.value()));
+                        return;
+                    case ImportCompletionContext::FROM_STRING_PATH:
+                        send_response(id_raw, build_from_string_path_completion_result(
                             info, doc_it->second.path, line.value(), character.value()));
                         return;
                     case ImportCompletionContext::MODULE_SYMBOLS:

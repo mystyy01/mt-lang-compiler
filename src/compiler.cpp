@@ -234,6 +234,17 @@ std::optional<std::filesystem::path> resolve_module_relative_path(
 std::optional<std::filesystem::path> resolve_module_file(const ASTNode& module_path,
                                                          const std::filesystem::path& current_file,
                                                          const std::vector<std::filesystem::path>& search_roots) {
+    if (is_node<StringLiteral>(module_path)) {
+        std::filesystem::path rel_path(get_node<StringLiteral>(module_path).value);
+        if (rel_path.empty()) {
+            return std::nullopt;
+        }
+        if (!rel_path.has_extension()) {
+            rel_path += ".mtc";
+        }
+        return resolve_module_relative_path(rel_path, current_file, search_roots);
+    }
+
     std::vector<std::string> parts;
     if (!flatten_module_path(module_path, &parts)) {
         return std::nullopt;
@@ -576,6 +587,22 @@ int run_command(const std::string& cmd) {
     return std::system(cmd.c_str());
 }
 
+std::string build_codegen_flags(const CompilerArgs& args) {
+    std::ostringstream flags;
+    flags << "-O" << args.opt_level;
+
+    // Bare-metal/no-libc targets (PHOBOS, kernels, freestanding apps) must avoid
+    // SSE/vector instructions unless the OS explicitly enables FP/SIMD context.
+    if (args.no_libc || args.no_runtime) {
+        flags << " -target x86_64-elf"
+              << " -ffreestanding -fno-builtin"
+              << " -fno-vectorize -fno-slp-vectorize"
+              << " -mno-mmx -mno-sse -mno-sse2 -msoft-float";
+    }
+
+    return flags.str();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -722,8 +749,9 @@ int main(int argc, char** argv) {
         ? out_path
         : std::filesystem::path(out_path.string() + ".o");
 
+    const std::string codegen_flags = build_codegen_flags(args);
     const std::string compile_cmd =
-        "clang -O" + args.opt_level + " -x ir -c " + shell_quote(ir_path.string()) +
+        "clang " + codegen_flags + " -x ir -c " + shell_quote(ir_path.string()) +
         " -o " + shell_quote(obj_path.string());
     const int compile_status = run_command(compile_cmd);
 
@@ -740,11 +768,14 @@ int main(int argc, char** argv) {
     }
 
     std::ostringstream link_cmd;
-    link_cmd << "clang -O" << args.opt_level << " " << shell_quote(obj_path.string());
+    link_cmd << "clang " << codegen_flags << " " << shell_quote(obj_path.string());
     for (const auto& extra : args.extra_objects) {
         link_cmd << ' ' << shell_quote(extra);
     }
-    link_cmd << " -o " << shell_quote(out_path.string()) << " -lm";
+    link_cmd << " -o " << shell_quote(out_path.string());
+    if (!args.no_libc) {
+        link_cmd << " -lm";
+    }
 
     const int link_status = run_command(link_cmd.str());
     if (link_status != 0) {

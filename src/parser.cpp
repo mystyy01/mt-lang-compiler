@@ -1030,7 +1030,35 @@ ASTNode Parser::parse_dynamic_declaration() {
 ASTNode Parser::parse_import_statement() {
     if (match(T_KEYWORD, "from")) {
         advance();
-        ASTNode module_path = parse_expression();
+
+        ASTNode module_path;
+        if (match(T_STRING)) {
+            const Token token = current_token();
+            module_path = make_node<StringLiteral>(StringLiteral{token.value, token.line, token.column});
+            advance();
+        } else if (match(T_NAME)) {
+            const Token first_segment = current_token();
+            advance();
+            module_path = make_node<Identifier>(Identifier{first_segment.value, first_segment.line, first_segment.column});
+
+            while (match(T_SYMBOL, ".")) {
+                advance();
+                const Token segment = current_token();
+                if (!match(T_NAME)) {
+                    throw CompilerError(
+                        "Expected module name segment after '.'" + get_position_info(&segment),
+                        "ERROR", file_path);
+                }
+                advance();
+                module_path = make_node<MemberExpression>(MemberExpression{std::move(module_path), segment.value});
+            }
+        } else {
+            const Token& current = current_token();
+            throw CompilerError(
+                "Expected module path or string literal after 'from'" + get_position_info(&current),
+                "ERROR", file_path);
+        }
+
         expect(T_KEYWORD, "use");
 
         if (match(T_SYMBOL, "*")) {

@@ -39,8 +39,8 @@
       "properties": {
         "mtc.languageServer.path": {
           "type": "string",
-          "default": "dist/mtc_lsp",
-          "description": "Path to the mtc language server binary. Relative paths are resolved from the first workspace folder."
+          "default": "../dist/mtc_lsp",
+          "description": "Path to the mtc language server binary. Relative paths are checked in workspace first, then relative to the extension/compiler repo."
         }
       }
     }

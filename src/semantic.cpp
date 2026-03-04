@@ -883,7 +883,8 @@ std::string SemanticAnalyzer::analyze_member_expression(MemberExpression& node) 
     if (node.object && is_node<Identifier>(node.object)) {
         const auto& identifier = get_node<Identifier>(node.object);
         const SymbolInfo* var_symbol = symbol_table.lookup(identifier.name);
-        if (var_symbol && var_symbol->symbol_type == "variable") {
+        if (var_symbol &&
+            (var_symbol->symbol_type == "variable" || var_symbol->symbol_type == "parameter")) {
             const auto class_it = classes.find(var_symbol->data_type);
             if (class_it != classes.end()) {
                 for (const auto& field : class_it->second.fields) {
@@ -892,6 +893,19 @@ std::string SemanticAnalyzer::analyze_member_expression(MemberExpression& node) 
                     }
                 }
             }
+        }
+    }
+
+    // Generic class member lookup for any class-typed expression.
+    const auto class_it = classes.find(object_type);
+    if (class_it != classes.end()) {
+        for (const auto& field : class_it->second.fields) {
+            if (field.name == node.property) {
+                return field.type;
+            }
+        }
+        if (class_it->second.methods.find(node.property) != class_it->second.methods.end()) {
+            return "any";
         }
     }
 
@@ -1192,12 +1206,22 @@ bool SemanticAnalyzer::flatten_module_path(ASTNode& module_path,
 }
 
 std::string SemanticAnalyzer::analyze_from_import(FromImportStatement& node) {
-    std::vector<std::string> parts;
-    if (!flatten_module_path(node.module_path, &parts)) {
-        return "";
+    std::filesystem::path rel_path;
+    if (is_node<StringLiteral>(node.module_path)) {
+        rel_path = std::filesystem::path(get_node<StringLiteral>(node.module_path).value);
+        if (rel_path.empty()) {
+            return "";
+        }
+        if (!rel_path.has_extension()) {
+            rel_path += ".mtc";
+        }
+    } else {
+        std::vector<std::string> parts;
+        if (!flatten_module_path(node.module_path, &parts)) {
+            return "";
+        }
+        rel_path = path_from_parts(parts);
     }
-
-    const std::filesystem::path rel_path = path_from_parts(parts);
 
     std::string module_source;
     std::filesystem::path module_file_path;

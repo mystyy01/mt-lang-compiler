@@ -188,7 +188,8 @@ private:
     IRValue generate_float_literal(FloatLiteral& node);
     IRValue generate_string_literal(StringLiteral& node);
     IRValue generate_bool_literal(BoolLiteral& node);
-    IRValue generate_array_literal(ArrayLiteral& node);
+    IRValue generate_array_literal(ArrayLiteral& node,
+                                   const std::string& forced_element_mt_type = "");
     IRValue generate_dict_literal(DictLiteral& node);
     IRValue generate_null_literal();
     IRValue generate_identifier(Identifier& node);

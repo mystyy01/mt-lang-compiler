@@ -366,17 +366,19 @@ std::string CodeGenerator::generate(ASTNode& root) {
     string_counter = 0;
     current_block_terminated = false;
 
-    for (const auto& [symbol, libc_info] : LIBC_FUNCTIONS) {
-        CodegenFunctionInfo info;
-        info.name = symbol;
-        info.return_type = map_libc_type_to_llvm(libc_info.ret);
-        info.return_mt_type = libc_info.ret;
-        info.is_external = true;
-        info.is_var_arg = libc_info.var_arg;
-        for (const std::string& arg_ty : libc_info.args) {
-            info.parameters.emplace_back("", map_libc_type_to_llvm(arg_ty), nullptr, arg_ty);
+    if (emit_builtin_decls_flag) {
+        for (const auto& [symbol, libc_info] : LIBC_FUNCTIONS) {
+            CodegenFunctionInfo info;
+            info.name = symbol;
+            info.return_type = map_libc_type_to_llvm(libc_info.ret);
+            info.return_mt_type = libc_info.ret;
+            info.is_external = true;
+            info.is_var_arg = libc_info.var_arg;
+            for (const std::string& arg_ty : libc_info.args) {
+                info.parameters.emplace_back("", map_libc_type_to_llvm(arg_ty), nullptr, arg_ty);
+            }
+            functions[symbol] = std::move(info);
         }
-        functions[symbol] = std::move(info);
     }
 
     if (!is_node<Program>(root)) {
@@ -1801,18 +1803,23 @@ CodeGenerator::IRValue CodeGenerator::generate_bool_literal(BoolLiteral& node) {
     return IRValue{"i1", node.value ? "1" : "0", true};
 }
 
-CodeGenerator::IRValue CodeGenerator::generate_array_literal(ArrayLiteral& node) {
-    std::string element_type = "int";
-    if (!node.elements.empty()) {
-        ASTNode& first = node.elements[0];
-        if (is_node<FloatLiteral>(first)) {
-            element_type = "float";
-        } else if (is_node<StringLiteral>(first)) {
-            element_type = "string";
-        } else if (is_node<BoolLiteral>(first)) {
-            element_type = "bool";
-        } else if (is_node<NullLiteral>(first)) {
-            element_type = "any";
+CodeGenerator::IRValue CodeGenerator::generate_array_literal(
+    ArrayLiteral& node,
+    const std::string& forced_element_mt_type) {
+    std::string element_type = forced_element_mt_type;
+    if (element_type.empty()) {
+        element_type = "int";
+        if (!node.elements.empty()) {
+            ASTNode& first = node.elements[0];
+            if (is_node<FloatLiteral>(first)) {
+                element_type = "float";
+            } else if (is_node<StringLiteral>(first)) {
+                element_type = "string";
+            } else if (is_node<BoolLiteral>(first)) {
+                element_type = "bool";
+            } else if (is_node<NullLiteral>(first)) {
+                element_type = "any";
+            }
         }
     }
 
@@ -2071,7 +2078,14 @@ CodeGenerator::IRValue CodeGenerator::generate_new_expression(NewExpression& nod
             continue;
         }
         ASTNode init_expr = clone_node(field.initializer);
-        IRValue value = cast_value(generate_expression(init_expr), field.llvm_type);
+        IRValue value;
+        if (field.mt_type == "array" && init_expr && is_node<ArrayLiteral>(init_expr)) {
+            std::string elem_mt_type = field.element_mt_type.empty() ? "any" : field.element_mt_type;
+            value = cast_value(generate_array_literal(get_node<ArrayLiteral>(init_expr), elem_mt_type),
+                               field.llvm_type);
+        } else {
+            value = cast_value(generate_expression(init_expr), field.llvm_type);
+        }
         const std::string field_raw = next_register(node.class_name + "_field_init_raw");
         emit_line(field_raw + " = getelementptr inbounds i8, i8* " + obj_ptr + ", i64 " +
                   std::to_string(field.offset));
@@ -4770,9 +4784,61 @@ void CodeGenerator::generate_set_statement(SetStatement& node) {
 
     if (node.target && is_node<IndexExpression>(node.target)) {
         auto& index_expr = get_node<IndexExpression>(node.target);
+        IRValue raw_index = generate_expression(index_expr.index);
+        const CodegenClassFieldInfo* object_member_field = nullptr;
+        if (index_expr.object && is_node<MemberExpression>(index_expr.object)) {
+            const auto& member = get_node<MemberExpression>(index_expr.object);
+            const VariableInfo* owner_var = nullptr;
+            if (member.object && is_node<Identifier>(member.object)) {
+                owner_var = resolve_variable(get_node<Identifier>(member.object).name);
+            } else if (member.object && is_node<ThisExpression>(member.object)) {
+                owner_var = resolve_variable("this");
+            }
+            if (owner_var && !owner_var->class_name.empty()) {
+                const auto class_it = classes.find(owner_var->class_name);
+                if (class_it != classes.end()) {
+                    const auto field_it = class_it->second.fields.find(member.property);
+                    if (field_it != class_it->second.fields.end()) {
+                        object_member_field = &field_it->second;
+                    }
+                }
+            }
+        }
+
+        if (object_member_field && object_member_field->mt_type == "array") {
+            IRValue index = cast_value(raw_index, "i64");
+            IRValue header = cast_value(generate_expression(index_expr.object), "i8*");
+
+            std::string elem_llvm_type = "i8*";
+            if (!object_member_field->element_mt_type.empty()) {
+                elem_llvm_type = map_type_to_llvm(object_member_field->element_mt_type);
+                if (elem_llvm_type == "void") {
+                    elem_llvm_type = "i8*";
+                }
+            }
+
+            const std::string data_slot_raw = next_register("member_arr_data_slot_raw");
+            emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + header.value + ", i64 16");
+            const std::string data_slot = next_register("member_arr_data_slot");
+            emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
+            const std::string data_raw = next_register("member_arr_data_raw");
+            emit_line(data_raw + " = load i8*, i8** " + data_slot);
+
+            const std::string typed_data = next_register("member_arr_typed_data");
+            emit_line(typed_data + " = bitcast i8* " + data_raw + " to " + elem_llvm_type + "*");
+            const std::string elem_ptr = next_register("member_arr_elem_ptr");
+            emit_line(elem_ptr + " = getelementptr inbounds " + elem_llvm_type +
+                      ", " + elem_llvm_type + "* " + typed_data + ", i64 " + index.value);
+
+            IRValue value = cast_value(generate_expression(node.value), elem_llvm_type);
+            emit_line("store " + elem_llvm_type + " " + value.value + ", " +
+                      elem_llvm_type + "* " + elem_ptr);
+            return;
+        }
+
         if (!index_expr.object || !is_node<Identifier>(index_expr.object)) {
             throw std::runtime_error(
-                "Indexed assignment is only supported on array identifiers");
+                "Indexed assignment is only supported on array identifiers or class array fields");
         }
 
         const std::string object_name = get_node<Identifier>(index_expr.object).name;
@@ -4780,7 +4846,6 @@ void CodeGenerator::generate_set_statement(SetStatement& node) {
         if (!var) {
             throw std::runtime_error("Assignment to undeclared variable '" + object_name + "'");
         }
-        IRValue raw_index = generate_expression(index_expr.index);
 
         if (var->is_fixed_array) {
             IRValue index = cast_value(raw_index, "i64");
