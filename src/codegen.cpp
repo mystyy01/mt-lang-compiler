@@ -537,7 +537,8 @@ void CodeGenerator::collect_program_declarations(Program& program) {
             auto& decl = get_node<VariableDeclaration>(statement);
             top_level_variables.push_back(clone_node(statement));
 
-            if (decl.type == "array" || decl.type == "dict" || decl.fixed_size > 0) {
+            // Fixed-size arrays use stack-allocated [N x T], can't be i8* globals
+            if (decl.fixed_size > 0) {
                 continue;
             }
 
@@ -555,20 +556,43 @@ void CodeGenerator::collect_program_declarations(Program& program) {
                 class_name = decl.type;
             }
 
+            // Build metadata for arrays and dicts so functions see the full type info
+            bool is_dyn_array = (decl.type == "array");
+            std::string dyn_elem_llvm;
+            std::string dyn_elem_mt;
+            if (is_dyn_array) {
+                dyn_elem_mt = decl.element_type.empty() ? "int" : decl.element_type;
+                dyn_elem_llvm = map_type_to_llvm(dyn_elem_mt);
+                if (dyn_elem_llvm == "void") {
+                    dyn_elem_llvm = "i8*";
+                    dyn_elem_mt = "any";
+                }
+            }
+
+            bool is_dict = (decl.type == "dict");
+            std::string dict_key_llvm, dict_val_llvm, dict_key_mt, dict_val_mt;
+            if (is_dict) {
+                dict_key_mt = decl.key_type.empty() ? "any" : decl.key_type;
+                dict_val_mt = decl.value_type.empty() ? "any" : decl.value_type;
+                dict_key_llvm = map_type_to_llvm(dict_key_mt);
+                dict_val_llvm = map_type_to_llvm(dict_val_mt);
+            }
+
             module_globals.emplace(decl.name, VariableInfo{
                                             llvm_type,
                                             symbol,
                                             false,
                                             "",
                                             0,
-                                            false,
-                                            "",
+                                            is_dyn_array,
+                                            dyn_elem_llvm,
                                             class_name,
-                                            false,
-                                            "",
-                                            "",
-                                            "",
-                                            "",
+                                            is_dict,
+                                            dict_key_llvm,
+                                            dict_val_llvm,
+                                            dict_key_mt,
+                                            dict_val_mt,
+                                            dyn_elem_mt,
                                         });
         }
     }
@@ -775,6 +799,8 @@ void CodeGenerator::emit_prelude() {
     global_lines.push_back("@__mt_exc_jmp = internal global i8* null");
     global_lines.push_back("@__mt_exc_obj = internal global i8* null");
     global_lines.push_back("@__mt_exc_tag = internal global i32 0");
+    global_lines.push_back("@__mt_argc = internal global i32 0");
+    global_lines.push_back("@__mt_argv = internal global i8** null");
     for (const auto& [_, info] : module_globals) {
         (void)_;
         std::string zero_init = "0";
@@ -1069,8 +1095,13 @@ void CodeGenerator::emit_main_function(Program& program) {
     CodegenFunctionInfo main_info;
     main_info.name = "main";
     main_info.return_type = "i32";
+    main_info.parameters.push_back(CodegenParameterInfo("argc", "i32"));
+    main_info.parameters.push_back(CodegenParameterInfo("argv", "i8**"));
 
     begin_function(main_info);
+
+    emit_line("store i32 %argc, i32* @__mt_argc");
+    emit_line("store i8** %argv, i8*** @__mt_argv");
 
     for (auto& statement : program.statements) {
         if (!statement) {
@@ -1468,6 +1499,13 @@ void CodeGenerator::generate_statement(ASTNode& node) {
         const std::string body_label = next_label("for_arr_body");
         const std::string end_label = next_label("for_arr_end");
 
+        // Propagate class_name if the array element type is a known class
+        std::string loop_var_class_name;
+        const std::string& elem_mt_type = iterable_var->dynamic_array_elem_mt_type;
+        if (!elem_mt_type.empty() && classes.find(elem_mt_type) != classes.end()) {
+            loop_var_class_name = elem_mt_type;
+        }
+
         push_scope();
         declare_variable(for_node.variable, VariableInfo{
             elem_type,
@@ -1477,7 +1515,7 @@ void CodeGenerator::generate_statement(ASTNode& node) {
             0,
             false,
             "",
-            "",
+            loop_var_class_name,
             false,
             "",
             "",
@@ -4171,6 +4209,76 @@ CodeGenerator::IRValue CodeGenerator::generate_call_expression(CallExpression& n
         return IRValue{"i8*", header_raw, true};
     }
 
+    if (callee_name == "args") {
+        if (node.arguments.size() != 0) {
+            throw std::runtime_error("args() expects no arguments");
+        }
+
+        // Load argc and argv from globals
+        const std::string argc_i32 = next_register("args_argc_i32");
+        emit_line(argc_i32 + " = load i32, i32* @__mt_argc");
+        const std::string argc = next_register("args_argc");
+        emit_line(argc + " = sext i32 " + argc_i32 + " to i64");
+        const std::string argv = next_register("args_argv");
+        emit_line(argv + " = load i8**, i8*** @__mt_argv");
+
+        // Allocate array header: [len:i64][cap:i64][data_ptr:i8*] = 24 bytes
+        const std::string header = next_register("args_hdr");
+        emit_line(header + " = call i8* @malloc(i64 24)");
+        const std::string len_slot = next_register("args_len_slot");
+        emit_line(len_slot + " = bitcast i8* " + header + " to i64*");
+        emit_line("store i64 " + argc + ", i64* " + len_slot);
+        const std::string cap_slot = next_register("args_cap_slot");
+        emit_line(cap_slot + " = getelementptr inbounds i64, i64* " + len_slot + ", i64 1");
+        emit_line("store i64 " + argc + ", i64* " + cap_slot);
+
+        // Allocate data buffer (argc * 8 bytes for i8* pointers)
+        const std::string data_slot_raw = next_register("args_data_slot_raw");
+        emit_line(data_slot_raw + " = getelementptr inbounds i8, i8* " + header + ", i64 16");
+        const std::string data_slot = next_register("args_data_slot");
+        emit_line(data_slot + " = bitcast i8* " + data_slot_raw + " to i8**");
+        const std::string data_bytes = next_register("args_data_bytes");
+        emit_line(data_bytes + " = mul i64 " + argc + ", 8");
+        const std::string data_buf = next_register("args_data_buf");
+        emit_line(data_buf + " = call i8* @malloc(i64 " + data_bytes + ")");
+        emit_line("store i8* " + data_buf + ", i8** " + data_slot);
+        const std::string typed_data = next_register("args_typed_data");
+        emit_line(typed_data + " = bitcast i8* " + data_buf + " to i8**");
+
+        // Loop: copy argv pointers into the array data buffer
+        const std::string idx_slot = next_register("args_idx_slot");
+        emit_line(idx_slot + " = alloca i64");
+        emit_line("store i64 0, i64* " + idx_slot);
+
+        const std::string cond_label = next_label("args_cond");
+        const std::string body_label = next_label("args_body");
+        const std::string done_label = next_label("args_done");
+        emit_line("br label %" + cond_label);
+
+        emit_label(cond_label);
+        const std::string idx = next_register("args_idx");
+        emit_line(idx + " = load i64, i64* " + idx_slot);
+        const std::string cmp = next_register("args_cmp");
+        emit_line(cmp + " = icmp slt i64 " + idx + ", " + argc);
+        emit_line("br i1 " + cmp + ", label %" + body_label + ", label %" + done_label);
+
+        emit_label(body_label);
+        const std::string argv_elem_ptr = next_register("args_argv_elem_ptr");
+        emit_line(argv_elem_ptr + " = getelementptr inbounds i8*, i8** " + argv + ", i64 " + idx);
+        const std::string argv_elem = next_register("args_argv_elem");
+        emit_line(argv_elem + " = load i8*, i8** " + argv_elem_ptr);
+        const std::string data_elem_ptr = next_register("args_data_elem_ptr");
+        emit_line(data_elem_ptr + " = getelementptr inbounds i8*, i8** " + typed_data + ", i64 " + idx);
+        emit_line("store i8* " + argv_elem + ", i8** " + data_elem_ptr);
+        const std::string idx_next = next_register("args_idx_next");
+        emit_line(idx_next + " = add i64 " + idx + ", 1");
+        emit_line("store i64 " + idx_next + ", i64* " + idx_slot);
+        emit_line("br label %" + cond_label);
+
+        emit_label(done_label);
+        return IRValue{"i8*", header, true};
+    }
+
     if (callee_name == "length") {
         if (node.arguments.size() != 1) {
             throw std::runtime_error("length() expects exactly one argument");
@@ -4290,7 +4398,8 @@ CodeGenerator::IRValue CodeGenerator::generate_hasattr_expression(HasattrExpress
 }
 
 void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
-    if (current_function_name == "main" && is_top_level_variable_name(node.name)) {
+    if (current_function_name == "main" && is_top_level_variable_name(node.name) &&
+        node.type != "array" && node.type != "dict") {
         const auto global_it = module_globals.find(node.name);
         if (global_it != module_globals.end()) {
             const VariableInfo& global_var = global_it->second;
@@ -4312,8 +4421,13 @@ void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
         }
     }
 
+    // Check if this variable has a module global (for arrays/dicts in top-level scope)
+    const bool has_global = current_function_name == "main" &&
+        module_globals.find(node.name) != module_globals.end();
+
     if (node.type == "array" &&
         !node.is_dynamic &&
+        !has_global &&
         node.fixed_size <= 0 &&
         node.value &&
         is_node<ArrayLiteral>(node.value)) {
@@ -4444,8 +4558,13 @@ void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
                 inferred_element_type = "any";
             }
 
-            const std::string ptr = next_register(node.name + "_addr");
-            emit_line(ptr + " = alloca i8*");
+            std::string ptr;
+            if (has_global) {
+                ptr = module_globals.at(node.name).ptr_value;
+            } else {
+                ptr = next_register(node.name + "_addr");
+                emit_line(ptr + " = alloca i8*");
+            }
             emit_line("store i8* " + existing.value + ", i8** " + ptr);
             declare_variable(node.name, VariableInfo{
                 "i8*",
@@ -4532,8 +4651,13 @@ void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
         emit_line(data_raw + " = call i8* @malloc(i64 " + std::to_string(total_bytes) + ")");
         emit_line("store i8* " + data_raw + ", i8** " + data_slot);
 
-        const std::string ptr = next_register(node.name + "_addr");
-        emit_line(ptr + " = alloca i8*");
+        std::string ptr;
+        if (has_global) {
+            ptr = module_globals.at(node.name).ptr_value;
+        } else {
+            ptr = next_register(node.name + "_addr");
+            emit_line(ptr + " = alloca i8*");
+        }
         emit_line("store i8* " + header_raw + ", i8** " + ptr);
         declare_variable(node.name, VariableInfo{
             "i8*",
@@ -4583,8 +4707,13 @@ void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
                 value_mt_type = "any";
             }
 
-            const std::string ptr = next_register(node.name + "_addr");
-            emit_line(ptr + " = alloca i8*");
+            std::string ptr;
+            if (has_global) {
+                ptr = module_globals.at(node.name).ptr_value;
+            } else {
+                ptr = next_register(node.name + "_addr");
+                emit_line(ptr + " = alloca i8*");
+            }
             emit_line("store i8* " + existing.value + ", i8** " + ptr);
             declare_variable(node.name, VariableInfo{
                 "i8*",
@@ -4669,8 +4798,13 @@ void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
         emit_line(values_raw + " = call i8* @malloc(i64 " + std::to_string(value_bytes) + ")");
         emit_line("store i8* " + values_raw + ", i8** " + values_slot);
 
-        const std::string ptr = next_register(node.name + "_addr");
-        emit_line(ptr + " = alloca i8*");
+        std::string ptr;
+        if (has_global) {
+            ptr = module_globals.at(node.name).ptr_value;
+        } else {
+            ptr = next_register(node.name + "_addr");
+            emit_line(ptr + " = alloca i8*");
+        }
         emit_line("store i8* " + header_raw + ", i8** " + ptr);
 
         declare_variable(node.name, VariableInfo{

@@ -181,6 +181,37 @@ std::vector<std::string> split_env_paths(const std::string& value) {
     return paths;
 }
 
+constexpr const char* kSystemStdlibRoot = "/usr/lib/mtc_stdlib";
+
+std::optional<std::filesystem::path> strip_stdlib_prefix(const std::filesystem::path& relative_path) {
+    auto part_it = relative_path.begin();
+    if (part_it == relative_path.end() || part_it->string() != "stdlib") {
+        return std::nullopt;
+    }
+
+    ++part_it;
+    if (part_it == relative_path.end()) {
+        return std::nullopt;
+    }
+
+    std::filesystem::path stripped;
+    for (; part_it != relative_path.end(); ++part_it) {
+        stripped /= *part_it;
+    }
+    return stripped;
+}
+
+void append_system_stdlib_candidates(const std::filesystem::path& relative_path,
+                                     std::vector<std::filesystem::path>* candidates,
+                                     std::unordered_set<std::string>* seen) {
+    const std::filesystem::path stdlib_root(kSystemStdlibRoot);
+    const auto stripped = strip_stdlib_prefix(relative_path);
+    if (stripped.has_value()) {
+        append_unique_path(candidates, seen, stdlib_root / *stripped);
+    }
+    append_unique_path(candidates, seen, stdlib_root / relative_path);
+}
+
 std::vector<std::filesystem::path> build_module_search_roots(const std::filesystem::path& source_file) {
     std::vector<std::filesystem::path> roots;
     std::unordered_set<std::string> seen;
@@ -217,6 +248,7 @@ std::optional<std::filesystem::path> resolve_module_relative_path(
     if (relative_path.is_absolute()) {
         append_unique_path(&candidates, &seen, relative_path);
     } else {
+        append_system_stdlib_candidates(relative_path, &candidates, &seen);
         append_unique_path(&candidates, &seen, current_file.parent_path() / relative_path);
         for (const auto& root : search_roots) {
             append_unique_path(&candidates, &seen, root / relative_path);

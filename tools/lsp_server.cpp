@@ -831,7 +831,7 @@ void collect_import_links_from_tokens(const std::vector<Token>& tokens,
 
 std::vector<std::string> builtin_completion_items() {
     return {
-        "print", "length", "append", "pop", "str", "int", "float", "read", "split", "range",
+        "print", "length", "append", "pop", "str", "int", "float", "read", "split", "range", "args",
     };
 }
 

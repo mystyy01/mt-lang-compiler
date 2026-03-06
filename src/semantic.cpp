@@ -73,6 +73,37 @@ std::vector<std::string> split_env_paths(const std::string& value) {
     return paths;
 }
 
+constexpr const char* kSystemStdlibRoot = "/usr/lib/mtc_stdlib";
+
+std::optional<std::filesystem::path> strip_stdlib_prefix(const std::filesystem::path& relative_path) {
+    auto part_it = relative_path.begin();
+    if (part_it == relative_path.end() || part_it->string() != "stdlib") {
+        return std::nullopt;
+    }
+
+    ++part_it;
+    if (part_it == relative_path.end()) {
+        return std::nullopt;
+    }
+
+    std::filesystem::path stripped;
+    for (; part_it != relative_path.end(); ++part_it) {
+        stripped /= *part_it;
+    }
+    return stripped;
+}
+
+void append_system_stdlib_candidates(const std::filesystem::path& rel_path,
+                                     std::vector<std::filesystem::path>* candidates,
+                                     std::unordered_set<std::string>* seen) {
+    const std::filesystem::path stdlib_root(kSystemStdlibRoot);
+    const auto stripped = strip_stdlib_prefix(rel_path);
+    if (stripped.has_value()) {
+        append_unique_path(candidates, seen, stdlib_root / *stripped);
+    }
+    append_unique_path(candidates, seen, stdlib_root / rel_path);
+}
+
 std::vector<std::filesystem::path> build_module_search_roots(const std::string& file_path) {
     std::vector<std::filesystem::path> roots;
     std::unordered_set<std::string> seen;
@@ -108,6 +139,7 @@ std::optional<std::filesystem::path> resolve_module_path(
     std::vector<std::filesystem::path> candidates;
     std::unordered_set<std::string> seen;
 
+    append_system_stdlib_candidates(rel_path, &candidates, &seen);
     if (!current_file_path.empty() && current_file_path != "unknown") {
         append_unique_path(
             &candidates, &seen, std::filesystem::path(current_file_path).parent_path() / rel_path);
@@ -377,6 +409,7 @@ void SemanticAnalyzer::add_builtin_symbols() {
     symbol_table.declare("float", "builtin", "float");
     symbol_table.declare("read", "builtin", "string");
     symbol_table.declare("split", "builtin", "array");
+    symbol_table.declare("args", "builtin", "array", {}, "string");
 
     for (const auto& [name, info] : LIBC_FUNCTIONS) {
         symbol_table.declare(name, "builtin", libc_return_type_to_semantic_type(info.ret));
@@ -1361,6 +1394,10 @@ std::string SemanticAnalyzer::analyze_call_expression(CallExpression& node) {
             }
             if (func_name == "split" && node.arguments.size() != 2) {
                 add_error("split() expects exactly 2 arguments" +
+                          get_position_info(node.line, node.column));
+            }
+            if (func_name == "args" && node.arguments.size() != 0) {
+                add_error("args() expects 0 arguments" +
                           get_position_info(node.line, node.column));
             }
             for (auto& arg : node.arguments) {

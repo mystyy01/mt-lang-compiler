@@ -18,34 +18,7 @@ class MtcLspClient {
   }
 
   resolveServerPath() {
-    const configured = vscode.workspace
-      .getConfiguration("mtc")
-      .get("languageServer.path", "../dist/mtc_lsp");
-
-    if (path.isAbsolute(configured)) {
-      return configured;
-    }
-
-    const workspaceFolders = vscode.workspace.workspaceFolders || [];
-    const workspaceCandidate =
-      workspaceFolders.length > 0
-        ? path.join(workspaceFolders[0].uri.fsPath, configured)
-        : null;
-
-    const extensionCandidate = path.resolve(this.context.extensionPath, configured);
-    const repoCandidate = path.resolve(this.context.extensionPath, "..", "dist", "mtc_lsp");
-
-    if (workspaceCandidate && fs.existsSync(workspaceCandidate)) {
-      return workspaceCandidate;
-    }
-    if (fs.existsSync(extensionCandidate)) {
-      return extensionCandidate;
-    }
-    if (fs.existsSync(repoCandidate)) {
-      return repoCandidate;
-    }
-
-    return workspaceCandidate || extensionCandidate;
+    return "/bin/mtc_lsp";
   }
 
   start() {
