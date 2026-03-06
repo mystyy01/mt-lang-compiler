@@ -5538,6 +5538,50 @@ CodeGenerator::IRValue CodeGenerator::cast_value(const IRValue& value, const std
         return IRValue{"i8*", reg, true};
     }
 
+    if (value.type == "i64" && target_type == "i8*") {
+        const std::string reg = next_register("inttoptr");
+        emit_line(reg + " = inttoptr i64 " + value.value + " to i8*");
+        return IRValue{"i8*", reg, true};
+    }
+
+    if (value.type == "i1" && target_type == "i8*") {
+        const std::string wide = next_register("zext");
+        emit_line(wide + " = zext i1 " + value.value + " to i64");
+        const std::string reg = next_register("inttoptr");
+        emit_line(reg + " = inttoptr i64 " + wide + " to i8*");
+        return IRValue{"i8*", reg, true};
+    }
+
+    if (value.type == "double" && target_type == "i8*") {
+        const std::string bits = next_register("double_bits");
+        emit_line(bits + " = bitcast double " + value.value + " to i64");
+        const std::string reg = next_register("inttoptr");
+        emit_line(reg + " = inttoptr i64 " + bits + " to i8*");
+        return IRValue{"i8*", reg, true};
+    }
+
+    if (value.type == "i8*" && target_type == "i64") {
+        const std::string reg = next_register("ptrtoint");
+        emit_line(reg + " = ptrtoint i8* " + value.value + " to i64");
+        return IRValue{"i64", reg, true};
+    }
+
+    if (value.type == "i8*" && target_type == "double") {
+        const std::string bits = next_register("ptrtoint");
+        emit_line(bits + " = ptrtoint i8* " + value.value + " to i64");
+        const std::string reg = next_register("bits_to_double");
+        emit_line(reg + " = bitcast i64 " + bits + " to double");
+        return IRValue{"double", reg, true};
+    }
+
+    if (value.type == "i8*" && target_type == "i1") {
+        const std::string bits = next_register("ptrtoint");
+        emit_line(bits + " = ptrtoint i8* " + value.value + " to i64");
+        const std::string reg = next_register("tobool");
+        emit_line(reg + " = icmp ne i64 " + bits + ", 0");
+        return IRValue{"i1", reg, true};
+    }
+
     if (is_pointer_type(value.type) && is_pointer_type(target_type)) {
         const std::string reg = next_register("bitcast");
         emit_line(reg + " = bitcast " + value.type + " " + value.value + " to " + target_type);
