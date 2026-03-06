@@ -16,7 +16,10 @@
 
 namespace {
 
-constexpr const char* kMtcVersion = "0.4.0";
+#ifndef MTC_VERSION
+#define MTC_VERSION "dev"
+#endif
+constexpr const char* kMtcVersion = MTC_VERSION;
 
 struct CompilerArgs {
     bool object_only = false;

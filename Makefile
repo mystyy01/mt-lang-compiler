@@ -1,5 +1,6 @@
 CXX := g++
-CXXFLAGS := -std=c++20 -Wall -Wextra -Wpedantic -Iinclude -Isrc
+MTC_VERSION ?= $(shell tr -d '\n' < VERSION 2>/dev/null || echo dev)
+CXXFLAGS := -std=c++20 -Wall -Wextra -Wpedantic -Iinclude -Isrc -DMTC_VERSION=\"$(MTC_VERSION)\"
 DEPFLAGS := -MMD -MP
 LDFLAGS :=
 
