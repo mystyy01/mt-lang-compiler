@@ -1,0 +1,1358 @@
+from types use Token
+from types use T_NAME, T_KEYWORD, T_FLOAT_LITERAL, T_INT_LITERAL, T_SYMBOL, T_STRING
+
+int T_EOF = -1
+
+bool token_is_type_keyword(Token token){
+    if (token.type != T_KEYWORD){
+        return false
+    }
+    return token.value == "int" || token.value == "float" || token.value == "void" || token.value == "array" || token.value == "dict" || token.value == "string" || token.value == "bool"
+}
+
+bool token_is_name_or_keyword(Token token){
+    return token.type == T_NAME || token.type == T_KEYWORD
+}
+
+bool token_can_be_identifier_keyword(Token token){
+    if (token.type != T_KEYWORD){
+        return false
+    }
+    return token.value == "fopen" || token.value == "fclose" || token.value == "fread" || token.value == "fwrite" || token.value == "fseek" || token.value == "ftell" || token.value == "malloc" || token.value == "free" || token.value == "int" || token.value == "float" || token.value == "str" || token.value == "read" || token.value == "length" || token.value == "append" || token.value == "pop" || token.value == "split" || token.value == "args"
+}
+
+dict make_node(string kind, int line = -1, int column = -1){
+    dict node = {}
+    set node["kind"] = kind
+    set node["line"] = line
+    set node["column"] = column
+    return node
+}
+
+class Parser{
+    void new(array toks, string fp = "unknown"){
+        set this.tokens = toks
+        set this.position = 0
+        set this.file_path = fp
+        set this.errors = []
+    }
+
+    array get_errors(){
+        return this.errors
+    }
+
+    bool has_errors(){
+        return this.errors.length() > 0
+    }
+
+    void add_error(string message){
+        if (this.file_path != "" && this.file_path != "unknown"){
+            this.errors.append(message + " in " + this.file_path)
+        }
+        else{
+            this.errors.append(message)
+        }
+    }
+
+    string token_type_name(int token_type){
+        if (token_type == T_NAME){
+            return "NAME"
+        }
+        if (token_type == T_KEYWORD){
+            return "KEYWORD"
+        }
+        if (token_type == T_FLOAT_LITERAL){
+            return "FLOAT_LITERAL"
+        }
+        if (token_type == T_INT_LITERAL){
+            return "INT_LITERAL"
+        }
+        if (token_type == T_SYMBOL){
+            return "SYMBOL"
+        }
+        if (token_type == T_STRING){
+            return "STRING"
+        }
+        if (token_type == T_EOF){
+            return "EOF"
+        }
+        return "UNKNOWN"
+    }
+
+    Token eof_token(){
+        return new Token(T_EOF, "EOF", -1, -1)
+    }
+
+    bool is_at_end(){
+        return this.position >= this.tokens.length()
+    }
+
+    Token current_token(){
+        if (this.is_at_end()){
+            return this.eof_token()
+        }
+        return this.tokens[this.position]
+    }
+
+    Token peek_token(int offset = 1){
+        int idx = this.position + offset
+        if (idx < 0 || idx >= this.tokens.length()){
+            return this.eof_token()
+        }
+        return this.tokens[idx]
+    }
+
+    void advance(int offset = 1){
+        set this.position = this.position + offset
+    }
+
+    bool match(int token_type){
+        Token token = this.current_token()
+        return token.type == token_type
+    }
+
+    bool match_value(int token_type, string value){
+        Token token = this.current_token()
+        return token.type == token_type && token.value == value
+    }
+
+    bool peek_match(int offset, int token_type){
+        Token token = this.peek_token(offset)
+        return token.type == token_type
+    }
+
+    bool peek_match_value(int offset, int token_type, string value){
+        Token token = this.peek_token(offset)
+        return token.type == token_type && token.value == value
+    }
+
+    bool expect(int token_type){
+        Token token = this.current_token()
+        if (token.type == token_type){
+            this.advance()
+            return true
+        }
+        this.add_error("Expected " + this.token_type_name(token_type) + " but found '" + token.value + "' (" + this.token_type_name(token.type) + ") at line " + str(token.line) + ", column " + str(token.column))
+        return false
+    }
+
+    bool expect_value(int token_type, string value){
+        Token token = this.current_token()
+        if (token.type == token_type && token.value == value){
+            this.advance()
+            return true
+        }
+        this.add_error("Expected '" + value + "' but found '" + token.value + "' (" + this.token_type_name(token.type) + ") at line " + str(token.line) + ", column " + str(token.column))
+        return false
+    }
+
+    dict parse_program(){
+        array statements = []
+        while (this.is_at_end() != true){
+            int start_pos = this.position
+            statements.append(this.parse_statement())
+            if (this.position == start_pos){
+                Token token = this.current_token()
+                this.add_error("Parser made no progress at '" + token.value + "' (line " + str(token.line) + ", column " + str(token.column) + ")")
+                this.advance()
+            }
+        }
+
+        dict node = make_node("Program")
+        set node["statements"] = statements
+        return node
+    }
+
+    dict parse_statement(){
+        if (this.match_value(T_KEYWORD, "dynamic")){
+            return this.parse_dynamic_declaration()
+        }
+        if (this.match_value(T_KEYWORD, "set")){
+            return this.parse_set_statement()
+        }
+        if (this.match_value(T_KEYWORD, "return")){
+            return this.parse_return_statement()
+        }
+        if (this.match_value(T_KEYWORD, "if")){
+            return this.parse_if_statement(false)
+        }
+        if (this.match_value(T_KEYWORD, "for")){
+            return this.parse_for_statement()
+        }
+        if (this.match_value(T_KEYWORD, "func")){
+            return this.parse_dynamic_function()
+        }
+        if (this.match_value(T_KEYWORD, "external")){
+            return this.parse_external()
+        }
+        if (this.match_value(T_KEYWORD, "from") || this.match_value(T_KEYWORD, "use")){
+            return this.parse_import_statement()
+        }
+        if (this.match_value(T_KEYWORD, "while")){
+            return this.parse_while_statement()
+        }
+        if (this.match_value(T_KEYWORD, "class")){
+            return this.parse_class_declaration()
+        }
+        if (this.match_value(T_KEYWORD, "try")){
+            return this.parse_try_statement()
+        }
+        if (this.match_value(T_KEYWORD, "throw")){
+            return this.parse_throw_statement()
+        }
+        if (this.match_value(T_KEYWORD, "break")){
+            return this.parse_break_statement()
+        }
+
+        Token token = this.current_token()
+        if (token_is_type_keyword(token)){
+            Token next = this.peek_token()
+            if (next.type == T_NAME || (next.type == T_SYMBOL && (next.value == "<" || next.value == "["))){
+                return this.parse_declaration()
+            }
+        }
+
+        if (token.type == T_NAME){
+            Token next = this.peek_token()
+            if (next.type == T_NAME){
+                return this.parse_declaration()
+            }
+        }
+
+        return this.parse_expression_statement()
+    }
+
+    dict parse_expression_statement(){
+        dict expr = this.parse_expression()
+        dict node = make_node("ExpressionStatement", expr["line"], expr["column"])
+        set node["expression"] = expr
+        return node
+    }
+
+    dict parse_set_statement(){
+        Token start = this.current_token()
+        this.expect_value(T_KEYWORD, "set")
+        dict target = this.parse_call_member()
+
+        if (this.match_value(T_SYMBOL, "=")){
+            this.advance()
+            dict value = this.parse_expression()
+            dict node = make_node("SetStatement", start.line, start.column)
+            set node["target"] = target
+            set node["value"] = value
+            return node
+        }
+
+        dict fallback = make_node("ExpressionStatement", start.line, start.column)
+        set fallback["expression"] = target
+        return fallback
+    }
+
+    dict parse_return_statement(){
+        Token start = this.current_token()
+        this.expect_value(T_KEYWORD, "return")
+        dict value = null
+
+        if (this.match_value(T_SYMBOL, "}") != true && this.is_at_end() != true){
+            set value = this.parse_expression()
+        }
+
+        dict node = make_node("ReturnStatement", start.line, start.column)
+        set node["value"] = value
+        return node
+    }
+
+    dict parse_block(){
+        Token start = this.current_token()
+        this.expect_value(T_SYMBOL, "{")
+        array statements = []
+
+        while (this.is_at_end() != true && this.match_value(T_SYMBOL, "}") != true){
+            int before = this.position
+            statements.append(this.parse_statement())
+            if (this.position == before){
+                Token token = this.current_token()
+                this.add_error("Unexpected token in block: '" + token.value + "' at line " + str(token.line) + ", column " + str(token.column))
+                this.advance()
+            }
+        }
+        this.expect_value(T_SYMBOL, "}")
+
+        dict node = make_node("Block", start.line, start.column)
+        set node["statements"] = statements
+        return node
+    }
+
+    dict parse_if_statement(bool is_elif){
+        Token start = this.current_token()
+        if (is_elif){
+            this.expect_value(T_KEYWORD, "elif")
+        }
+        else{
+            this.expect_value(T_KEYWORD, "if")
+        }
+
+        this.expect_value(T_SYMBOL, "(")
+        dict condition = this.parse_expression()
+        this.expect_value(T_SYMBOL, ")")
+        dict then_body = this.parse_block()
+
+        dict else_body = null
+        if (this.match_value(T_KEYWORD, "elif")){
+            dict nested_if = this.parse_if_statement(true)
+            dict nested_block = make_node("Block", nested_if["line"], nested_if["column"])
+            set nested_block["statements"] = [nested_if]
+            set else_body = nested_block
+        }
+        elif (this.match_value(T_KEYWORD, "else")){
+            this.advance()
+            set else_body = this.parse_block()
+        }
+
+        dict node = make_node("IfStatement", start.line, start.column)
+        set node["condition"] = condition
+        set node["then_body"] = then_body
+        set node["else_body"] = else_body
+        return node
+    }
+
+    dict parse_for_statement(){
+        Token start = this.current_token()
+        this.expect_value(T_KEYWORD, "for")
+        this.expect_value(T_SYMBOL, "(")
+
+        Token variable_token = this.current_token()
+        this.expect(T_NAME)
+        this.expect_value(T_KEYWORD, "in")
+        dict iterable = this.parse_expression()
+        this.expect_value(T_SYMBOL, ")")
+        dict body = this.parse_block()
+
+        dict node = make_node("ForInStatement", start.line, start.column)
+        set node["variable"] = variable_token.value
+        set node["iterable"] = iterable
+        set node["body"] = body
+        return node
+    }
+
+    dict parse_while_statement(){
+        Token start = this.current_token()
+        this.expect_value(T_KEYWORD, "while")
+        this.expect_value(T_SYMBOL, "(")
+        dict condition = this.parse_expression()
+        this.expect_value(T_SYMBOL, ")")
+        dict body = this.parse_block()
+
+        dict node = make_node("WhileStatement", start.line, start.column)
+        set node["condition"] = condition
+        set node["body"] = body
+        return node
+    }
+
+    dict parse_try_statement(){
+        Token start = this.current_token()
+        this.expect_value(T_KEYWORD, "try")
+        dict try_block = this.parse_block()
+
+        array catch_blocks = []
+        while (this.match_value(T_KEYWORD, "catch") || this.match_value(T_KEYWORD, "except")){
+            catch_blocks.append(this.parse_catch_block())
+        }
+
+        if (catch_blocks.length() == 0){
+            this.add_error("try statement must have at least one catch/except block")
+        }
+
+        dict node = make_node("TryStatement", start.line, start.column)
+        set node["try_block"] = try_block
+        set node["catch_blocks"] = catch_blocks
+        return node
+    }
+
+    dict parse_catch_block(){
+        Token start = this.current_token()
+        if (this.match_value(T_KEYWORD, "catch") || this.match_value(T_KEYWORD, "except")){
+            this.advance()
+        }
+
+        string exception_type = ""
+        string identifier = ""
+
+        Token now = this.current_token()
+        if (token_is_name_or_keyword(now) && now.value != "{"){
+            set exception_type = now.value
+            this.advance()
+        }
+
+        if (this.match_value(T_SYMBOL, "(")){
+            this.advance()
+            Token id_tok = this.current_token()
+            if (id_tok.type == T_NAME){
+                set identifier = id_tok.value
+                this.advance()
+            }
+            else{
+                this.add_error("Expected exception variable name in catch block")
+            }
+            this.expect_value(T_SYMBOL, ")")
+        }
+
+        dict body = this.parse_block()
+        dict node = make_node("CatchBlock", start.line, start.column)
+        set node["exception_type"] = exception_type
+        set node["identifier"] = identifier
+        set node["body"] = body
+        return node
+    }
+
+    dict parse_throw_statement(){
+        Token start = this.current_token()
+        this.expect_value(T_KEYWORD, "throw")
+        dict expression = null
+
+        if (this.match_value(T_SYMBOL, "}") != true && this.match_value(T_KEYWORD, "catch") != true && this.match_value(T_KEYWORD, "else") != true && this.is_at_end() != true){
+            set expression = this.parse_expression()
+        }
+
+        dict node = make_node("ThrowStatement", start.line, start.column)
+        set node["expression"] = expression
+        return node
+    }
+
+    dict parse_break_statement(){
+        Token start = this.current_token()
+        this.expect_value(T_KEYWORD, "break")
+        return make_node("BreakStatement", start.line, start.column)
+    }
+
+    dict parse_external(){
+        Token start = this.current_token()
+        this.expect_value(T_KEYWORD, "external")
+
+        Token return_token = this.current_token()
+        this.advance()
+
+        Token name_token = this.current_token()
+        this.expect(T_NAME)
+
+        this.expect_value(T_SYMBOL, "(")
+        array parameters = []
+        if (this.match_value(T_SYMBOL, ")") != true){
+            parameters.append(this.parse_parameter(false))
+            while (this.match_value(T_SYMBOL, ",")){
+                this.advance()
+                parameters.append(this.parse_parameter(false))
+            }
+        }
+        this.expect_value(T_SYMBOL, ")")
+
+        dict node = make_node("ExternalDeclaration", start.line, start.column)
+        set node["return_type"] = return_token.value
+        set node["name"] = name_token.value
+        set node["parameters"] = parameters
+        return node
+    }
+
+    dict parse_function_declaration(){
+        Token start = this.current_token()
+        dict return_type_info = this.parse_type_with_element()
+
+        Token name_token = this.current_token()
+        this.expect(T_NAME)
+        this.expect_value(T_SYMBOL, "(")
+
+        array parameters = []
+        if (this.match_value(T_SYMBOL, ")") != true){
+            parameters.append(this.parse_parameter(false))
+            while (this.match_value(T_SYMBOL, ",")){
+                this.advance()
+                parameters.append(this.parse_parameter(false))
+            }
+        }
+        this.expect_value(T_SYMBOL, ")")
+        dict body = this.parse_block()
+
+        dict node = make_node("FunctionDeclaration", start.line, start.column)
+        set node["return_type"] = return_type_info["base_type"]
+        set node["return_element_type"] = return_type_info["element_type"]
+        set node["name"] = name_token.value
+        set node["parameters"] = parameters
+        set node["body"] = body
+        return node
+    }
+
+    dict parse_dynamic_function(){
+        Token start = this.current_token()
+        this.expect_value(T_KEYWORD, "func")
+
+        Token name_token = this.current_token()
+        this.expect(T_NAME)
+        this.expect_value(T_SYMBOL, "(")
+
+        array parameters = []
+        if (this.match_value(T_SYMBOL, ")") != true){
+            parameters.append(this.parse_parameter(true))
+            while (this.match_value(T_SYMBOL, ",")){
+                this.advance()
+                parameters.append(this.parse_parameter(true))
+            }
+        }
+        this.expect_value(T_SYMBOL, ")")
+        dict body = this.parse_block()
+
+        dict node = make_node("DynamicFunctionDeclaration", start.line, start.column)
+        set node["name"] = name_token.value
+        set node["parameters"] = parameters
+        set node["body"] = body
+        return node
+    }
+
+    dict parse_parameter(bool allow_untyped){
+        Token start = this.current_token()
+
+        if (allow_untyped && this.match(T_NAME)){
+            Token name_candidate = this.current_token()
+            Token next_token = this.peek_token()
+            if (next_token.type == T_SYMBOL && (next_token.value == "," || next_token.value == ")" || next_token.value == "=")){
+                this.advance()
+                dict parameter = make_node("Parameter", start.line, start.column)
+                set parameter["name"] = name_candidate.value
+                set parameter["param_type"] = "any"
+                set parameter["element_type"] = ""
+
+                dict default_value = null
+                if (this.match_value(T_SYMBOL, "=")){
+                    this.advance()
+                    set default_value = this.parse_expression()
+                }
+                set parameter["default_value"] = default_value
+                return parameter
+            }
+        }
+
+        dict type_info = this.parse_type_with_element()
+        Token name_token = this.current_token()
+        if (name_token.type != T_NAME){
+            this.add_error("Expected parameter name but found '" + name_token.value + "'")
+        }
+        this.expect(T_NAME)
+
+        dict default_value = null
+        if (this.match_value(T_SYMBOL, "=")){
+            this.advance()
+            set default_value = this.parse_expression()
+        }
+
+        dict parameter = make_node("Parameter", start.line, start.column)
+        set parameter["name"] = name_token.value
+        set parameter["param_type"] = type_info["base_type"]
+        set parameter["element_type"] = type_info["element_type"]
+        set parameter["default_value"] = default_value
+        return parameter
+    }
+
+    dict parse_type_with_element(){
+        Token type_token = this.current_token()
+        string base_type = type_token.value
+        string original_type = base_type
+        this.advance()
+
+        string element_type = ""
+        int fixed_size = -1
+
+        if (base_type == "array" && this.match_value(T_SYMBOL, "<")){
+            this.advance()
+            Token element_token = this.current_token()
+            if (element_token.type == T_KEYWORD || element_token.type == T_NAME){
+                set element_type = element_token.value
+                this.advance()
+            }
+            else{
+                this.add_error("Expected element type after '<'")
+            }
+            this.expect_value(T_SYMBOL, ">")
+        }
+
+        if (this.match_value(T_SYMBOL, "[")){
+            this.advance()
+            if (this.match_value(T_SYMBOL, "]")){
+                this.advance()
+                if (base_type == "array"){
+                    if (element_type == ""){
+                        this.add_error("Array type requires an element type (e.g. array<int>)")
+                    }
+                }
+                else{
+                    set element_type = original_type
+                    set base_type = "array"
+                }
+            }
+            elif (this.match(T_INT_LITERAL)){
+                Token size_token = this.current_token()
+                set fixed_size = int(size_token.value)
+                this.advance()
+                this.expect_value(T_SYMBOL, "]")
+
+                if (base_type == "array"){
+                    if (element_type == ""){
+                        this.add_error("Fixed-size array requires an element type (e.g. array<int>[8])")
+                    }
+                }
+                else{
+                    set element_type = original_type
+                    set base_type = "array"
+                }
+            }
+            else{
+                this.add_error("Expected integer literal or ']' after '[' in type")
+                while (this.is_at_end() != true && this.match_value(T_SYMBOL, "]") != true){
+                    this.advance()
+                }
+                this.expect_value(T_SYMBOL, "]")
+            }
+        }
+
+        dict info = {}
+        set info["base_type"] = base_type
+        set info["element_type"] = element_type
+        set info["fixed_size"] = fixed_size
+        return info
+    }
+
+    dict parse_type_with_key_value(){
+        Token type_token = this.current_token()
+        string base_type = type_token.value
+        this.advance()
+
+        string key_type = ""
+        string value_type = ""
+
+        if (base_type == "dict" && this.match_value(T_SYMBOL, "<")){
+            this.advance()
+            Token key_token = this.current_token()
+            if (key_token.type == T_KEYWORD || key_token.type == T_NAME){
+                set key_type = key_token.value
+                this.advance()
+            }
+            else{
+                this.add_error("Expected dict key type after '<'")
+            }
+
+            this.expect_value(T_SYMBOL, ",")
+            Token value_token = this.current_token()
+            if (value_token.type == T_KEYWORD || value_token.type == T_NAME){
+                set value_type = value_token.value
+                this.advance()
+            }
+            else{
+                this.add_error("Expected dict value type after ','")
+            }
+
+            this.expect_value(T_SYMBOL, ">")
+        }
+
+        dict info = {}
+        set info["base_type"] = base_type
+        set info["key_type"] = key_type
+        set info["value_type"] = value_type
+        return info
+    }
+
+    dict parse_variable_declaration(bool is_dynamic){
+        Token start = this.current_token()
+
+        dict declaration = make_node("VariableDeclaration", start.line, start.column)
+        if (is_dynamic){
+            set declaration["is_dynamic"] = 1
+        }
+        else{
+            set declaration["is_dynamic"] = 0
+        }
+        set declaration["element_type"] = ""
+        set declaration["fixed_size"] = -1
+        set declaration["key_type"] = ""
+        set declaration["value_type"] = ""
+
+        if (this.current_token().value == "dict" && this.peek_match_value(1, T_SYMBOL, "<")){
+            dict dict_type = this.parse_type_with_key_value()
+            Token var_name_token = this.current_token()
+            this.expect(T_NAME)
+
+            dict value = null
+            if (this.match_value(T_SYMBOL, "=")){
+                this.advance()
+                set value = this.parse_expression()
+            }
+
+            set declaration["type"] = dict_type["base_type"]
+            set declaration["name"] = var_name_token.value
+            set declaration["value"] = value
+            set declaration["key_type"] = dict_type["key_type"]
+            set declaration["value_type"] = dict_type["value_type"]
+            return declaration
+        }
+
+        dict type_info = this.parse_type_with_element()
+        Token var_name_token = this.current_token()
+        this.expect(T_NAME)
+
+        dict value = null
+        if (this.match_value(T_SYMBOL, "=")){
+            this.advance()
+            set value = this.parse_expression()
+        }
+
+        set declaration["type"] = type_info["base_type"]
+        set declaration["name"] = var_name_token.value
+        set declaration["value"] = value
+        set declaration["element_type"] = type_info["element_type"]
+        set declaration["fixed_size"] = type_info["fixed_size"]
+        return declaration
+    }
+
+    dict parse_declaration(){
+        int saved_position = this.position
+        dict type_info = this.parse_type_with_element()
+        Token name_token = this.current_token()
+        Token next_token = this.peek_token()
+
+        bool is_function = false
+        if ((name_token.type == T_NAME || name_token.type == T_KEYWORD) && next_token.type == T_SYMBOL && next_token.value == "("){
+            set is_function = true
+        }
+
+        set this.position = saved_position
+        if (is_function){
+            return this.parse_function_declaration()
+        }
+        return this.parse_variable_declaration(false)
+    }
+
+    dict parse_dynamic_declaration(){
+        Token start = this.current_token()
+        this.expect_value(T_KEYWORD, "dynamic")
+
+        if (this.match_value(T_KEYWORD, "array") != true){
+            Token token = this.current_token()
+            this.add_error("Expected 'array' after 'dynamic' but found '" + token.value + "'")
+        }
+
+        dict declaration = this.parse_variable_declaration(true)
+        if (declaration["type"] != "array"){
+            this.add_error("dynamic declarations only support arrays")
+        }
+        set declaration["line"] = start.line
+        set declaration["column"] = start.column
+        return declaration
+    }
+
+    dict parse_import_statement(){
+        if (this.match_value(T_KEYWORD, "from")){
+            Token start = this.current_token()
+            this.advance()
+
+            dict module_path = null
+            if (this.match(T_STRING)){
+                Token string_token = this.current_token()
+                this.advance()
+                set module_path = make_node("StringLiteral", string_token.line, string_token.column)
+                set module_path["value"] = string_token.value
+            }
+            elif (this.match(T_NAME)){
+                array parts = []
+                Token first = this.current_token()
+                parts.append(first.value)
+                this.advance()
+                while (this.match_value(T_SYMBOL, ".")){
+                    this.advance()
+                    Token part = this.current_token()
+                    this.expect(T_NAME)
+                    parts.append(part.value)
+                }
+                set module_path = make_node("ModulePath", first.line, first.column)
+                set module_path["parts"] = parts
+            }
+            else{
+                Token token = this.current_token()
+                this.add_error("Expected module path after 'from' but found '" + token.value + "'")
+                set module_path = make_node("ModulePath", token.line, token.column)
+                set module_path["parts"] = []
+            }
+
+            this.expect_value(T_KEYWORD, "use")
+            if (this.match_value(T_SYMBOL, "*")){
+                this.advance()
+                dict wildcard = make_node("FromImportStatement", start.line, start.column)
+                set wildcard["module_path"] = module_path
+                set wildcard["symbols"] = []
+                set wildcard["is_wildcard"] = 1
+                return wildcard
+            }
+
+            array symbols = []
+            Token sym = this.current_token()
+            this.expect(T_NAME)
+            symbols.append(sym.value)
+            while (this.match_value(T_SYMBOL, ",")){
+                this.advance()
+                Token next_sym = this.current_token()
+                this.expect(T_NAME)
+                symbols.append(next_sym.value)
+            }
+
+            bool is_libc = false
+            if (module_path != null && module_path["kind"] == "ModulePath"){
+                array parts = module_path["parts"]
+                if (parts.length() == 1 && parts[0] == "libc"){
+                    set is_libc = true
+                }
+            }
+
+            if (is_libc){
+                dict libc_node = make_node("LibcImportStatement", start.line, start.column)
+                set libc_node["symbols"] = symbols
+                return libc_node
+            }
+
+            dict node = make_node("FromImportStatement", start.line, start.column)
+            set node["module_path"] = module_path
+            set node["symbols"] = symbols
+            set node["is_wildcard"] = 0
+            return node
+        }
+
+        if (this.match_value(T_KEYWORD, "use")){
+            Token start = this.current_token()
+            this.advance()
+            Token module_token = this.current_token()
+            this.expect(T_NAME)
+
+            string alias = ""
+            if (this.match_value(T_KEYWORD, "as")){
+                this.advance()
+                Token alias_token = this.current_token()
+                this.expect(T_NAME)
+                set alias = alias_token.value
+            }
+
+            dict node = make_node("SimpleImportStatement", start.line, start.column)
+            set node["module_name"] = module_token.value
+            set node["alias"] = alias
+            return node
+        }
+
+        Token token = this.current_token()
+        this.add_error("Invalid import statement starting at '" + token.value + "'")
+        this.advance()
+        return make_node("InvalidImport", token.line, token.column)
+    }
+
+    dict parse_class_declaration(){
+        Token start = this.current_token()
+        this.expect_value(T_KEYWORD, "class")
+        Token class_name_token = this.current_token()
+        this.expect(T_NAME)
+
+        string inherits_from = ""
+        if (this.match(T_NAME) && (this.current_token().value == "inherits" || this.current_token().value == "extends")){
+            this.advance()
+            Token parent = this.current_token()
+            this.expect(T_NAME)
+            set inherits_from = parent.value
+        }
+
+        this.expect_value(T_SYMBOL, "{")
+        array fields = []
+        array methods = []
+
+        while (this.is_at_end() != true && this.match_value(T_SYMBOL, "}") != true){
+            int member_start = this.position
+            bool is_method = false
+
+            int scan_pos = member_start
+            Token scan_token = this.peek_token(scan_pos - this.position)
+            if (scan_token.type == T_KEYWORD && (scan_token.value == "static" || scan_token.value == "virtual")){
+                set scan_pos = scan_pos + 1
+                set scan_token = this.peek_token(scan_pos - this.position)
+            }
+
+            if (scan_token.type == T_KEYWORD && scan_token.value == "func"){
+                set is_method = true
+            }
+            else{
+                int probe = scan_pos
+                bool has_paren = false
+                bool finished = false
+                while (finished != true){
+                    Token t = this.peek_token(probe - this.position)
+                    if (t.type == T_EOF || (t.type == T_SYMBOL && t.value == "}")){
+                        set finished = true
+                    }
+                    elif (t.type == T_SYMBOL && t.value == "("){
+                        set has_paren = true
+                        set finished = true
+                    }
+                    elif (t.type == T_SYMBOL && (t.value == "=" || t.value == "{")){
+                        set finished = true
+                    }
+                    else{
+                        set probe = probe + 1
+                        if (probe - member_start > 16){
+                            set finished = true
+                        }
+                    }
+                }
+                set is_method = has_paren
+            }
+
+            set this.position = member_start
+            if (is_method){
+                methods.append(this.parse_method_declaration())
+            }
+            else{
+                fields.append(this.parse_field_declaration())
+            }
+        }
+        this.expect_value(T_SYMBOL, "}")
+
+        dict node = make_node("ClassDeclaration", start.line, start.column)
+        set node["name"] = class_name_token.value
+        set node["fields"] = fields
+        set node["methods"] = methods
+        set node["inherits_from"] = inherits_from
+        return node
+    }
+
+    dict parse_field_declaration(){
+        Token start = this.current_token()
+        dict type_info = this.parse_type_with_element()
+        Token name_token = this.current_token()
+        this.expect(T_NAME)
+
+        dict initializer = null
+        if (this.match_value(T_SYMBOL, "=")){
+            this.advance()
+            set initializer = this.parse_expression()
+        }
+
+        dict node = make_node("FieldDeclaration", start.line, start.column)
+        set node["name"] = name_token.value
+        set node["field_type"] = type_info["base_type"]
+        set node["element_type"] = type_info["element_type"]
+        set node["initializer"] = initializer
+        return node
+    }
+
+    dict parse_method_declaration(){
+        Token start = this.current_token()
+        bool is_static = false
+        bool is_virtual = false
+
+        if (this.match_value(T_KEYWORD, "static")){
+            set is_static = true
+            this.advance()
+        }
+        elif (this.match_value(T_KEYWORD, "virtual")){
+            set is_virtual = true
+            this.advance()
+        }
+
+        string return_type = "any"
+        string return_element_type = ""
+        if (this.match_value(T_KEYWORD, "func")){
+            this.advance()
+        }
+        else{
+            dict return_info = this.parse_type_with_element()
+            set return_type = return_info["base_type"]
+            set return_element_type = return_info["element_type"]
+        }
+
+        Token name_token = this.current_token()
+        if (name_token.type == T_NAME || (name_token.type == T_KEYWORD && name_token.value == "new")){
+            this.advance()
+        }
+        else{
+            this.add_error("Expected method name but found '" + name_token.value + "'")
+            this.advance()
+        }
+
+        this.expect_value(T_SYMBOL, "(")
+        array parameters = []
+        if (this.match_value(T_SYMBOL, ")") != true){
+            parameters.append(this.parse_parameter(false))
+            while (this.match_value(T_SYMBOL, ",")){
+                this.advance()
+                parameters.append(this.parse_parameter(false))
+            }
+        }
+        this.expect_value(T_SYMBOL, ")")
+        dict body = this.parse_block()
+
+        dict node = make_node("MethodDeclaration", start.line, start.column)
+        set node["name"] = name_token.value
+        set node["parameters"] = parameters
+        set node["return_type"] = return_type
+        set node["return_element_type"] = return_element_type
+        set node["body"] = body
+        if (is_static){
+            set node["is_static"] = 1
+        }
+        else{
+            set node["is_static"] = 0
+        }
+        if (is_virtual){
+            set node["is_virtual"] = 1
+        }
+        else{
+            set node["is_virtual"] = 0
+        }
+        return node
+    }
+
+    dict parse_expression(){
+        return this.parse_or()
+    }
+
+    dict parse_or(){
+        dict left = this.parse_and()
+        while (this.match_value(T_SYMBOL, "||")){
+            Token op = this.current_token()
+            this.advance()
+            dict right = this.parse_and()
+            dict node = make_node("BinaryExpression", op.line, op.column)
+            set node["left"] = left
+            set node["op"] = op.value
+            set node["right"] = right
+            set left = node
+        }
+        return left
+    }
+
+    dict parse_and(){
+        dict left = this.parse_in()
+        while (this.match_value(T_SYMBOL, "&&")){
+            Token op = this.current_token()
+            this.advance()
+            dict right = this.parse_in()
+            dict node = make_node("BinaryExpression", op.line, op.column)
+            set node["left"] = left
+            set node["op"] = op.value
+            set node["right"] = right
+            set left = node
+        }
+        return left
+    }
+
+    dict parse_in(){
+        dict left = this.parse_equality()
+        while (this.match_value(T_KEYWORD, "in")){
+            Token op = this.current_token()
+            this.advance()
+            dict right = this.parse_equality()
+            dict node = make_node("InExpression", op.line, op.column)
+            set node["item"] = left
+            set node["container"] = right
+            set left = node
+        }
+        return left
+    }
+
+    dict parse_equality(){
+        dict left = this.parse_comparison()
+        while (this.match_value(T_SYMBOL, "==") || this.match_value(T_SYMBOL, "!=")){
+            Token op = this.current_token()
+            this.advance()
+            dict right = this.parse_comparison()
+            dict node = make_node("BinaryExpression", op.line, op.column)
+            set node["left"] = left
+            set node["op"] = op.value
+            set node["right"] = right
+            set left = node
+        }
+        return left
+    }
+
+    dict parse_comparison(){
+        dict left = this.parse_additive()
+        while (this.match_value(T_SYMBOL, ">") || this.match_value(T_SYMBOL, "<") || this.match_value(T_SYMBOL, ">=") || this.match_value(T_SYMBOL, "<=")){
+            Token op = this.current_token()
+            this.advance()
+            dict right = this.parse_additive()
+            dict node = make_node("BinaryExpression", op.line, op.column)
+            set node["left"] = left
+            set node["op"] = op.value
+            set node["right"] = right
+            set left = node
+        }
+        return left
+    }
+
+    dict parse_additive(){
+        dict left = this.parse_multiplicative()
+        while (this.match_value(T_SYMBOL, "+") || this.match_value(T_SYMBOL, "-")){
+            Token op = this.current_token()
+            this.advance()
+            dict right = this.parse_multiplicative()
+            dict node = make_node("BinaryExpression", op.line, op.column)
+            set node["left"] = left
+            set node["op"] = op.value
+            set node["right"] = right
+            set left = node
+        }
+        return left
+    }
+
+    dict parse_multiplicative(){
+        dict left = this.parse_unary()
+        while (this.match_value(T_SYMBOL, "*") || this.match_value(T_SYMBOL, "/")){
+            Token op = this.current_token()
+            this.advance()
+            dict right = this.parse_unary()
+            dict node = make_node("BinaryExpression", op.line, op.column)
+            set node["left"] = left
+            set node["op"] = op.value
+            set node["right"] = right
+            set left = node
+        }
+        return left
+    }
+
+    dict parse_unary(){
+        if (this.match_value(T_SYMBOL, "-") || this.match_value(T_SYMBOL, "!")){
+            Token op = this.current_token()
+            this.advance()
+            dict argument = this.parse_unary()
+            dict node = make_node("UnaryExpression", op.line, op.column)
+            set node["op"] = op.value
+            set node["argument"] = argument
+            return node
+        }
+        return this.parse_call_member()
+    }
+
+    dict parse_call_member(){
+        dict base = this.parse_primary()
+        bool keep_going = true
+        while (keep_going){
+            if (this.match_value(T_SYMBOL, "(")){
+                Token start = this.current_token()
+                this.advance()
+                array args = []
+                if (this.match_value(T_SYMBOL, ")") != true){
+                    args.append(this.parse_expression())
+                    while (this.match_value(T_SYMBOL, ",")){
+                        this.advance()
+                        args.append(this.parse_expression())
+                    }
+                }
+                this.expect_value(T_SYMBOL, ")")
+                dict call = make_node("CallExpression", start.line, start.column)
+                set call["callee"] = base
+                set call["arguments"] = args
+                set base = call
+            }
+            elif (this.match_value(T_SYMBOL, ".")){
+                Token dot = this.current_token()
+                this.advance()
+                Token property_token = this.current_token()
+                if (property_token.type != T_NAME && property_token.type != T_KEYWORD){
+                    this.add_error("Expected member name after '.' but found '" + property_token.value + "'")
+                }
+                this.advance()
+                dict member = make_node("MemberExpression", dot.line, dot.column)
+                set member["object"] = base
+                set member["property"] = property_token.value
+                set base = member
+            }
+            elif (this.match_value(T_SYMBOL, "[")){
+                Token bracket = this.current_token()
+                this.advance()
+                dict index = this.parse_expression()
+                this.expect_value(T_SYMBOL, "]")
+                dict node = make_node("IndexExpression", bracket.line, bracket.column)
+                set node["object"] = base
+                set node["index"] = index
+                set base = node
+            }
+            else{
+                set keep_going = false
+            }
+        }
+        return base
+    }
+
+    dict parse_primary(){
+        Token token = this.current_token()
+
+        if (token.type == T_INT_LITERAL){
+            this.advance()
+            dict node = make_node("NumberLiteral", token.line, token.column)
+            set node["value"] = int(token.value)
+            return node
+        }
+
+        if (token.type == T_FLOAT_LITERAL){
+            this.advance()
+            dict node = make_node("FloatLiteral", token.line, token.column)
+            set node["value"] = float(token.value)
+            return node
+        }
+
+        if (token.type == T_STRING){
+            this.advance()
+            dict node = make_node("StringLiteral", token.line, token.column)
+            set node["value"] = token.value
+            return node
+        }
+
+        if (token.type == T_NAME || token_can_be_identifier_keyword(token)){
+            this.advance()
+            dict node = make_node("Identifier", token.line, token.column)
+            set node["name"] = token.value
+            return node
+        }
+
+        if (this.match_value(T_KEYWORD, "null")){
+            this.advance()
+            return make_node("NullLiteral", token.line, token.column)
+        }
+
+        if (this.match_value(T_KEYWORD, "true")){
+            this.advance()
+            dict node = make_node("BoolLiteral", token.line, token.column)
+            set node["value"] = 1
+            return node
+        }
+
+        if (this.match_value(T_KEYWORD, "false")){
+            this.advance()
+            dict node = make_node("BoolLiteral", token.line, token.column)
+            set node["value"] = 0
+            return node
+        }
+
+        if (this.match_value(T_KEYWORD, "this")){
+            this.advance()
+            return make_node("ThisExpression", token.line, token.column)
+        }
+
+        if (this.match_value(T_KEYWORD, "new")){
+            this.advance()
+            Token class_token = this.current_token()
+            if (class_token.type != T_NAME){
+                this.add_error("Expected class name after 'new'")
+            }
+            this.expect(T_NAME)
+            this.expect_value(T_SYMBOL, "(")
+            array arguments = []
+            if (this.match_value(T_SYMBOL, ")") != true){
+                arguments.append(this.parse_expression())
+                while (this.match_value(T_SYMBOL, ",")){
+                    this.advance()
+                    arguments.append(this.parse_expression())
+                }
+            }
+            this.expect_value(T_SYMBOL, ")")
+
+            dict node = make_node("NewExpression", token.line, token.column)
+            set node["class_name"] = class_token.value
+            set node["arguments"] = arguments
+            return node
+        }
+
+        if (this.match_value(T_KEYWORD, "typeof")){
+            this.advance()
+            this.expect_value(T_SYMBOL, "(")
+            dict argument = this.parse_expression()
+            this.expect_value(T_SYMBOL, ")")
+            dict node = make_node("TypeofExpression", token.line, token.column)
+            set node["argument"] = argument
+            return node
+        }
+
+        if (this.match_value(T_KEYWORD, "classof")){
+            this.advance()
+            this.expect_value(T_SYMBOL, "(")
+            dict argument = this.parse_expression()
+            this.expect_value(T_SYMBOL, ")")
+            dict node = make_node("ClassofExpression", token.line, token.column)
+            set node["argument"] = argument
+            return node
+        }
+
+        if (this.match_value(T_KEYWORD, "hasattr")){
+            this.advance()
+            this.expect_value(T_SYMBOL, "(")
+            dict object_expr = this.parse_expression()
+            this.expect_value(T_SYMBOL, ",")
+            Token attr = this.current_token()
+            if (attr.type != T_STRING){
+                this.add_error("hasattr requires a string literal attribute name")
+            }
+            this.expect(T_STRING)
+            this.expect_value(T_SYMBOL, ")")
+
+            dict node = make_node("HasattrExpression", token.line, token.column)
+            set node["object"] = object_expr
+            set node["attr_name"] = attr.value
+            return node
+        }
+
+        if (this.match_value(T_SYMBOL, "(")){
+            this.advance()
+            dict expr = this.parse_expression()
+            this.expect_value(T_SYMBOL, ")")
+            return expr
+        }
+
+        if (this.match_value(T_SYMBOL, "[")){
+            this.advance()
+            array elements = []
+            if (this.match_value(T_SYMBOL, "]") != true){
+                elements.append(this.parse_expression())
+                while (this.match_value(T_SYMBOL, ",")){
+                    this.advance()
+                    elements.append(this.parse_expression())
+                }
+            }
+            this.expect_value(T_SYMBOL, "]")
+            dict node = make_node("ArrayLiteral", token.line, token.column)
+            set node["elements"] = elements
+            return node
+        }
+
+        if (this.match_value(T_SYMBOL, "{")){
+            return this.parse_dict_literal()
+        }
+
+        this.add_error("Unexpected token '" + token.value + "' (" + this.token_type_name(token.type) + ") at line " + str(token.line) + ", column " + str(token.column))
+        this.advance()
+        return make_node("UnknownExpression", token.line, token.column)
+    }
+
+    dict parse_dict_literal(){
+        Token start = this.current_token()
+        this.expect_value(T_SYMBOL, "{")
+        array keys = []
+        array values = []
+
+        if (this.match_value(T_SYMBOL, "}") != true){
+            keys.append(this.parse_expression())
+            this.expect_value(T_SYMBOL, ":")
+            values.append(this.parse_expression())
+            while (this.match_value(T_SYMBOL, ",")){
+                this.advance()
+                keys.append(this.parse_expression())
+                this.expect_value(T_SYMBOL, ":")
+                values.append(this.parse_expression())
+            }
+        }
+        this.expect_value(T_SYMBOL, "}")
+
+        dict node = make_node("DictLiteral", start.line, start.column)
+        set node["keys"] = keys
+        set node["values"] = values
+        return node
+    }
+}

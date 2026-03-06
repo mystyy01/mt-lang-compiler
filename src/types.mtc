@@ -1,4 +1,9 @@
-
+int T_NAME = 0
+int T_KEYWORD = 1
+int T_FLOAT_LITERAL = 2
+int T_INT_LITERAL = 3
+int T_SYMBOL = 4
+int T_STRING = 5
 class Token{
     void new(int t, string v, int l = -1, int c = -1){
         set this.type = t

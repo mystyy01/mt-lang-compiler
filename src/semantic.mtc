@@ -1,0 +1,1768 @@
+func make_param_info(string name, string param_type, any default_value = null, string element_type = ""){
+    dict info = {}
+    set info["name"] = name
+    set info["param_type"] = param_type
+    set info["default_value"] = default_value
+    set info["element_type"] = element_type
+    return info
+}
+
+func node_kind(any node){
+    if (node == null){
+        return "Null"
+    }
+    if ("kind" in node){
+        return node["kind"]
+    }
+    return "Unknown"
+}
+
+func node_line(any node){
+    if (node != null && "line" in node){
+        return node["line"]
+    }
+    return -1
+}
+
+func node_column(any node){
+    if (node != null && "column" in node){
+        return node["column"]
+    }
+    return -1
+}
+
+func libc_return_type(string func_name){
+    if (
+        func_name == "malloc" || func_name == "calloc" || func_name == "realloc" ||
+        func_name == "memcpy" || func_name == "memset" || func_name == "strcpy" ||
+        func_name == "strncpy" || func_name == "strcat" || func_name == "strstr" ||
+        func_name == "strchr" || func_name == "fopen" || func_name == "fgets" ||
+        func_name == "getcwd" || func_name == "getenv"
+    ){
+        return "string"
+    }
+
+    if (
+        func_name == "free" || func_name == "srand" || func_name == "exit" ||
+        func_name == "abort"
+    ){
+        return "void"
+    }
+
+    if (
+        func_name == "atof" || func_name == "floor" || func_name == "ceil" ||
+        func_name == "round" || func_name == "sqrt" || func_name == "pow" ||
+        func_name == "fabs" || func_name == "fmod" || func_name == "log" ||
+        func_name == "log10" || func_name == "exp" || func_name == "sin" ||
+        func_name == "cos" || func_name == "tan" || func_name == "asin" ||
+        func_name == "acos" || func_name == "atan"
+    ){
+        return "float"
+    }
+
+    if (
+        func_name == "strlen" || func_name == "strcmp" || func_name == "strncmp" ||
+        func_name == "sprintf" || func_name == "snprintf" || func_name == "tolower" ||
+        func_name == "toupper" || func_name == "fclose" || func_name == "fread" ||
+        func_name == "fwrite" || func_name == "fputs" || func_name == "fseek" ||
+        func_name == "ftell" || func_name == "fflush" || func_name == "feof" ||
+        func_name == "ferror" || func_name == "access" || func_name == "remove" ||
+        func_name == "rename" || func_name == "stat" || func_name == "mkdir" ||
+        func_name == "rmdir" || func_name == "chdir" || func_name == "unlink" ||
+        func_name == "printf" || func_name == "scanf" || func_name == "puts" ||
+        func_name == "getchar" || func_name == "putchar" || func_name == "system" ||
+        func_name == "abs" || func_name == "atoi" || func_name == "rand" ||
+        func_name == "time" || func_name == "sleep"
+    ){
+        return "int"
+    }
+
+    return ""
+}
+
+class SymbolTable{
+    void new(){
+        set this.scopes = []
+        this.enter_scope()
+    }
+
+    void enter_scope(){
+        this.scopes.append({})
+    }
+
+    void exit_scope(){
+        if (this.scopes.length() > 1){
+            this.scopes.pop()
+        }
+    }
+
+    void declare(string name,
+                 string symbol_type,
+                 string data_type,
+                 array parameters = [],
+                 string element_type = "",
+                 int fixed_size = -1,
+                 string key_type = "",
+                 string value_type = ""){
+        if (this.scopes.length() == 0){
+            this.enter_scope()
+        }
+
+        int last_idx = this.scopes.length() - 1
+        array scopes = this.scopes
+        dict scope = scopes[last_idx]
+
+        dict info = {}
+        set info["symbol_type"] = symbol_type
+        set info["data_type"] = data_type
+        set info["parameters"] = parameters
+        set info["element_type"] = element_type
+        set info["fixed_size"] = fixed_size
+        set info["key_type"] = key_type
+        set info["value_type"] = value_type
+
+        set scope[name] = info
+        set scopes[last_idx] = scope
+        set this.scopes = scopes
+    }
+
+    func lookup(string name){
+        array scopes = this.scopes
+        int i = scopes.length() - 1
+        while (i >= 0){
+            dict scope = scopes[i]
+            if (name in scope){
+                return scope[name]
+            }
+            set i = i - 1
+        }
+        return null
+    }
+
+    array get_scopes(){
+        return this.scopes
+    }
+}
+
+class SemanticAnalyzer{
+    void new(string fp = "unknown"){
+        set this.symbol_table = new SymbolTable()
+        set this.classes = {}
+        set this.errors = []
+        set this.file_path = fp
+        set this.current_class = ""
+        set this.current_function_return_type = ""
+        set this.break_depth = 0
+        this.add_builtin_symbols()
+    }
+
+    array get_errors(){
+        return this.errors
+    }
+
+    bool has_errors(){
+        return this.errors.length() > 0
+    }
+
+    func get_symbol_table(){
+        return this.symbol_table
+    }
+
+    dict get_classes(){
+        return this.classes
+    }
+
+    void add_builtin_symbols(){
+        this.symbol_table.declare("print", "builtin", "void", [make_param_info("value", "any")])
+        this.symbol_table.declare("str", "builtin", "string", [make_param_info("value", "any")])
+        this.symbol_table.declare("int", "builtin", "int", [make_param_info("value", "any")])
+        this.symbol_table.declare("float", "builtin", "float", [make_param_info("value", "any")])
+        this.symbol_table.declare("read", "builtin", "string", [make_param_info("prompt", "string", null)])
+        this.symbol_table.declare("length", "builtin", "int", [make_param_info("value", "any")])
+        this.symbol_table.declare("append", "builtin", "void", [make_param_info("arr", "array"), make_param_info("value", "any")])
+        this.symbol_table.declare("pop", "builtin", "any", [make_param_info("arr", "array"), make_param_info("index", "int", null)])
+        this.symbol_table.declare("split", "builtin", "array", [make_param_info("text", "string"), make_param_info("sep", "string")], "string")
+        this.symbol_table.declare("args", "builtin", "array", [], "string")
+    }
+
+    string format_position(int line, int column){
+        if (line < 0 || column < 0){
+            return ""
+        }
+        return " at line " + str(line) + ", column " + str(column)
+    }
+
+    void add_error(string message, int line = -1, int column = -1){
+        string full = message + this.format_position(line, column)
+        if (this.file_path != "" && this.file_path != "unknown"){
+            set full = full + " in " + this.file_path
+        }
+        this.errors.append(full)
+    }
+
+    bool is_builtin_type(string type_name){
+        return type_name == "int" || type_name == "float" || type_name == "string" ||
+               type_name == "bool" || type_name == "array" || type_name == "dict" ||
+               type_name == "void" || type_name == "any" || type_name == "null" ||
+               type_name == "module"
+    }
+
+    bool is_known_type(string type_name){
+        if (type_name == ""){
+            return true
+        }
+        if (this.is_builtin_type(type_name)){
+            return true
+        }
+        return type_name in this.classes
+    }
+
+    bool is_subclass_of(string child_name, string base_name){
+        if (child_name == "" || base_name == "" || child_name == base_name){
+            return false
+        }
+        dict classes = this.classes
+        if ((child_name in classes) != true){
+            return false
+        }
+
+        string current = child_name
+        while (current in classes){
+            dict info = classes[current]
+            string parent = ""
+            if ("parent_class" in info){
+                set parent = info["parent_class"]
+            }
+            if (parent == ""){
+                return false
+            }
+            if (parent == base_name){
+                return true
+            }
+            set current = parent
+        }
+        return false
+    }
+
+    bool type_matches(string expected, string actual){
+        if (expected == "" || expected == "any" || actual == "any"){
+            return true
+        }
+        if (expected == actual){
+            return true
+        }
+        if (expected == "float" && actual == "int"){
+            return true
+        }
+        if (actual == "null"){
+            if (expected == "string" || expected == "array" || expected == "dict"){
+                return true
+            }
+            if (expected in this.classes){
+                return true
+            }
+        }
+        if (expected in this.classes && actual in this.classes){
+            return this.is_subclass_of(actual, expected)
+        }
+        return false
+    }
+
+    array to_param_info(array params){
+        array infos = []
+        int i = 0
+        while (i < params.length()){
+            dict param = params[i]
+            dict info = {}
+            set info["name"] = param["name"]
+            if ("param_type" in param){
+                set info["param_type"] = param["param_type"]
+            }
+            else{
+                set info["param_type"] = "any"
+            }
+            if ("default_value" in param){
+                set info["default_value"] = param["default_value"]
+            }
+            else{
+                set info["default_value"] = null
+            }
+            if ("element_type" in param){
+                set info["element_type"] = param["element_type"]
+            }
+            else{
+                set info["element_type"] = ""
+            }
+            infos.append(info)
+            set i = i + 1
+        }
+        return infos
+    }
+
+    void validate_call_arguments(string callable_name, array arguments, array parameters, bool is_method = false, int line = -1, int column = -1){
+        int required = 0
+        int i = 0
+        while (i < parameters.length()){
+            dict p = parameters[i]
+            if (("default_value" in p) != true || p["default_value"] == null){
+                set required = required + 1
+            }
+            set i = i + 1
+        }
+
+        if (arguments.length() < required || arguments.length() > parameters.length()){
+            string where = "function"
+            if (is_method){
+                set where = "method"
+            }
+            this.add_error(
+                "" + where + " '" + callable_name + "' expects " + str(required) + " to " +
+                str(parameters.length()) + " arguments, got " + str(arguments.length()),
+                line,
+                column
+            )
+        }
+
+        int check_count = arguments.length()
+        if (parameters.length() < check_count){
+            set check_count = parameters.length()
+        }
+
+        set i = 0
+        while (i < check_count){
+            dict param = parameters[i]
+            string expected_type = "any"
+            if ("param_type" in param){
+                set expected_type = param["param_type"]
+            }
+            string actual_type = this.analyze(arguments[i])
+            if (this.type_matches(expected_type, actual_type) != true){
+                this.add_error(
+                    "Argument " + str(i + 1) + " for '" + callable_name + "' expected " +
+                    expected_type + " but got " + actual_type,
+                    node_line(arguments[i]),
+                    node_column(arguments[i])
+                )
+            }
+            set i = i + 1
+        }
+    }
+
+    void predeclare_top_level_symbol(dict statement){
+        string kind = node_kind(statement)
+
+        if (kind == "ClassDeclaration"){
+            string name = statement["name"]
+            dict classes = this.classes
+            if ((name in classes) != true){
+                dict info = {}
+                set info["name"] = name
+                set info["fields"] = {}
+                set info["methods"] = {}
+                if ("inherits_from" in statement){
+                    set info["parent_class"] = statement["inherits_from"]
+                }
+                else{
+                    set info["parent_class"] = ""
+                }
+                set classes[name] = info
+                set this.classes = classes
+            }
+            this.symbol_table.declare(name, "class", name)
+            return
+        }
+
+        if (kind == "FunctionDeclaration"){
+            string name = statement["name"]
+            string ret_type = statement["return_type"]
+            array params = this.to_param_info(statement["parameters"])
+            string ret_element_type = ""
+            if ("return_element_type" in statement){
+                set ret_element_type = statement["return_element_type"]
+            }
+            this.symbol_table.declare(name, "function", ret_type, params, ret_element_type)
+            return
+        }
+
+        if (kind == "DynamicFunctionDeclaration"){
+            string name = statement["name"]
+            array params = this.to_param_info(statement["parameters"])
+            this.symbol_table.declare(name, "function", "any", params)
+            return
+        }
+
+        if (kind == "ExternalDeclaration"){
+            string name = statement["name"]
+            string ret_type = statement["return_type"]
+            array params = this.to_param_info(statement["parameters"])
+            this.symbol_table.declare(name, "function", ret_type, params)
+        }
+    }
+
+    func find_class_field(string class_name, string field_name){
+        string current = class_name
+        dict classes = this.classes
+        while (current != "" && current in classes){
+            dict class_info = classes[current]
+            if ("fields" in class_info){
+                dict fields = class_info["fields"]
+                if (field_name in fields){
+                    return fields[field_name]
+                }
+            }
+            if ("parent_class" in class_info){
+                set current = class_info["parent_class"]
+            }
+            else{
+                set current = ""
+            }
+        }
+        return null
+    }
+
+    func find_class_method(string class_name, string method_name){
+        string current = class_name
+        dict classes = this.classes
+        while (current != "" && current in classes){
+            dict class_info = classes[current]
+            if ("methods" in class_info){
+                dict methods = class_info["methods"]
+                if (method_name in methods){
+                    return methods[method_name]
+                }
+            }
+            if ("parent_class" in class_info){
+                set current = class_info["parent_class"]
+            }
+            else{
+                set current = ""
+            }
+        }
+        return null
+    }
+
+    func infer_element_type_from_expression(dict expr){
+        string kind = node_kind(expr)
+        if (kind == "Identifier"){
+            dict symbol = this.symbol_table.lookup(expr["name"])
+            if (symbol != null && "element_type" in symbol){
+                return symbol["element_type"]
+            }
+        }
+        elif (kind == "ArrayLiteral"){
+            if ("inferred_element_type" in expr){
+                return expr["inferred_element_type"]
+            }
+        }
+        elif (kind == "IndexExpression"){
+            if ("resolved_element_type" in expr){
+                return expr["resolved_element_type"]
+            }
+        }
+        return ""
+    }
+
+    func infer_dict_key_type_from_expression(dict expr){
+        string kind = node_kind(expr)
+        if (kind == "Identifier"){
+            dict symbol = this.symbol_table.lookup(expr["name"])
+            if (symbol != null && "key_type" in symbol){
+                return symbol["key_type"]
+            }
+        }
+        elif (kind == "DictLiteral"){
+            if ("inferred_key_type" in expr){
+                return expr["inferred_key_type"]
+            }
+        }
+        return ""
+    }
+
+    func infer_dict_value_type_from_expression(dict expr){
+        string kind = node_kind(expr)
+        if (kind == "Identifier"){
+            dict symbol = this.symbol_table.lookup(expr["name"])
+            if (symbol != null && "value_type" in symbol){
+                return symbol["value_type"]
+            }
+        }
+        elif (kind == "DictLiteral"){
+            if ("inferred_value_type" in expr){
+                return expr["inferred_value_type"]
+            }
+        }
+        return ""
+    }
+
+    func analyze(any node){
+        if (node == null){
+            return "void"
+        }
+
+        string kind = node_kind(node)
+
+        if (kind == "Program"){
+            return this.analyze_program(node)
+        }
+        if (kind == "ClassDeclaration"){
+            return this.analyze_class_declaration(node)
+        }
+        if (kind == "FieldDeclaration"){
+            return this.analyze_field_declaration(node)
+        }
+        if (kind == "MethodDeclaration"){
+            return this.analyze_method_declaration(node)
+        }
+        if (kind == "VariableDeclaration"){
+            return this.analyze_variable_declaration(node)
+        }
+        if (kind == "FunctionDeclaration"){
+            return this.analyze_function_declaration(node)
+        }
+        if (kind == "ExternalDeclaration"){
+            return this.analyze_external_declaration(node)
+        }
+        if (kind == "DynamicFunctionDeclaration"){
+            return this.analyze_dynamic_function_declaration(node)
+        }
+        if (kind == "Identifier"){
+            return this.analyze_identifier(node)
+        }
+        if (kind == "ExpressionStatement"){
+            return this.analyze_expression_statement(node)
+        }
+        if (kind == "BinaryExpression"){
+            return this.analyze_binary_expression(node)
+        }
+        if (kind == "InExpression"){
+            return this.analyze_in_expression(node)
+        }
+        if (kind == "CallExpression"){
+            return this.analyze_call_expression(node)
+        }
+        if (kind == "IndexExpression"){
+            return this.analyze_index_expression(node)
+        }
+        if (kind == "MemberExpression"){
+            return this.analyze_member_expression(node)
+        }
+        if (kind == "NewExpression"){
+            return this.analyze_new_expression(node)
+        }
+        if (kind == "NumberLiteral"){
+            return "int"
+        }
+        if (kind == "FloatLiteral"){
+            return "float"
+        }
+        if (kind == "StringLiteral"){
+            return "string"
+        }
+        if (kind == "BoolLiteral"){
+            return "bool"
+        }
+        if (kind == "NullLiteral"){
+            return "null"
+        }
+        if (kind == "ArrayLiteral"){
+            return this.analyze_array_literal(node)
+        }
+        if (kind == "DictLiteral"){
+            return this.analyze_dict_literal(node)
+        }
+        if (kind == "HasattrExpression"){
+            return this.analyze_hasattr_expression(node)
+        }
+        if (kind == "TypeofExpression"){
+            this.analyze(node["argument"])
+            return "string"
+        }
+        if (kind == "ClassofExpression"){
+            this.analyze(node["argument"])
+            return "string"
+        }
+        if (kind == "ThisExpression"){
+            if (this.current_class == ""){
+                this.add_error("'this' used outside of a class context", node_line(node), node_column(node))
+                return "unknown"
+            }
+            return this.current_class
+        }
+        if (kind == "IfStatement"){
+            return this.analyze_if_statement(node)
+        }
+        if (kind == "WhileStatement"){
+            return this.analyze_while_statement(node)
+        }
+        if (kind == "ForInStatement"){
+            return this.analyze_for_statement(node)
+        }
+        if (kind == "SetStatement"){
+            return this.analyze_set_statement(node)
+        }
+        if (kind == "ReturnStatement"){
+            return this.analyze_return_statement(node)
+        }
+        if (kind == "Block"){
+            return this.analyze_block(node)
+        }
+        if (kind == "TryStatement"){
+            return this.analyze_try_statement(node)
+        }
+        if (kind == "CatchBlock"){
+            return this.analyze_catch_block(node)
+        }
+        if (kind == "ThrowStatement"){
+            return this.analyze_throw_statement(node)
+        }
+        if (kind == "BreakStatement"){
+            return this.analyze_break_statement(node)
+        }
+        if (kind == "SimpleImportStatement"){
+            return this.analyze_simple_import(node)
+        }
+        if (kind == "FromImportStatement"){
+            return this.analyze_from_import(node)
+        }
+        if (kind == "LibcImportStatement"){
+            return this.analyze_libc_import(node)
+        }
+
+        return "unknown"
+    }
+
+    string analyze_program(dict node){
+        array statements = node["statements"]
+
+        int i = 0
+        while (i < statements.length()){
+            this.predeclare_top_level_symbol(statements[i])
+            set i = i + 1
+        }
+
+        set i = 0
+        while (i < statements.length()){
+            this.analyze(statements[i])
+            set i = i + 1
+        }
+
+        return "void"
+    }
+
+    string analyze_class_declaration(dict node){
+        string class_name = node["name"]
+        string parent_class = ""
+        if ("inherits_from" in node){
+            set parent_class = node["inherits_from"]
+        }
+
+        if (parent_class != "" && (parent_class in this.classes) != true){
+            this.add_error(
+                "Unknown parent class '" + parent_class + "' for class '" + class_name + "'",
+                node_line(node),
+                node_column(node)
+            )
+        }
+
+        dict class_info = {}
+        set class_info["name"] = class_name
+        set class_info["fields"] = {}
+        set class_info["methods"] = {}
+        set class_info["parent_class"] = parent_class
+
+        array fields = node["fields"]
+        int i = 0
+        while (i < fields.length()){
+            dict field = fields[i]
+            string field_name = field["name"]
+            dict field_info = {}
+            set field_info["name"] = field_name
+            set field_info["type"] = field["field_type"]
+            set field_info["element_type"] = field["element_type"]
+
+            dict info_fields = class_info["fields"]
+            if (field_name in info_fields){
+                this.add_error(
+                    "Duplicate field '" + field_name + "' in class '" + class_name + "'",
+                    node_line(field),
+                    node_column(field)
+                )
+            }
+            else{
+                set info_fields[field_name] = field_info
+                set class_info["fields"] = info_fields
+            }
+            set i = i + 1
+        }
+
+        array methods = node["methods"]
+        set i = 0
+        while (i < methods.length()){
+            dict method = methods[i]
+            string method_name = method["name"]
+            dict method_info = {}
+            set method_info["name"] = method_name
+            set method_info["return_type"] = method["return_type"]
+            set method_info["return_element_type"] = method["return_element_type"]
+            set method_info["parameters"] = this.to_param_info(method["parameters"])
+            set method_info["is_static"] = method["is_static"]
+            set method_info["is_virtual"] = method["is_virtual"]
+
+            dict info_methods = class_info["methods"]
+            if (method_name in info_methods){
+                this.add_error(
+                    "Duplicate method '" + method_name + "' in class '" + class_name + "'",
+                    node_line(method),
+                    node_column(method)
+                )
+            }
+            else{
+                set info_methods[method_name] = method_info
+                set class_info["methods"] = info_methods
+            }
+            set i = i + 1
+        }
+
+        dict classes = this.classes
+        set classes[class_name] = class_info
+        set this.classes = classes
+        this.symbol_table.declare(class_name, "class", class_name)
+
+        string previous_class = this.current_class
+        set this.current_class = class_name
+
+        set i = 0
+        while (i < fields.length()){
+            this.analyze_field_declaration(fields[i])
+            set i = i + 1
+        }
+
+        set i = 0
+        while (i < methods.length()){
+            this.analyze_method_declaration(methods[i])
+            set i = i + 1
+        }
+
+        set this.current_class = previous_class
+        return class_name
+    }
+
+    string analyze_field_declaration(dict node){
+        string field_type = node["field_type"]
+        if (this.is_known_type(field_type) != true){
+            this.add_error("Unknown field type '" + field_type + "'", node_line(node), node_column(node))
+            set field_type = "any"
+        }
+
+        if ("initializer" in node && node["initializer"] != null){
+            string init_type = this.analyze(node["initializer"])
+            if (this.type_matches(field_type, init_type) != true){
+                this.add_error(
+                    "Field initializer type mismatch: expected " + field_type + " but got " + init_type,
+                    node_line(node),
+                    node_column(node)
+                )
+            }
+        }
+
+        return field_type
+    }
+
+    string analyze_method_declaration(dict node){
+        string method_name = node["name"]
+        string return_type = node["return_type"]
+        if (return_type == ""){
+            set return_type = "any"
+        }
+
+        if (this.is_known_type(return_type) != true){
+            this.add_error("Unknown method return type '" + return_type + "'", node_line(node), node_column(node))
+            set return_type = "any"
+        }
+
+        this.symbol_table.enter_scope()
+
+        if (this.current_class != "" && node["is_static"] == 0){
+            this.symbol_table.declare("this", "variable", this.current_class)
+        }
+
+        array params = node["parameters"]
+        int i = 0
+        while (i < params.length()){
+            dict param = params[i]
+            string param_type = param["param_type"]
+            if (param_type == ""){
+                set param_type = "any"
+            }
+            if (this.is_known_type(param_type) != true){
+                this.add_error(
+                    "Unknown parameter type '" + param_type + "'",
+                    node_line(param),
+                    node_column(param)
+                )
+                set param_type = "any"
+            }
+            this.symbol_table.declare(param["name"], "variable", param_type, [], param["element_type"])
+
+            if (param["default_value"] != null){
+                string default_type = this.analyze(param["default_value"])
+                if (this.type_matches(param_type, default_type) != true){
+                    this.add_error(
+                        "Default value type mismatch for parameter '" + param["name"] + "'",
+                        node_line(param),
+                        node_column(param)
+                    )
+                }
+            }
+            set i = i + 1
+        }
+
+        string previous_return = this.current_function_return_type
+        set this.current_function_return_type = return_type
+        this.analyze(node["body"])
+        set this.current_function_return_type = previous_return
+
+        this.symbol_table.exit_scope()
+
+        if (method_name == "new" && return_type != "any" && return_type != "void"){
+            this.add_error("Constructor 'new' should have return type void/any", node_line(node), node_column(node))
+        }
+
+        return return_type
+    }
+
+    string analyze_new_expression(dict node){
+        string class_name = node["class_name"]
+        if ((class_name in this.classes) != true){
+            this.add_error("Unknown class '" + class_name + "'", node_line(node), node_column(node))
+            int k = 0
+            array args0 = node["arguments"]
+            while (k < args0.length()){
+                this.analyze(args0[k])
+                set k = k + 1
+            }
+            return "unknown"
+        }
+
+        dict ctor = this.find_class_method(class_name, "new")
+        array args = node["arguments"]
+        if (ctor != null){
+            this.validate_call_arguments(
+                class_name + ".new",
+                args,
+                ctor["parameters"],
+                true,
+                node_line(node),
+                node_column(node)
+            )
+        }
+        else{
+            int i = 0
+            while (i < args.length()){
+                this.analyze(args[i])
+                set i = i + 1
+            }
+            if (args.length() > 0){
+                this.add_error(
+                    "Class '" + class_name + "' has no constructor that accepts arguments",
+                    node_line(node),
+                    node_column(node)
+                )
+            }
+        }
+
+        return class_name
+    }
+
+    string analyze_index_expression(dict node){
+        string object_type = this.analyze(node["object"])
+        string index_type = this.analyze(node["index"])
+
+        if (object_type == "string"){
+            if (index_type != "int" && index_type != "any"){
+                this.add_error("String index must be int", node_line(node), node_column(node))
+            }
+            return "string"
+        }
+
+        if (object_type == "array"){
+            if (index_type != "int" && index_type != "any"){
+                this.add_error("Array index must be int", node_line(node), node_column(node))
+            }
+            string elem_type = this.infer_element_type_from_expression(node["object"])
+            if (elem_type == ""){
+                set elem_type = "any"
+            }
+            return elem_type
+        }
+
+        if (object_type == "dict"){
+            string expected_key_type = this.infer_dict_key_type_from_expression(node["object"])
+            if (expected_key_type != "" && this.type_matches(expected_key_type, index_type) != true){
+                this.add_error(
+                    "Dict key type mismatch: expected " + expected_key_type + " but got " + index_type,
+                    node_line(node),
+                    node_column(node)
+                )
+            }
+            string value_type = this.infer_dict_value_type_from_expression(node["object"])
+            if (value_type == ""){
+                set value_type = "any"
+            }
+            return value_type
+        }
+
+        if (object_type == "any"){
+            return "any"
+        }
+
+        this.add_error(
+            "Indexing is only supported on string/array/dict, got " + object_type,
+            node_line(node),
+            node_column(node)
+        )
+        return "unknown"
+    }
+
+    string analyze_member_expression(dict node){
+        string property = node["property"]
+        string object_type = this.analyze(node["object"])
+
+        if (object_type == "array"){
+            if (property == "length"){
+                return "int"
+            }
+            return "any"
+        }
+
+        if (object_type == "dict"){
+            if (property == "length"){
+                return "int"
+            }
+            return "any"
+        }
+
+        if (object_type == "string"){
+            if (property == "length"){
+                return "int"
+            }
+            return "any"
+        }
+
+        if (object_type in this.classes){
+            dict field = this.find_class_field(object_type, property)
+            if (field != null){
+                return field["type"]
+            }
+            dict method = this.find_class_method(object_type, property)
+            if (method != null){
+                return method["return_type"]
+            }
+
+            this.add_error(
+                "Unknown member '" + property + "' for class '" + object_type + "'",
+                node_line(node),
+                node_column(node)
+            )
+            return "unknown"
+        }
+
+        if (object_type == "any"){
+            return "any"
+        }
+
+        this.add_error(
+            "Member access is unsupported for type '" + object_type + "'",
+            node_line(node),
+            node_column(node)
+        )
+        return "unknown"
+    }
+
+    string analyze_variable_declaration(dict node){
+        string declared_type = node["type"]
+        string element_type = node["element_type"]
+        int fixed_size = int(node["fixed_size"])
+        string key_type = node["key_type"]
+        string value_type = node["value_type"]
+
+        if (this.is_known_type(declared_type) != true){
+            this.add_error("Unknown type '" + declared_type + "'", node_line(node), node_column(node))
+            set declared_type = "any"
+        }
+
+        if (declared_type == "array" && element_type != "" && this.is_known_type(element_type) != true){
+            this.add_error("Unknown array element type '" + element_type + "'", node_line(node), node_column(node))
+            set element_type = "any"
+        }
+
+        if (declared_type == "dict"){
+            if (key_type != "" && this.is_known_type(key_type) != true){
+                this.add_error("Unknown dict key type '" + key_type + "'", node_line(node), node_column(node))
+                set key_type = "any"
+            }
+            if (value_type != "" && this.is_known_type(value_type) != true){
+                this.add_error("Unknown dict value type '" + value_type + "'", node_line(node), node_column(node))
+                set value_type = "any"
+            }
+        }
+
+        if (node["value"] != null){
+            string init_type = this.analyze(node["value"])
+
+            if (declared_type == "array"){
+                if (element_type == ""){
+                    set element_type = this.infer_element_type_from_expression(node["value"])
+                    if (element_type == ""){
+                        set element_type = "any"
+                    }
+                }
+                if (fixed_size >= 0 && node_kind(node["value"]) == "ArrayLiteral"){
+                    int actual_len = int(node["value"]["elements"].length())
+                    if (actual_len > fixed_size){
+                        this.add_error(
+                            "Array initializer has too many elements for fixed size " + str(fixed_size),
+                            node_line(node),
+                            node_column(node)
+                        )
+                    }
+                }
+            }
+
+            if (declared_type == "dict"){
+                if (key_type == ""){
+                    set key_type = this.infer_dict_key_type_from_expression(node["value"])
+                    if (key_type == ""){
+                        set key_type = "any"
+                    }
+                }
+                if (value_type == ""){
+                    set value_type = this.infer_dict_value_type_from_expression(node["value"])
+                    if (value_type == ""){
+                        set value_type = "any"
+                    }
+                }
+            }
+
+            if (declared_type != "any" && this.type_matches(declared_type, init_type) != true){
+                this.add_error(
+                    "Variable initializer type mismatch: expected " + declared_type + " but got " + init_type,
+                    node_line(node),
+                    node_column(node)
+                )
+            }
+        }
+        else{
+            if (declared_type == "array" && element_type == ""){
+                set element_type = "any"
+            }
+            if (declared_type == "dict"){
+                if (key_type == ""){
+                    set key_type = "any"
+                }
+                if (value_type == ""){
+                    set value_type = "any"
+                }
+            }
+        }
+
+        this.symbol_table.declare(
+            node["name"],
+            "variable",
+            declared_type,
+            [],
+            element_type,
+            fixed_size,
+            key_type,
+            value_type
+        )
+
+        return declared_type
+    }
+
+    string analyze_function_declaration(dict node){
+        string name = node["name"]
+        string return_type = node["return_type"]
+        if (return_type == ""){
+            set return_type = "any"
+        }
+
+        if (this.is_known_type(return_type) != true){
+            this.add_error("Unknown function return type '" + return_type + "'", node_line(node), node_column(node))
+            set return_type = "any"
+        }
+
+        array params = this.to_param_info(node["parameters"])
+        this.symbol_table.declare(name, "function", return_type, params, node["return_element_type"])
+
+        this.symbol_table.enter_scope()
+        int i = 0
+        while (i < params.length()){
+            dict p = params[i]
+            this.symbol_table.declare(p["name"], "variable", p["param_type"], [], p["element_type"])
+            set i = i + 1
+        }
+
+        string prev_return = this.current_function_return_type
+        set this.current_function_return_type = return_type
+        this.analyze(node["body"])
+        set this.current_function_return_type = prev_return
+
+        this.symbol_table.exit_scope()
+        return return_type
+    }
+
+    string analyze_external_declaration(dict node){
+        array params = this.to_param_info(node["parameters"])
+        this.symbol_table.declare(node["name"], "function", node["return_type"], params)
+        return "void"
+    }
+
+    string analyze_dynamic_function_declaration(dict node){
+        array params = this.to_param_info(node["parameters"])
+        this.symbol_table.declare(node["name"], "function", "any", params)
+
+        this.symbol_table.enter_scope()
+        int i = 0
+        while (i < params.length()){
+            dict p = params[i]
+            this.symbol_table.declare(p["name"], "variable", p["param_type"], [], p["element_type"])
+            set i = i + 1
+        }
+
+        string prev_return = this.current_function_return_type
+        set this.current_function_return_type = "any"
+        this.analyze(node["body"])
+        set this.current_function_return_type = prev_return
+
+        this.symbol_table.exit_scope()
+        return "any"
+    }
+
+    string analyze_identifier(dict node){
+        string name = node["name"]
+        dict symbol = this.symbol_table.lookup(name)
+        if (symbol == null){
+            this.add_error("Unknown identifier '" + name + "'", node_line(node), node_column(node))
+            return "unknown"
+        }
+        return symbol["data_type"]
+    }
+
+    string analyze_expression_statement(dict node){
+        return this.analyze(node["expression"])
+    }
+
+    string analyze_binary_expression(dict node){
+        string op = node["op"]
+        string left_type = this.analyze(node["left"])
+        string right_type = this.analyze(node["right"])
+
+        if (op == "+" && left_type == "string" && right_type == "string"){
+            return "string"
+        }
+
+        if (op == "+" || op == "-" || op == "*" || op == "/"){
+            bool left_num = left_type == "int" || left_type == "float" || left_type == "any"
+            bool right_num = right_type == "int" || right_type == "float" || right_type == "any"
+            if (left_num != true || right_num != true){
+                this.add_error(
+                    "Operator '" + op + "' requires numeric operands, got " + left_type + " and " + right_type,
+                    node_line(node),
+                    node_column(node)
+                )
+                return "unknown"
+            }
+            if (left_type == "float" || right_type == "float"){
+                return "float"
+            }
+            if (left_type == "any" || right_type == "any"){
+                return "any"
+            }
+            return "int"
+        }
+
+        if (op == "==" || op == "!=" || op == ">" || op == "<" || op == ">=" || op == "<="){
+            return "bool"
+        }
+
+        if (op == "&&" || op == "||"){
+            return "bool"
+        }
+
+        return "unknown"
+    }
+
+    string analyze_in_expression(dict node){
+        this.analyze(node["item"])
+        this.analyze(node["container"])
+        return "bool"
+    }
+
+    string analyze_if_statement(dict node){
+        this.analyze(node["condition"])
+
+        this.symbol_table.enter_scope()
+        this.analyze(node["then_body"])
+        this.symbol_table.exit_scope()
+
+        if (node["else_body"] != null){
+            this.symbol_table.enter_scope()
+            this.analyze(node["else_body"])
+            this.symbol_table.exit_scope()
+        }
+
+        return "void"
+    }
+
+    string analyze_break_statement(dict node){
+        if (this.break_depth <= 0){
+            this.add_error("break used outside of loop", node_line(node), node_column(node))
+        }
+        return "void"
+    }
+
+    string analyze_for_statement(dict node){
+        string iterable_type = this.analyze(node["iterable"])
+
+        string variable_type = "any"
+        if (iterable_type == "array"){
+            string elem = this.infer_element_type_from_expression(node["iterable"])
+            if (elem != ""){
+                set variable_type = elem
+            }
+        }
+
+        this.symbol_table.enter_scope()
+        this.symbol_table.declare(node["variable"], "variable", variable_type)
+        set this.break_depth = this.break_depth + 1
+        this.analyze(node["body"])
+        set this.break_depth = this.break_depth - 1
+        this.symbol_table.exit_scope()
+        return "void"
+    }
+
+    string analyze_simple_import(dict node){
+        if (node["alias"] != ""){
+            this.symbol_table.declare(node["alias"], "import", "module")
+        }
+        else{
+            this.symbol_table.declare(node["module_name"], "import", "module")
+        }
+        return "void"
+    }
+
+    string analyze_libc_import(dict node){
+        array symbols = node["symbols"]
+        int i = 0
+        while (i < symbols.length()){
+            string func_name = symbols[i]
+            string ret = libc_return_type(func_name)
+            if (ret == ""){
+                this.add_error("Unknown libc function '" + func_name + "'", node_line(node), node_column(node))
+            }
+            else{
+                this.symbol_table.declare(func_name, "builtin", ret)
+            }
+            set i = i + 1
+        }
+        return "void"
+    }
+
+    string analyze_from_import(dict node){
+        if (node["is_wildcard"] == 1){
+            return "void"
+        }
+
+        array symbols = node["symbols"]
+        int i = 0
+        while (i < symbols.length()){
+            string symbol = symbols[i]
+            if (symbol == ""){
+                set i = i + 1
+            }
+            else{
+                this.symbol_table.declare(symbol, "function", "any")
+                set i = i + 1
+            }
+        }
+
+        return "void"
+    }
+
+    string analyze_call_expression(dict node){
+        dict callee = node["callee"]
+        array arguments = node["arguments"]
+
+        if (node_kind(callee) == "Identifier"){
+            string func_name = callee["name"]
+            dict symbol = this.symbol_table.lookup(func_name)
+            if (symbol == null){
+                this.add_error("Unknown function '" + func_name + "'", node_line(node), node_column(node))
+                int x = 0
+                while (x < arguments.length()){
+                    this.analyze(arguments[x])
+                    set x = x + 1
+                }
+                return "unknown"
+            }
+
+            if (func_name == "print" && arguments.length() != 1){
+                this.add_error("print() requires one argument", node_line(node), node_column(node))
+            }
+            if (func_name == "length" && arguments.length() != 1){
+                this.add_error("length() expects exactly 1 argument", node_line(node), node_column(node))
+            }
+            if (func_name == "append" && arguments.length() != 2){
+                this.add_error("append() expects exactly 2 arguments", node_line(node), node_column(node))
+            }
+            if (func_name == "pop" && (arguments.length() < 1 || arguments.length() > 2)){
+                this.add_error("pop() expects 1 to 2 arguments", node_line(node), node_column(node))
+            }
+            if (func_name == "split" && arguments.length() != 2){
+                this.add_error("split() expects exactly 2 arguments", node_line(node), node_column(node))
+            }
+            if (func_name == "args" && arguments.length() != 0){
+                this.add_error("args() expects 0 arguments", node_line(node), node_column(node))
+            }
+
+            array params = []
+            if ("parameters" in symbol){
+                set params = symbol["parameters"]
+            }
+            if (params.length() > 0 || func_name == "int" || func_name == "float" || func_name == "str"){
+                this.validate_call_arguments(func_name, arguments, params, false, node_line(node), node_column(node))
+            }
+            else{
+                int i = 0
+                while (i < arguments.length()){
+                    this.analyze(arguments[i])
+                    set i = i + 1
+                }
+            }
+
+            return symbol["data_type"]
+        }
+
+        if (node_kind(callee) == "MemberExpression"){
+            dict member = callee
+            string method_name = member["property"]
+            string object_type = this.analyze(member["object"])
+
+            if (object_type == "array"){
+                if (method_name == "length"){
+                    if (arguments.length() != 0){
+                        this.add_error("array.length() expects 0 arguments", node_line(node), node_column(node))
+                    }
+                    return "int"
+                }
+                if (method_name == "append"){
+                    if (arguments.length() != 1){
+                        this.add_error("array.append() expects 1 argument", node_line(node), node_column(node))
+                    }
+                    else{
+                        string expected = this.infer_element_type_from_expression(member["object"])
+                        if (expected != ""){
+                            string got = this.analyze(arguments[0])
+                            if (this.type_matches(expected, got) != true){
+                                this.add_error(
+                                    "array.append() element type mismatch: expected " + expected + " but got " + got,
+                                    node_line(node),
+                                    node_column(node)
+                                )
+                            }
+                        }
+                        else{
+                            this.analyze(arguments[0])
+                        }
+                    }
+                    return "void"
+                }
+                if (method_name == "pop"){
+                    if (arguments.length() > 1){
+                        this.add_error("array.pop() expects 0 or 1 arguments", node_line(node), node_column(node))
+                    }
+                    int z = 0
+                    while (z < arguments.length()){
+                        this.analyze(arguments[z])
+                        set z = z + 1
+                    }
+                    string elem = this.infer_element_type_from_expression(member["object"])
+                    if (elem == ""){
+                        set elem = "any"
+                    }
+                    return elem
+                }
+            }
+
+            if (object_type == "string"){
+                if (method_name == "length"){
+                    if (arguments.length() != 0){
+                        this.add_error("string.length() expects 0 arguments", node_line(node), node_column(node))
+                    }
+                    return "int"
+                }
+            }
+
+            if (object_type == "dict"){
+                if (method_name == "length"){
+                    if (arguments.length() != 0){
+                        this.add_error("dict.length() expects 0 arguments", node_line(node), node_column(node))
+                    }
+                    return "int"
+                }
+            }
+
+            if (object_type in this.classes){
+                dict method_info = this.find_class_method(object_type, method_name)
+                if (method_info == null){
+                    this.add_error(
+                        "Unknown method '" + object_type + "." + method_name + "'",
+                        node_line(node),
+                        node_column(node)
+                    )
+                    int i = 0
+                    while (i < arguments.length()){
+                        this.analyze(arguments[i])
+                        set i = i + 1
+                    }
+                    return "unknown"
+                }
+
+                this.validate_call_arguments(
+                    object_type + "." + method_name,
+                    arguments,
+                    method_info["parameters"],
+                    true,
+                    node_line(node),
+                    node_column(node)
+                )
+                return method_info["return_type"]
+            }
+
+            int i = 0
+            while (i < arguments.length()){
+                this.analyze(arguments[i])
+                set i = i + 1
+            }
+            if (object_type != "any"){
+                this.add_error(
+                    "Cannot call member '" + method_name + "' on type '" + object_type + "'",
+                    node_line(node),
+                    node_column(node)
+                )
+            }
+            return "any"
+        }
+
+        this.analyze(callee)
+        int i = 0
+        while (i < arguments.length()){
+            this.analyze(arguments[i])
+            set i = i + 1
+        }
+        return "any"
+    }
+
+    string analyze_array_literal(dict node){
+        array elements = node["elements"]
+        if (elements.length() == 0){
+            return "array"
+        }
+
+        string inferred = this.analyze(elements[0])
+        int i = 1
+        while (i < elements.length()){
+            string current = this.analyze(elements[i])
+            if (inferred == current){
+                set i = i + 1
+            }
+            elif ((inferred == "int" && current == "float") || (inferred == "float" && current == "int")){
+                set inferred = "float"
+                set i = i + 1
+            }
+            else{
+                set inferred = "any"
+                set i = i + 1
+            }
+        }
+
+        return "array"
+    }
+
+    string analyze_dict_literal(dict node){
+        array keys = node["keys"]
+        array values = node["values"]
+
+        if (keys.length() == 0 || values.length() == 0){
+            return "dict"
+        }
+
+        string key_type = this.analyze(keys[0])
+        string value_type = this.analyze(values[0])
+
+        int i = 1
+        while (i < keys.length()){
+            string current = this.analyze(keys[i])
+            if (key_type != current){
+                set key_type = "any"
+            }
+            set i = i + 1
+        }
+
+        set i = 1
+        while (i < values.length()){
+            string current = this.analyze(values[i])
+            if (value_type != current){
+                if ((value_type == "int" && current == "float") || (value_type == "float" && current == "int")){
+                    set value_type = "float"
+                }
+                else{
+                    set value_type = "any"
+                }
+            }
+            set i = i + 1
+        }
+
+        return "dict"
+    }
+
+    string analyze_bool_literal(dict node){
+        return "bool"
+    }
+
+    string analyze_null_literal(dict node){
+        return "null"
+    }
+
+    string analyze_hasattr_expression(dict node){
+        string object_type = this.analyze(node["object"])
+        string attr_name = node["attr_name"]
+
+        if (object_type in this.classes){
+            if (this.find_class_field(object_type, attr_name) != null || this.find_class_method(object_type, attr_name) != null){
+                int _hasattr_compile_time_result = 1
+            }
+            else{
+                int _hasattr_compile_time_result = 0
+            }
+        }
+        else{
+            int _hasattr_compile_time_result = 0
+        }
+
+        return "bool"
+    }
+
+    string analyze_while_statement(dict node){
+        this.analyze(node["condition"])
+        set this.break_depth = this.break_depth + 1
+        this.symbol_table.enter_scope()
+        this.analyze(node["body"])
+        this.symbol_table.exit_scope()
+        set this.break_depth = this.break_depth - 1
+        return "void"
+    }
+
+    string analyze_set_statement(dict node){
+        dict target = node["target"]
+        string target_kind = node_kind(target)
+        string value_type = this.analyze(node["value"])
+
+        if (target_kind == "Identifier"){
+            string name = target["name"]
+            dict symbol = this.symbol_table.lookup(name)
+            if (symbol == null){
+                this.add_error("Assignment to undeclared variable '" + name + "'", node_line(node), node_column(node))
+                return "void"
+            }
+
+            string expected = symbol["data_type"]
+            if (this.type_matches(expected, value_type) != true){
+                this.add_error(
+                    "Assignment type mismatch: expected " + expected + " but got " + value_type,
+                    node_line(node),
+                    node_column(node)
+                )
+            }
+            return "void"
+        }
+
+        if (target_kind == "MemberExpression"){
+            dict member = target
+            string object_type = this.analyze(member["object"])
+            string property = member["property"]
+
+            if (object_type in this.classes){
+                dict field = this.find_class_field(object_type, property)
+                if (field == null){
+                    this.add_error(
+                        "Unknown field '" + property + "' on class '" + object_type + "'",
+                        node_line(node),
+                        node_column(node)
+                    )
+                    return "void"
+                }
+
+                if (this.type_matches(field["type"], value_type) != true){
+                    this.add_error(
+                        "Field assignment type mismatch: expected " + field["type"] + " but got " + value_type,
+                        node_line(node),
+                        node_column(node)
+                    )
+                }
+                return "void"
+            }
+
+            this.add_error("Field assignment requires a class object", node_line(node), node_column(node))
+            return "void"
+        }
+
+        if (target_kind == "IndexExpression"){
+            dict index_expr = target
+            string object_type = this.analyze(index_expr["object"])
+            string index_type = this.analyze(index_expr["index"])
+
+            if (object_type == "array"){
+                if (index_type != "int" && index_type != "any"){
+                    this.add_error("Array index must be int", node_line(node), node_column(node))
+                }
+                string elem_type = this.infer_element_type_from_expression(index_expr["object"])
+                if (elem_type != "" && this.type_matches(elem_type, value_type) != true){
+                    this.add_error(
+                        "Array assignment type mismatch: expected " + elem_type + " but got " + value_type,
+                        node_line(node),
+                        node_column(node)
+                    )
+                }
+                return "void"
+            }
+
+            if (object_type == "dict"){
+                string ktype = this.infer_dict_key_type_from_expression(index_expr["object"])
+                string vtype = this.infer_dict_value_type_from_expression(index_expr["object"])
+                if (ktype != "" && this.type_matches(ktype, index_type) != true){
+                    this.add_error(
+                        "Dict key type mismatch: expected " + ktype + " but got " + index_type,
+                        node_line(node),
+                        node_column(node)
+                    )
+                }
+                if (vtype != "" && this.type_matches(vtype, value_type) != true){
+                    this.add_error(
+                        "Dict value type mismatch: expected " + vtype + " but got " + value_type,
+                        node_line(node),
+                        node_column(node)
+                    )
+                }
+                return "void"
+            }
+
+            this.add_error(
+                "Indexed assignment is only supported on array/dict values",
+                node_line(node),
+                node_column(node)
+            )
+            return "void"
+        }
+
+        this.add_error("Unsupported assignment target", node_line(node), node_column(node))
+        return "void"
+    }
+
+    string analyze_return_statement(dict node){
+        string expected = this.current_function_return_type
+        if (expected == ""){
+            set expected = "any"
+        }
+
+        if (node["value"] == null){
+            if (expected != "void" && expected != "any"){
+                this.add_error(
+                    "Return statement missing value for function returning " + expected,
+                    node_line(node),
+                    node_column(node)
+                )
+            }
+            return expected
+        }
+
+        string actual = this.analyze(node["value"])
+        if (expected == "void"){
+            this.add_error("Void function should not return a value", node_line(node), node_column(node))
+            return "void"
+        }
+
+        if (this.type_matches(expected, actual) != true){
+            this.add_error(
+                "Return type mismatch: expected " + expected + " but got " + actual,
+                node_line(node),
+                node_column(node)
+            )
+        }
+
+        return expected
+    }
+
+    string analyze_block(dict node){
+        array statements = node["statements"]
+        int i = 0
+        while (i < statements.length()){
+            this.analyze(statements[i])
+            set i = i + 1
+        }
+        return "void"
+    }
+
+    string analyze_try_statement(dict node){
+        this.symbol_table.enter_scope()
+        this.analyze(node["try_block"])
+        this.symbol_table.exit_scope()
+
+        array seen_types = []
+        array catches = node["catch_blocks"]
+        int i = 0
+        while (i < catches.length()){
+            this.analyze_catch_block(catches[i], seen_types)
+            set i = i + 1
+        }
+
+        return "void"
+    }
+
+    string analyze_catch_block(dict node, any seen_types = null){
+        string exception_type = node["exception_type"]
+        if (seen_types != null && exception_type != ""){
+            if (exception_type in seen_types){
+                this.add_error(
+                    "Duplicate catch type '" + exception_type + "'",
+                    node_line(node),
+                    node_column(node)
+                )
+            }
+            else{
+                seen_types.append(exception_type)
+            }
+        }
+
+        this.symbol_table.enter_scope()
+        if (node["identifier"] != ""){
+            string catch_type = "any"
+            if (exception_type != ""){
+                set catch_type = exception_type
+            }
+            this.symbol_table.declare(node["identifier"], "variable", catch_type)
+        }
+        this.analyze(node["body"])
+        this.symbol_table.exit_scope()
+
+        return "void"
+    }
+
+    string analyze_throw_statement(dict node){
+        if (node["expression"] != null){
+            this.analyze(node["expression"])
+        }
+        return "void"
+    }
+}
