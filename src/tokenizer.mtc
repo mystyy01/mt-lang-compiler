@@ -1,0 +1,83 @@
+from types use Token
+from strings use isdigit, isalnum, lower, isalpha
+
+int T_NAME = 0
+int T_KEYWORD = 1
+int T_FLOAT_LITERAL = 2
+int T_INT_LITERAL = 3
+int T_SYMBOL = 4
+int T_STRING = 5
+
+array<string>[37] KEYWORDS = ["from", "use", "as", "int", "float", "void", "array", "dict", "string", "if", "elif", "else", "for", "in", "set", "return", "typeof", "hasattr", "classof", "while", "bool", "true", "false", "func", "class", "new", "this", "static", "virtual", "null", "try", "catch", "throw", "except", "break", "external", "dynamic"]
+array<string>[17] SINGLE_CHAR_SYMBOLS = ["(", ")", "[", "]", "{", "}", ",", ".", ":", "!", "+", "-", "*", "/", "=", ">", "<"]
+array<string>[7] DOUBLE_CHAR_SYMBOLS = ["==", "!=", "+=", ">=", "<=", "&&", "||"]
+array<string>[2] QUOTES = ["\"", "'"]
+array<string>[4] WHITESPACE = [" ", "\t", "\n", "\r"]
+
+class Tokenizer{
+    // constructor
+    void new(string src, string fp){
+        set this.source = src
+        set this.file_path = fp
+        set this.position = 0
+        set this.line = 1
+        set this.col = 1
+    }
+    string current_char(){
+        return this.source[this.position]
+    }
+    void advance(int offset = 1){
+        int i = 0
+        while (i < offset){
+            if (this.position < this.source.length()){
+                if (this.source[this.position] == '\n'){
+                    set this.line = this.line + 1
+                    set this.col = 1
+                } else{
+                    set this.col = this.col + 1
+                }
+            }
+            set this.position = this.position + 1
+            set i = i + 1
+        }
+    }
+    bool is_at_end(){
+        return this.position >= this.source.length()
+    }
+
+    string peek_next(int offset = 1){
+        if (this.position + offset < this.source.length()){
+            return this.source[this.position + offset]
+        }
+        return null
+    }
+    void skip_whitespace(){
+        while (this.is_at_end() != true && this.current_char() in WHITESPACE){
+            this.advance()
+        }
+    }
+    void skip_comment(){
+        if (this.is_at_end() != true && this.current_char() == "/" && this.peek_next() == "/"){
+            this.advance()
+            this.advance()
+            while (this.is_at_end() != true && this.current_char() != "\n" && this.current_char() != "\r"){
+                this.advance()
+            }
+        }
+    }
+    Token read_word(){
+        string word = ""
+        int start_line = this.line
+        int start_col = this.col 
+        while (this.is_at_end() != true && (isalnum(this.current_char()) || this.current_char() == "_")){
+            set word = word + this.current_char()
+            this.advance()
+        }
+        if (word in KEYWORDS){
+            return new Token(T_KEYWORD, word, start_line, start_col)
+        }
+        else{
+            return new Token(T_NAME, word, start_line, start_col)
+        }
+    }
+}

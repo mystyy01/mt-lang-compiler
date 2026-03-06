@@ -1,0 +1,9 @@
+
+class Token{
+    void new(int t, string v, int l = -1, int c = -1){
+        set this.type = t
+        set this.value = v
+        set this.line = l 
+        set this.column = c
+    }
+}
