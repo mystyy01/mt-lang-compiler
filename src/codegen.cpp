@@ -932,20 +932,46 @@ void CodeGenerator::begin_function(const CodegenFunctionInfo& info) {
         if (!param.mt_type.empty() && classes.find(param.mt_type) != classes.end()) {
             class_name = param.mt_type;
         }
+        bool is_dynamic_array = (param.mt_type == "array");
+        std::string dynamic_array_elem_mt_type;
+        std::string dynamic_array_elem_llvm_type;
+        if (is_dynamic_array) {
+            dynamic_array_elem_mt_type = "int";
+            dynamic_array_elem_llvm_type = map_type_to_llvm(dynamic_array_elem_mt_type);
+            if (dynamic_array_elem_llvm_type == "void") {
+                dynamic_array_elem_mt_type = "any";
+                dynamic_array_elem_llvm_type = "i8*";
+            }
+        }
+
+        const bool is_dict = (param.mt_type == "dict" || param.mt_type.rfind("dict<", 0) == 0);
+        std::string dict_key_mt_type;
+        std::string dict_value_mt_type;
+        std::string dict_key_llvm_type;
+        std::string dict_value_llvm_type;
+        if (is_dict) {
+            // Function parameters currently don't carry explicit dict<K,V> metadata in the AST,
+            // so treat them as dict<any, any> at codegen time.
+            dict_key_mt_type = "any";
+            dict_value_mt_type = "any";
+            dict_key_llvm_type = "i8*";
+            dict_value_llvm_type = "i8*";
+        }
         declare_variable(param.name, VariableInfo{
             param.llvm_type,
             ptr,
             false,
             "",
             0,
-            false,
-            "",
+            is_dynamic_array,
+            dynamic_array_elem_llvm_type,
             class_name,
-            false,
-            "",
-            "",
-            "",
-            "",
+            is_dict,
+            dict_key_llvm_type,
+            dict_value_llvm_type,
+            dict_key_mt_type,
+            dict_value_mt_type,
+            dynamic_array_elem_mt_type,
         });
     }
 }
