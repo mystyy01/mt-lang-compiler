@@ -1,0 +1,52 @@
+from libc use system, exit
+
+void print_usage(){
+    print("Usage: mtc-self-host <source.mtc> <output> [extra flags]")
+    print("Examples:")
+    print("  mtc-self-host source.mtc out")
+    print("  mtc-self-host --emit-ir source.mtc out")
+    print("  mtc-self-host --no-runtime -o source.mtc out.o")
+}
+
+array argv = args()
+int argc = argv.length()
+
+if (argc < 2){
+    print_usage()
+    exit(0)
+}
+
+string cmd = "mtc " + argv[1]
+if (argc >= 3){
+    set cmd = cmd + " " + argv[2]
+}
+if (argc >= 4){
+    set cmd = cmd + " " + argv[3]
+}
+if (argc >= 5){
+    set cmd = cmd + " " + argv[4]
+}
+if (argc >= 6){
+    set cmd = cmd + " " + argv[5]
+}
+if (argc >= 7){
+    set cmd = cmd + " " + argv[6]
+}
+if (argc >= 8){
+    set cmd = cmd + " " + argv[7]
+}
+if (argc >= 9){
+    set cmd = cmd + " " + argv[8]
+}
+if (argc >= 10){
+    set cmd = cmd + " " + argv[9]
+}
+
+print("[selfhost-driver] " + cmd)
+int rc = system(cmd)
+if (rc != 0){
+    print("Error: mtc command failed")
+    exit(1)
+}
+
+exit(0)

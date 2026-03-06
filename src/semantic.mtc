@@ -87,12 +87,16 @@ class SymbolTable{
     }
 
     void enter_scope(){
-        this.scopes.append({})
+        array scopes = this.scopes
+        scopes.append({})
+        set this.scopes = scopes
     }
 
     void exit_scope(){
-        if (this.scopes.length() > 1){
-            this.scopes.pop()
+        array scopes = this.scopes
+        if (scopes.length() > 1){
+            scopes.pop()
+            set this.scopes = scopes
         }
     }
 
@@ -161,7 +165,8 @@ class SemanticAnalyzer{
     }
 
     bool has_errors(){
-        return this.errors.length() > 0
+        array errors = this.errors
+        return errors.length() > 0
     }
 
     func get_symbol_table(){
@@ -197,7 +202,9 @@ class SemanticAnalyzer{
         if (this.file_path != "" && this.file_path != "unknown"){
             set full = full + " in " + this.file_path
         }
-        this.errors.append(full)
+        array errors = this.errors
+        errors.append(full)
+        set this.errors = errors
     }
 
     bool is_builtin_type(string type_name){
@@ -1730,9 +1737,9 @@ class SemanticAnalyzer{
         return "void"
     }
 
-    string analyze_catch_block(dict node, any seen_types = null){
+    string analyze_catch_block(dict node, array seen_types = []){
         string exception_type = node["exception_type"]
-        if (seen_types != null && exception_type != ""){
+        if (exception_type != ""){
             if (exception_type in seen_types){
                 this.add_error(
                     "Duplicate catch type '" + exception_type + "'",

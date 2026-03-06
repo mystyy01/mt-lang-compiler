@@ -1,1 +1,580 @@
+func cg_node_kind(any node){
+    if (node == null){
+        return "Null"
+    }
+    if ("kind" in node){
+        return node["kind"]
+    }
+    return "Unknown"
+}
 
+func cg_escape_string(string value){
+    string out = ""
+    int i = 0
+    while (i < value.length()){
+        string ch = value[i]
+        if (ch == "\\"){
+            set out = out + "\\\\"
+        }
+        elif (ch == "\""){
+            set out = out + "\\\""
+        }
+        elif (ch == "\n"){
+            set out = out + "\\n"
+        }
+        elif (ch == "\t"){
+            set out = out + "\\t"
+        }
+        elif (ch == "\r"){
+            set out = out + "\\r"
+        }
+        else{
+            set out = out + ch
+        }
+        set i = i + 1
+    }
+    return out
+}
+
+class CodeGenerator{
+    void new(string fp = "unknown"){
+        set this.file_path = fp
+        set this.lines = []
+        set this.errors = []
+        set this.indent_level = 0
+        set this.current_class = ""
+        set this.class_names = {}
+        set this.loop_counter = 0
+    }
+
+    array get_errors(){
+        return this.errors
+    }
+
+    bool has_errors(){
+        array errs = this.errors
+        return errs.length() > 0
+    }
+
+    void add_error(string message){
+        array errs = this.errors
+        if (this.file_path != "" && this.file_path != "unknown"){
+            errs.append(message + " in " + this.file_path)
+        }
+        else{
+            errs.append(message)
+        }
+        set this.errors = errs
+    }
+
+    string indent_text(){
+        string out = ""
+        int i = 0
+        while (i < this.indent_level){
+            set out = out + "    "
+            set i = i + 1
+        }
+        return out
+    }
+
+    void emit_line(string line){
+        array lines = this.lines
+        lines.append(this.indent_text() + line)
+        set this.lines = lines
+    }
+
+    void emit_blank(){
+        array lines = this.lines
+        lines.append("")
+        set this.lines = lines
+    }
+
+    void indent(){
+        set this.indent_level = this.indent_level + 1
+    }
+
+    void dedent(){
+        if (this.indent_level > 0){
+            set this.indent_level = this.indent_level - 1
+        }
+    }
+
+    string map_c_type(string mt_type){
+        if (mt_type == "int"){
+            return "int32_t"
+        }
+        if (mt_type == "float"){
+            return "double"
+        }
+        if (mt_type == "bool"){
+            return "bool"
+        }
+        if (mt_type == "void"){
+            return "void"
+        }
+        if (mt_type == "string"){
+            return "const char*"
+        }
+        if (mt_type in this.class_names){
+            return mt_type + "*"
+        }
+        return "mt_any"
+    }
+
+    void collect_program_types(dict program){
+        if (cg_node_kind(program) != "Program"){
+            return
+        }
+        array statements = program["statements"]
+        int i = 0
+        while (i < statements.length()){
+            dict stmt = statements[i]
+            if (cg_node_kind(stmt) == "ClassDeclaration"){
+                dict classes = this.class_names
+                set classes[stmt["name"]] = 1
+                set this.class_names = classes
+            }
+            set i = i + 1
+        }
+    }
+
+    string render_params(array parameters, bool include_this = false){
+        string out = ""
+        bool first = true
+        if (include_this){
+            set out = this.current_class + "* this"
+            set first = false
+        }
+
+        int i = 0
+        while (i < parameters.length()){
+            dict param = parameters[i]
+            string ptype = "any"
+            if ("param_type" in param && param["param_type"] != ""){
+                set ptype = param["param_type"]
+            }
+            if (first != true){
+                set out = out + ", "
+            }
+            set out = out + this.map_c_type(ptype) + " " + param["name"]
+            set first = false
+            set i = i + 1
+        }
+
+        return out
+    }
+
+    string build_output(){
+        array lines = this.lines
+        string out = ""
+        int i = 0
+        while (i < lines.length()){
+            if (i > 0){
+                set out = out + "\n"
+            }
+            set out = out + lines[i]
+            set i = i + 1
+        }
+        return out
+    }
+
+    string generate(any root){
+        set this.lines = []
+        set this.errors = []
+        set this.indent_level = 0
+        set this.current_class = ""
+        set this.loop_counter = 0
+
+        if (cg_node_kind(root) != "Program"){
+            this.add_error("CodeGenerator expected Program root")
+            return ""
+        }
+
+        this.collect_program_types(root)
+
+        this.emit_line("#include <stdint.h>")
+        this.emit_line("#include <stdbool.h>")
+        this.emit_line("#include <stddef.h>")
+        this.emit_line("#include <stdio.h>")
+        this.emit_line("#include <stdlib.h>")
+        this.emit_blank()
+        this.emit_line("typedef void* mt_any;")
+        this.emit_blank()
+        this.emit_line("extern mt_any __mt_array_new(void);")
+        this.emit_line("extern mt_any __mt_array_push(mt_any arr, mt_any value);")
+        this.emit_line("extern mt_any __mt_array_pop(mt_any arr, int32_t index);")
+        this.emit_line("extern mt_any __mt_dict_new(void);")
+        this.emit_line("extern mt_any __mt_dict_set(mt_any dict, mt_any key, mt_any value);")
+        this.emit_line("extern mt_any __mt_dict_get(mt_any dict, mt_any key);")
+        this.emit_line("extern int32_t __mt_length(mt_any value);")
+        this.emit_line("extern mt_any __mt_index_get(mt_any object, mt_any index);")
+        this.emit_line("extern void __mt_index_set(mt_any object, mt_any index, mt_any value);")
+        this.emit_line("extern bool __mt_in(mt_any item, mt_any container);")
+        this.emit_line("extern mt_any __mt_new(const char* class_name);")
+        this.emit_line("extern mt_any __mt_call_member(mt_any object, const char* name, int32_t argc, ...);")
+        this.emit_line("extern void __mt_throw(mt_any value);")
+        this.emit_blank()
+
+        array statements = root["statements"]
+        int i = 0
+        while (i < statements.length()){
+            this.generate_statement(statements[i])
+            set i = i + 1
+        }
+
+        return this.build_output()
+    }
+
+    void generate_statement(dict node){
+        string kind = cg_node_kind(node)
+
+        if (kind == "FunctionDeclaration"){
+            this.generate_function_declaration(node)
+            this.emit_blank()
+            return
+        }
+        if (kind == "DynamicFunctionDeclaration"){
+            this.generate_dynamic_function_declaration(node)
+            this.emit_blank()
+            return
+        }
+        if (kind == "ExternalDeclaration"){
+            this.generate_external_declaration(node)
+            return
+        }
+        if (kind == "ClassDeclaration"){
+            this.generate_class_declaration(node)
+            this.emit_blank()
+            return
+        }
+        if (kind == "VariableDeclaration"){
+            this.generate_variable_declaration(node)
+            return
+        }
+        if (kind == "SetStatement"){
+            this.generate_set_statement(node)
+            return
+        }
+        if (kind == "ExpressionStatement"){
+            this.emit_line(this.generate_expression(node["expression"]) + ";")
+            return
+        }
+        if (kind == "ReturnStatement"){
+            if (node["value"] == null){
+                this.emit_line("return;")
+            }
+            else{
+                this.emit_line("return " + this.generate_expression(node["value"]) + ";")
+            }
+            return
+        }
+        if (kind == "IfStatement"){
+            this.generate_if_statement(node)
+            return
+        }
+        if (kind == "WhileStatement"){
+            this.emit_line("while (" + this.generate_expression(node["condition"]) + "){")
+            this.indent()
+            this.generate_block(node["body"])
+            this.dedent()
+            this.emit_line("}")
+            return
+        }
+        if (kind == "ForInStatement"){
+            this.generate_for_in_statement(node)
+            return
+        }
+        if (kind == "BreakStatement"){
+            this.emit_line("break;")
+            return
+        }
+        if (kind == "TryStatement"){
+            this.emit_line("/* try/catch lowered as sequential block in bootstrap codegen */")
+            this.generate_block(node["try_block"])
+            return
+        }
+        if (kind == "ThrowStatement"){
+            this.emit_line("__mt_throw(" + this.generate_expression(node["expression"]) + ");")
+            return
+        }
+        if (kind == "SimpleImportStatement" || kind == "FromImportStatement" || kind == "LibcImportStatement"){
+            this.emit_line("/* import lowered by compiler front-end: " + kind + " */")
+            return
+        }
+    }
+
+    void generate_block(dict block_node){
+        if (cg_node_kind(block_node) != "Block"){
+            return
+        }
+        array statements = block_node["statements"]
+        int i = 0
+        while (i < statements.length()){
+            this.generate_statement(statements[i])
+            set i = i + 1
+        }
+    }
+
+    void generate_if_statement(dict node){
+        this.emit_line("if (" + this.generate_expression(node["condition"]) + "){")
+        this.indent()
+        this.generate_block(node["then_body"])
+        this.dedent()
+        this.emit_line("}")
+        if (node["else_body"] != null){
+            this.emit_line("else{")
+            this.indent()
+            this.generate_block(node["else_body"])
+            this.dedent()
+            this.emit_line("}")
+        }
+    }
+
+    void generate_for_in_statement(dict node){
+        int loop_id = this.loop_counter
+        set this.loop_counter = this.loop_counter + 1
+        string iterable = this.generate_expression(node["iterable"])
+        string idx_name = "__mt_i_" + str(loop_id)
+        string len_name = "__mt_len_" + str(loop_id)
+        string item_name = node["variable"]
+        this.emit_line("{")
+        this.indent()
+        this.emit_line("mt_any __mt_iter_" + str(loop_id) + " = " + iterable + ";")
+        this.emit_line("int32_t " + idx_name + " = 0;")
+        this.emit_line("int32_t " + len_name + " = __mt_length(__mt_iter_" + str(loop_id) + ");")
+        this.emit_line("while (" + idx_name + " < " + len_name + "){")
+        this.indent()
+        this.emit_line("mt_any " + item_name + " = __mt_index_get(__mt_iter_" + str(loop_id) + ", (mt_any)(intptr_t)" + idx_name + ");")
+        this.generate_block(node["body"])
+        this.emit_line(idx_name + " = " + idx_name + " + 1;")
+        this.dedent()
+        this.emit_line("}")
+        this.dedent()
+        this.emit_line("}")
+    }
+
+    void generate_variable_declaration(dict node){
+        string c_type = this.map_c_type(node["type"])
+        string name = node["name"]
+        if ("fixed_size" in node && int(node["fixed_size"]) >= 0 && node["type"] != "array"){
+            this.emit_line(c_type + " " + name + "[" + str(int(node["fixed_size"])) + "];")
+            return
+        }
+        if (node["value"] == null){
+            this.emit_line(c_type + " " + name + ";")
+        }
+        else{
+            this.emit_line(c_type + " " + name + " = " + this.generate_expression(node["value"]) + ";")
+        }
+    }
+
+    void generate_set_statement(dict node){
+        dict target = node["target"]
+        string kind = cg_node_kind(target)
+        string value = this.generate_expression(node["value"])
+        if (kind == "Identifier"){
+            this.emit_line(target["name"] + " = " + value + ";")
+            return
+        }
+        if (kind == "MemberExpression"){
+            this.emit_line(this.generate_expression(target) + " = " + value + ";")
+            return
+        }
+        if (kind == "IndexExpression"){
+            this.emit_line("__mt_index_set(" + this.generate_expression(target["object"]) + ", " + this.generate_expression(target["index"]) + ", " + value + ");")
+            return
+        }
+        this.emit_line("/* unsupported set target */")
+    }
+
+    void generate_external_declaration(dict node){
+        string ret_type = this.map_c_type(node["return_type"])
+        string signature = this.render_params(node["parameters"], false)
+        this.emit_line("extern " + ret_type + " " + node["name"] + "(" + signature + ");")
+    }
+
+    void generate_function_declaration(dict node){
+        string ret_type = this.map_c_type(node["return_type"])
+        string signature = this.render_params(node["parameters"], false)
+        this.emit_line(ret_type + " " + node["name"] + "(" + signature + "){")
+        this.indent()
+        this.generate_block(node["body"])
+        this.dedent()
+        this.emit_line("}")
+    }
+
+    void generate_dynamic_function_declaration(dict node){
+        string signature = this.render_params(node["parameters"], false)
+        this.emit_line("mt_any " + node["name"] + "(" + signature + "){")
+        this.indent()
+        this.generate_block(node["body"])
+        this.dedent()
+        this.emit_line("}")
+    }
+
+    void generate_class_declaration(dict node){
+        string class_name = node["name"]
+        this.emit_line("typedef struct " + class_name + " " + class_name + ";")
+        this.emit_line("struct " + class_name + "{")
+        this.indent()
+        array fields = node["fields"]
+        int i = 0
+        while (i < fields.length()){
+            dict field = fields[i]
+            this.emit_line(this.map_c_type(field["field_type"]) + " " + field["name"] + ";")
+            set i = i + 1
+        }
+        this.dedent()
+        this.emit_line("};")
+        this.emit_blank()
+
+        string prev = this.current_class
+        set this.current_class = class_name
+        array methods = node["methods"]
+        set i = 0
+        while (i < methods.length()){
+            this.generate_method_declaration(methods[i])
+            this.emit_blank()
+            set i = i + 1
+        }
+        set this.current_class = prev
+    }
+
+    void generate_method_declaration(dict node){
+        string method_name = node["name"]
+        string ret_type = this.map_c_type(node["return_type"])
+        string signature = this.render_params(node["parameters"], true)
+        this.emit_line(ret_type + " " + this.current_class + "_" + method_name + "(" + signature + "){")
+        this.indent()
+        this.generate_block(node["body"])
+        this.dedent()
+        this.emit_line("}")
+    }
+
+    string generate_expression(dict node){
+        string kind = cg_node_kind(node)
+        if (kind == "NumberLiteral"){
+            return str(int(node["value"]))
+        }
+        if (kind == "FloatLiteral"){
+            return str(float(node["value"]))
+        }
+        if (kind == "StringLiteral"){
+            return "\"" + cg_escape_string(node["value"]) + "\""
+        }
+        if (kind == "BoolLiteral"){
+            if (int(node["value"]) == 1){
+                return "true"
+            }
+            return "false"
+        }
+        if (kind == "NullLiteral"){
+            return "NULL"
+        }
+        if (kind == "Identifier"){
+            return node["name"]
+        }
+        if (kind == "ThisExpression"){
+            return "this"
+        }
+        if (kind == "BinaryExpression"){
+            return "(" + this.generate_expression(node["left"]) + " " + node["op"] + " " + this.generate_expression(node["right"]) + ")"
+        }
+        if (kind == "InExpression"){
+            return "__mt_in(" + this.generate_expression(node["item"]) + ", " + this.generate_expression(node["container"]) + ")"
+        }
+        if (kind == "ArrayLiteral"){
+            return "__mt_array_new()"
+        }
+        if (kind == "DictLiteral"){
+            return "__mt_dict_new()"
+        }
+        if (kind == "MemberExpression"){
+            return this.generate_expression(node["object"]) + "->" + node["property"]
+        }
+        if (kind == "IndexExpression"){
+            return "__mt_index_get(" + this.generate_expression(node["object"]) + ", " + this.generate_expression(node["index"]) + ")"
+        }
+        if (kind == "CallExpression"){
+            return this.generate_call_expression(node)
+        }
+        if (kind == "TypeofExpression"){
+            return "\"unknown\""
+        }
+        if (kind == "ClassofExpression"){
+            return "\"unknown\""
+        }
+        if (kind == "HasattrExpression"){
+            return "false"
+        }
+        if (kind == "NewExpression"){
+            return "(" + node["class_name"] + "*)__mt_new(\"" + node["class_name"] + "\")"
+        }
+        return "0"
+    }
+
+    string generate_call_expression(dict node){
+        dict callee = node["callee"]
+        array args = node["arguments"]
+
+        if (cg_node_kind(callee) == "Identifier"){
+            string out = callee["name"] + "("
+            int i = 0
+            while (i < args.length()){
+                if (i > 0){
+                    set out = out + ", "
+                }
+                set out = out + this.generate_expression(args[i])
+                set i = i + 1
+            }
+            set out = out + ")"
+            return out
+        }
+
+        if (cg_node_kind(callee) == "MemberExpression"){
+            dict member = callee
+            string object_expr = this.generate_expression(member["object"])
+            string method = member["property"]
+
+            if (method == "length" && args.length() == 0){
+                return "__mt_length(" + object_expr + ")"
+            }
+            if (method == "append" && args.length() == 1){
+                return "__mt_array_push(" + object_expr + ", " + this.generate_expression(args[0]) + ")"
+            }
+            if (method == "pop" && args.length() == 0){
+                return "__mt_array_pop(" + object_expr + ", -1)"
+            }
+            if (method == "pop" && args.length() == 1){
+                return "__mt_array_pop(" + object_expr + ", " + this.generate_expression(args[0]) + ")"
+            }
+
+            if (cg_node_kind(member["object"]) == "ThisExpression" && this.current_class != ""){
+                string out = this.current_class + "_" + method + "(this"
+                int j = 0
+                while (j < args.length()){
+                    set out = out + ", " + this.generate_expression(args[j])
+                    set j = j + 1
+                }
+                set out = out + ")"
+                return out
+            }
+
+            string out = "__mt_call_member(" + object_expr + ", \"" + method + "\", " + str(args.length())
+            int k = 0
+            while (k < args.length()){
+                set out = out + ", " + this.generate_expression(args[k])
+                set k = k + 1
+            }
+            set out = out + ")"
+            return out
+        }
+
+        return "0"
+    }
+}
+
+string generate_c(any root, string file_path = "unknown"){
+    CodeGenerator generator = new CodeGenerator(file_path)
+    return generator.generate(root)
+}
