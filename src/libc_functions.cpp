@@ -3,12 +3,12 @@
 #include <unordered_map>
 
 const std::unordered_map<std::string, LibcFunctionInfo> LIBC_FUNCTIONS = {
-    {"malloc", {"ptr", {"int"}, false}},
-    {"calloc", {"ptr", {"int", "int"}, false}},
-    {"realloc", {"ptr", {"ptr", "int"}, false}},
+    {"malloc", {"ptr", {"size"}, false}},
+    {"calloc", {"ptr", {"size", "size"}, false}},
+    {"realloc", {"ptr", {"ptr", "size"}, false}},
     {"free", {"void", {"ptr"}, false}},
-    {"memcpy", {"ptr", {"ptr", "ptr", "int"}, false}},
-    {"memset", {"ptr", {"ptr", "int", "int"}, false}},
+    {"memcpy", {"ptr", {"ptr", "ptr", "size"}, false}},
+    {"memset", {"ptr", {"ptr", "int", "size"}, false}},
 
     {"strlen", {"int", {"ptr"}, false}},
     {"strcpy", {"ptr", {"ptr", "ptr"}, false}},
@@ -19,7 +19,7 @@ const std::unordered_map<std::string, LibcFunctionInfo> LIBC_FUNCTIONS = {
     {"strstr", {"ptr", {"ptr", "ptr"}, false}},
     {"strchr", {"ptr", {"ptr", "int"}, false}},
     {"sprintf", {"int", {"ptr", "ptr"}, true}},
-    {"snprintf", {"int", {"ptr", "int", "ptr"}, true}},
+    {"snprintf", {"int", {"ptr", "size", "ptr"}, true}},
     {"tolower", {"int", {"int"}, false}},
     {"toupper", {"int", {"int"}, false}},
 
@@ -86,6 +86,7 @@ const std::unordered_map<std::string, LibcFunctionInfo> LIBC_FUNCTIONS = {
 std::string libc_return_type_to_semantic_type(const std::string& ret_type) {
     static const std::unordered_map<std::string, std::string> kTypeMap = {
         {"int", "int"},
+        {"size", "int"},
         {"ptr", "string"},
         {"void", "void"},
         {"float", "float"},

@@ -83,6 +83,9 @@ std::string map_libc_type_to_llvm(const std::string& ty) {
     if (ty == "int") {
         return "i32";
     }
+    if (ty == "size") {
+        return "i64";
+    }
     if (ty == "float") {
         return "double";
     }
@@ -936,7 +939,7 @@ void CodeGenerator::begin_function(const CodegenFunctionInfo& info) {
         std::string dynamic_array_elem_mt_type;
         std::string dynamic_array_elem_llvm_type;
         if (is_dynamic_array) {
-            dynamic_array_elem_mt_type = "int";
+            dynamic_array_elem_mt_type = "any";
             dynamic_array_elem_llvm_type = map_type_to_llvm(dynamic_array_elem_mt_type);
             if (dynamic_array_elem_llvm_type == "void") {
                 dynamic_array_elem_mt_type = "any";
@@ -1021,7 +1024,7 @@ void CodeGenerator::emit_function_definition(FunctionDeclaration& node) {
             if (param.param_type == "array") {
                 var_it->second.is_dynamic_array = true;
                 var_it->second.dynamic_array_elem_mt_type =
-                    param.element_type.empty() ? "int" : param.element_type;
+                    param.element_type.empty() ? "any" : param.element_type;
                 var_it->second.dynamic_array_elem_llvm_type =
                     map_type_to_llvm(var_it->second.dynamic_array_elem_mt_type);
             }
@@ -1055,7 +1058,7 @@ void CodeGenerator::emit_dynamic_function_definition(DynamicFunctionDeclaration&
             if (param.param_type == "array") {
                 var_it->second.is_dynamic_array = true;
                 var_it->second.dynamic_array_elem_mt_type =
-                    param.element_type.empty() ? "int" : param.element_type;
+                    param.element_type.empty() ? "any" : param.element_type;
                 var_it->second.dynamic_array_elem_llvm_type =
                     map_type_to_llvm(var_it->second.dynamic_array_elem_mt_type);
             }
@@ -1094,7 +1097,7 @@ void CodeGenerator::emit_class_method_definition(const CodegenClassMethodInfo& m
             if (param.param_type == "array") {
                 var_it->second.is_dynamic_array = true;
                 var_it->second.dynamic_array_elem_mt_type =
-                    param.element_type.empty() ? "int" : param.element_type;
+                    param.element_type.empty() ? "any" : param.element_type;
                 var_it->second.dynamic_array_elem_llvm_type =
                     map_type_to_llvm(var_it->second.dynamic_array_elem_mt_type);
             }
@@ -1872,11 +1875,13 @@ CodeGenerator::IRValue CodeGenerator::generate_array_literal(
     const std::string& forced_element_mt_type) {
     std::string element_type = forced_element_mt_type;
     if (element_type.empty()) {
-        element_type = "int";
+        element_type = "any";
         if (!node.elements.empty()) {
             ASTNode& first = node.elements[0];
             if (is_node<FloatLiteral>(first)) {
                 element_type = "float";
+            } else if (is_node<NumberLiteral>(first)) {
+                element_type = "int";
             } else if (is_node<StringLiteral>(first)) {
                 element_type = "string";
             } else if (is_node<BoolLiteral>(first)) {
@@ -2396,8 +2401,82 @@ CodeGenerator::IRValue CodeGenerator::generate_index_expression(IndexExpression&
 
     IRValue object = cast_value(generate_expression(node.object), "i8*");
     if (raw_index.type == "i8*") {
-        // Dict lookup placeholder for bootstrap parity.
-        return IRValue{"i8*", "null", true};
+        IRValue key = cast_value(raw_index, "i8*");
+
+        const std::string len_slot = next_register("idx_dict_len_slot");
+        emit_line(len_slot + " = bitcast i8* " + object.value + " to i64*");
+        const std::string len = next_register("idx_dict_len");
+        emit_line(len + " = load i64, i64* " + len_slot);
+
+        const std::string keys_slot_raw = next_register("idx_dict_keys_slot_raw");
+        emit_line(keys_slot_raw + " = getelementptr inbounds i8, i8* " + object.value + ", i64 16");
+        const std::string keys_slot = next_register("idx_dict_keys_slot");
+        emit_line(keys_slot + " = bitcast i8* " + keys_slot_raw + " to i8**");
+        const std::string keys_raw = next_register("idx_dict_keys_raw");
+        emit_line(keys_raw + " = load i8*, i8** " + keys_slot);
+        const std::string keys_typed = next_register("idx_dict_keys_typed");
+        emit_line(keys_typed + " = bitcast i8* " + keys_raw + " to i8**");
+
+        const std::string values_slot_raw = next_register("idx_dict_values_slot_raw");
+        emit_line(values_slot_raw + " = getelementptr inbounds i8, i8* " + object.value + ", i64 24");
+        const std::string values_slot = next_register("idx_dict_values_slot");
+        emit_line(values_slot + " = bitcast i8* " + values_slot_raw + " to i8**");
+        const std::string values_raw = next_register("idx_dict_values_raw");
+        emit_line(values_raw + " = load i8*, i8** " + values_slot);
+        const std::string values_typed = next_register("idx_dict_values_typed");
+        emit_line(values_typed + " = bitcast i8* " + values_raw + " to i8**");
+
+        const std::string idx_ptr = next_register("idx_dict_idx_ptr");
+        emit_line(idx_ptr + " = alloca i64");
+        emit_line("store i64 0, i64* " + idx_ptr);
+        const std::string result_ptr = next_register("idx_dict_result_ptr");
+        emit_line(result_ptr + " = alloca i8*");
+        emit_line("store i8* null, i8** " + result_ptr);
+
+        const std::string cond_label = next_label("idx_dict_cond");
+        const std::string body_label = next_label("idx_dict_body");
+        const std::string hit_label = next_label("idx_dict_hit");
+        const std::string next_label_name = next_label("idx_dict_next");
+        const std::string end_label = next_label("idx_dict_end");
+
+        emit_line("br label %" + cond_label);
+
+        emit_label(cond_label);
+        const std::string idx = next_register("idx_dict_idx");
+        emit_line(idx + " = load i64, i64* " + idx_ptr);
+        const std::string cond = next_register("idx_dict_cond");
+        emit_line(cond + " = icmp slt i64 " + idx + ", " + len);
+        emit_line("br i1 " + cond + ", label %" + body_label + ", label %" + end_label);
+
+        emit_label(body_label);
+        const std::string key_ptr = next_register("idx_dict_key_ptr");
+        emit_line(key_ptr + " = getelementptr inbounds i8*, i8** " + keys_typed + ", i64 " + idx);
+        const std::string key_loaded = next_register("idx_dict_key_loaded");
+        emit_line(key_loaded + " = load i8*, i8** " + key_ptr);
+        const std::string cmp = next_register("idx_dict_key_cmp");
+        emit_line(cmp + " = call i32 @strcmp(i8* " + key_loaded + ", i8* " + key.value + ")");
+        const std::string key_match = next_register("idx_dict_key_match");
+        emit_line(key_match + " = icmp eq i32 " + cmp + ", 0");
+        emit_line("br i1 " + key_match + ", label %" + hit_label + ", label %" + next_label_name);
+
+        emit_label(hit_label);
+        const std::string value_ptr = next_register("idx_dict_value_ptr");
+        emit_line(value_ptr + " = getelementptr inbounds i8*, i8** " + values_typed + ", i64 " + idx);
+        const std::string value_loaded = next_register("idx_dict_value_loaded");
+        emit_line(value_loaded + " = load i8*, i8** " + value_ptr);
+        emit_line("store i8* " + value_loaded + ", i8** " + result_ptr);
+        emit_line("br label %" + end_label);
+
+        emit_label(next_label_name);
+        const std::string next_idx = next_register("idx_dict_next_idx");
+        emit_line(next_idx + " = add i64 " + idx + ", 1");
+        emit_line("store i64 " + next_idx + ", i64* " + idx_ptr);
+        emit_line("br label %" + cond_label);
+
+        emit_label(end_label);
+        const std::string result = next_register("idx_dict_result");
+        emit_line(result + " = load i8*, i8** " + result_ptr);
+        return IRValue{"i8*", result, true};
     }
 
     IRValue index = cast_value(raw_index, "i64");
@@ -2488,6 +2567,13 @@ CodeGenerator::IRValue CodeGenerator::generate_binary_expression(BinaryExpressio
     }
 
     if ((op == "==" || op == "!=") && lhs.type == "i8*" && rhs.type == "i8*") {
+        if (is_null_ptr(lhs) || is_null_ptr(rhs)) {
+            const std::string reg = next_register("ptr_cmp");
+            emit_line(reg + " = icmp " + std::string(op == "==" ? "eq" : "ne") +
+                      " i8* " + lhs.value + ", " + rhs.value);
+            return IRValue{"i1", reg, true};
+        }
+
         const std::string lhs_is_null = next_register("lhs_is_null");
         emit_line(lhs_is_null + " = icmp eq i8* " + lhs.value + ", null");
         const std::string rhs_is_null = next_register("rhs_is_null");
@@ -4635,7 +4721,7 @@ void CodeGenerator::generate_variable_declaration(VariableDeclaration& node) {
         }
 
         if (element_type.empty()) {
-            element_type = "int";
+            element_type = "any";
         }
 
         const std::string elem_llvm_type = map_type_to_llvm(element_type);
