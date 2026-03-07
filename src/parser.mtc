@@ -615,7 +615,7 @@ class Parser{
         dict info = {}
         set info["base_type"] = base_type
         set info["element_type"] = element_type
-        set info["fixed_size"] = fixed_size
+        set info["fixed_size"] = str(fixed_size)
         return info
     }
 
