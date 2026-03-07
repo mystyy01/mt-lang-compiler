@@ -7,26 +7,35 @@ func make_param_info(string name, string param_type, any default_value = null, s
     return info
 }
 
-func node_kind(any node){
+func node_kind(dict node){
     if (node == null){
         return "Null"
     }
-    if ("kind" in node){
-        return node["kind"]
+    any kind_value = node["kind"]
+    if (kind_value != null){
+        return str(kind_value)
     }
     return "Unknown"
 }
 
-func node_line(any node){
-    if (node != null && "line" in node){
-        return node["line"]
+func node_line(dict node){
+    if (node == null){
+        return -1
+    }
+    any line_value = node["line"]
+    if (line_value != null){
+        return int(line_value)
     }
     return -1
 }
 
-func node_column(any node){
-    if (node != null && "column" in node){
-        return node["column"]
+func node_column(dict node){
+    if (node == null){
+        return -1
+    }
+    any column_value = node["column"]
+    if (column_value != null){
+        return int(column_value)
     }
     return -1
 }
@@ -789,7 +798,7 @@ class SemanticAnalyzer{
 
         this.symbol_table.enter_scope()
 
-        if (this.current_class != "" && node["is_static"] == 0){
+        if (this.current_class != "" && int(node["is_static"]) == 0){
             this.symbol_table.declare("this", "variable", this.current_class)
         }
 
@@ -1277,7 +1286,7 @@ class SemanticAnalyzer{
     }
 
     string analyze_from_import(dict node){
-        if (node["is_wildcard"] == 1){
+        if (int(node["is_wildcard"]) == 1){
             return "void"
         }
 

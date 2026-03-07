@@ -1,52 +1,153 @@
+from tokenizer use Tokenizer
+from parser use Parser
+from semantic use SemanticAnalyzer
+from codegen use CodeGenerator
+from io use File, file_exists
 from libc use system, exit
 
+bool ends_with(string text, string suffix){
+    int n = text.length()
+    int m = suffix.length()
+    if (m > n){
+        return false
+    }
+    int i = 0
+    while (i < m){
+        if (text[n - m + i] != suffix[i]){
+            return false
+        }
+        set i = i + 1
+    }
+    return true
+}
+
+string slice_prefix(string text, int count){
+    if (count <= 0){
+        return ""
+    }
+    string out = ""
+    int i = 0
+    while (i < count && i < text.length()){
+        set out = out + text[i]
+        set i = i + 1
+    }
+    return out
+}
+
+string strip_mtc_extension(string path){
+    if (ends_with(path, ".mtc")){
+        return slice_prefix(path, path.length() - 4)
+    }
+    return path
+}
+
+void print_errors(array errors){
+    int i = 0
+    while (i < errors.length()){
+        print("Error: " + errors[i])
+        set i = i + 1
+    }
+}
+
 void print_usage(){
-    print("Usage: mtc-self-host <source.mtc> <output> [extra flags]")
+    print("Usage: mtc-self-host <source.mtc> [output.c] [--cc]")
     print("Examples:")
-    print("  mtc-self-host source.mtc out")
-    print("  mtc-self-host --emit-ir source.mtc out")
-    print("  mtc-self-host --no-runtime -o source.mtc out.o")
+    print("  mtc-self-host source.mtc")
+    print("  mtc-self-host source.mtc out.c")
+    print("  mtc-self-host source.mtc out --cc")
 }
 
-array argv = args()
-int argc = argv.length()
+int run_compiler(){
+    array argv = args()
+    int argc = argv.length()
+    if (argc < 2){
+        print_usage()
+        return 0
+    }
 
-if (argc < 2){
-    print_usage()
-    exit(0)
+    string source_path = argv[1]
+    string output_path = ""
+    bool run_cc = false
+
+    if (argc >= 3){
+        if (argv[2] == "--cc"){
+            set run_cc = true
+        }
+        else{
+            set output_path = argv[2]
+        }
+    }
+    if (argc >= 4){
+        if (argv[3] == "--cc"){
+            set run_cc = true
+        }
+    }
+
+    if (output_path == ""){
+        if (run_cc){
+            set output_path = strip_mtc_extension(source_path)
+        }
+        else{
+            set output_path = strip_mtc_extension(source_path) + ".c"
+        }
+    }
+    if (file_exists(source_path) != true){
+        print("Error: failed to read source file: " + source_path)
+        return 1
+    }
+    File source_file = new File(source_path, "r")
+    string source_text = source_file.read()
+
+    Tokenizer tokenizer = new Tokenizer(source_text, source_path)
+    array tokens = tokenizer.tokenize()
+
+    Parser parser = new Parser(tokens, source_path)
+    dict ast = parser.parse_program()
+    if (parser.has_errors()){
+        print_errors(parser.get_errors())
+        return 1
+    }
+
+    SemanticAnalyzer semantic = new SemanticAnalyzer(source_path)
+    semantic.analyze(ast)
+    if (semantic.has_errors()){
+        print_errors(semantic.get_errors())
+        return 1
+    }
+
+    CodeGenerator codegen = new CodeGenerator(source_path)
+    string c_code = codegen.generate(ast)
+    if (codegen.has_errors()){
+        print_errors(codegen.get_errors())
+        return 1
+    }
+
+    string c_output = output_path
+    if (run_cc && ends_with(c_output, ".c") != true){
+        set c_output = c_output + ".c"
+    }
+
+    File out_file = new File(c_output, "w")
+    out_file.write(c_code)
+
+    print("Wrote C output: " + c_output)
+
+    if (run_cc){
+        string binary_output = output_path
+        if (ends_with(binary_output, ".c")){
+            set binary_output = strip_mtc_extension(binary_output)
+        }
+        string cmd = "clang -O2 -std=c11 " + c_output + " -o " + binary_output
+        int rc = system(cmd)
+        if (rc != 0){
+            print("Error: clang failed")
+            return 1
+        }
+        print("Built binary: " + binary_output)
+    }
+
+    return 0
 }
 
-string cmd = "mtc " + argv[1]
-if (argc >= 3){
-    set cmd = cmd + " " + argv[2]
-}
-if (argc >= 4){
-    set cmd = cmd + " " + argv[3]
-}
-if (argc >= 5){
-    set cmd = cmd + " " + argv[4]
-}
-if (argc >= 6){
-    set cmd = cmd + " " + argv[5]
-}
-if (argc >= 7){
-    set cmd = cmd + " " + argv[6]
-}
-if (argc >= 8){
-    set cmd = cmd + " " + argv[7]
-}
-if (argc >= 9){
-    set cmd = cmd + " " + argv[8]
-}
-if (argc >= 10){
-    set cmd = cmd + " " + argv[9]
-}
-
-print("[selfhost-driver] " + cmd)
-int rc = system(cmd)
-if (rc != 0){
-    print("Error: mtc command failed")
-    exit(1)
-}
-
-exit(0)
+int _mtc_status = run_compiler()
+exit(_mtc_status)

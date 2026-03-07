@@ -24,8 +24,8 @@ bool token_can_be_identifier_keyword(Token token){
 dict make_node(string kind, int line = -1, int column = -1){
     dict node = {}
     set node["kind"] = kind
-    set node["line"] = line
-    set node["column"] = column
+    set node["line"] = str(line)
+    set node["column"] = str(column)
     return node
 }
 
@@ -663,13 +663,13 @@ class Parser{
 
         dict declaration = make_node("VariableDeclaration", start.line, start.column)
         if (is_dynamic){
-            set declaration["is_dynamic"] = 1
+            set declaration["is_dynamic"] = "1"
         }
         else{
-            set declaration["is_dynamic"] = 0
+            set declaration["is_dynamic"] = "0"
         }
         set declaration["element_type"] = ""
-        set declaration["fixed_size"] = -1
+        set declaration["fixed_size"] = "-1"
         set declaration["key_type"] = ""
         set declaration["value_type"] = ""
 
@@ -741,8 +741,8 @@ class Parser{
         if (declaration["type"] != "array"){
             this.add_error("dynamic declarations only support arrays")
         }
-        set declaration["line"] = start.line
-        set declaration["column"] = start.column
+        set declaration["line"] = str(start.line)
+        set declaration["column"] = str(start.column)
         return declaration
     }
 
@@ -785,7 +785,7 @@ class Parser{
                 dict wildcard = make_node("FromImportStatement", start.line, start.column)
                 set wildcard["module_path"] = module_path
                 set wildcard["symbols"] = []
-                set wildcard["is_wildcard"] = 1
+                set wildcard["is_wildcard"] = "1"
                 return wildcard
             }
 
@@ -817,7 +817,7 @@ class Parser{
             dict node = make_node("FromImportStatement", start.line, start.column)
             set node["module_path"] = module_path
             set node["symbols"] = symbols
-            set node["is_wildcard"] = 0
+            set node["is_wildcard"] = "0"
             return node
         }
 
@@ -996,16 +996,16 @@ class Parser{
         set node["return_element_type"] = return_element_type
         set node["body"] = body
         if (is_static){
-            set node["is_static"] = 1
+            set node["is_static"] = "1"
         }
         else{
-            set node["is_static"] = 0
+            set node["is_static"] = "0"
         }
         if (is_virtual){
-            set node["is_virtual"] = 1
+            set node["is_virtual"] = "1"
         }
         else{
-            set node["is_virtual"] = 0
+            set node["is_virtual"] = "0"
         }
         return node
     }
@@ -1188,14 +1188,14 @@ class Parser{
         if (token.type == T_INT_LITERAL){
             this.advance()
             dict node = make_node("NumberLiteral", token.line, token.column)
-            set node["value"] = int(token.value)
+            set node["value"] = token.value
             return node
         }
 
         if (token.type == T_FLOAT_LITERAL){
             this.advance()
             dict node = make_node("FloatLiteral", token.line, token.column)
-            set node["value"] = float(token.value)
+            set node["value"] = token.value
             return node
         }
 
@@ -1221,14 +1221,14 @@ class Parser{
         if (this.match_value(T_KEYWORD, "true")){
             this.advance()
             dict node = make_node("BoolLiteral", token.line, token.column)
-            set node["value"] = 1
+            set node["value"] = "1"
             return node
         }
 
         if (this.match_value(T_KEYWORD, "false")){
             this.advance()
             dict node = make_node("BoolLiteral", token.line, token.column)
-            set node["value"] = 0
+            set node["value"] = "0"
             return node
         }
 

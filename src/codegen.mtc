@@ -1,9 +1,10 @@
-func cg_node_kind(any node){
+func cg_node_kind(dict node){
     if (node == null){
         return "Null"
     }
-    if ("kind" in node){
-        return node["kind"]
+    any kind_value = node["kind"]
+    if (kind_value != null){
+        return str(kind_value)
     }
     return "Unknown"
 }
@@ -185,12 +186,19 @@ class CodeGenerator{
         set this.current_class = ""
         set this.loop_counter = 0
 
-        if (cg_node_kind(root) != "Program"){
+        dict program = root
+        if (program == null){
             this.add_error("CodeGenerator expected Program root")
             return ""
         }
 
-        this.collect_program_types(root)
+        array statements = program["statements"]
+        if (statements == null){
+            this.add_error("CodeGenerator expected Program root")
+            return ""
+        }
+
+        this.collect_program_types(program)
 
         this.emit_line("#include <stdint.h>")
         this.emit_line("#include <stdbool.h>")
@@ -215,7 +223,6 @@ class CodeGenerator{
         this.emit_line("extern void __mt_throw(mt_any value);")
         this.emit_blank()
 
-        array statements = root["statements"]
         int i = 0
         while (i < statements.length()){
             this.generate_statement(statements[i])
@@ -264,7 +271,8 @@ class CodeGenerator{
                 this.emit_line("return;")
             }
             else{
-                this.emit_line("return " + this.generate_expression(node["value"]) + ";")
+                string ret_expr = this.generate_expression(node["value"])
+                this.emit_line("return " + ret_expr + ";")
             }
             return
         }
