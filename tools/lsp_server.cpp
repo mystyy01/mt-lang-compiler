@@ -498,6 +498,37 @@ void append_existing_dir(std::vector<std::filesystem::path>* paths,
     append_unique_path(paths, seen, path);
 }
 
+constexpr const char* kSystemStdlibRoot = "/usr/lib/mtc_stdlib";
+
+std::optional<std::filesystem::path> strip_stdlib_prefix(const std::filesystem::path& relative_path) {
+    auto part_it = relative_path.begin();
+    if (part_it == relative_path.end() || part_it->string() != "stdlib") {
+        return std::nullopt;
+    }
+
+    ++part_it;
+    if (part_it == relative_path.end()) {
+        return std::nullopt;
+    }
+
+    std::filesystem::path stripped;
+    for (; part_it != relative_path.end(); ++part_it) {
+        stripped /= *part_it;
+    }
+    return stripped;
+}
+
+void append_system_stdlib_candidates(const std::filesystem::path& relative_path,
+                                     std::vector<std::filesystem::path>* candidates,
+                                     std::unordered_set<std::string>* seen) {
+    const std::filesystem::path stdlib_root(kSystemStdlibRoot);
+    const auto stripped = strip_stdlib_prefix(relative_path);
+    if (stripped.has_value()) {
+        append_unique_path(candidates, seen, stdlib_root / *stripped);
+    }
+    append_unique_path(candidates, seen, stdlib_root / relative_path);
+}
+
 std::vector<std::filesystem::path> default_stdlib_roots(const std::string& workspace_root_path) {
     std::vector<std::filesystem::path> roots;
     std::unordered_set<std::string> seen;
@@ -508,6 +539,7 @@ std::vector<std::filesystem::path> default_stdlib_roots(const std::string& works
     }
 
     append_existing_dir(&roots, &seen, std::filesystem::current_path() / "stdlib");
+    append_existing_dir(&roots, &seen, std::filesystem::path(kSystemStdlibRoot));
 
 #if defined(__linux__)
     std::error_code ec;
@@ -519,6 +551,8 @@ std::vector<std::filesystem::path> default_stdlib_roots(const std::string& works
             const std::filesystem::path exe_dir = exe_path.parent_path();
             append_existing_dir(&roots, &seen, exe_dir / "../stdlib");
             append_existing_dir(&roots, &seen, exe_dir / "stdlib");
+            append_existing_dir(&roots, &seen, exe_dir / "../lib/mtc_stdlib");
+            append_existing_dir(&roots, &seen, exe_dir / "lib/mtc_stdlib");
         }
     }
 #endif
@@ -712,20 +746,22 @@ std::optional<std::string> resolve_import_module_uri(const std::string& current_
             continue;
         }
 
+        std::vector<std::filesystem::path> candidates;
+        std::unordered_set<std::string> seen;
+        append_system_stdlib_candidates(rel_path, &candidates, &seen);
         for (const auto& base : bases) {
-            std::filesystem::path candidate = (base / rel_path).lexically_normal();
+            append_unique_path(&candidates, &seen, base / rel_path);
+        }
+        if (bases.empty()) {
+            append_unique_path(&candidates, &seen, rel_path);
+        }
+
+        for (const auto& candidate_raw : candidates) {
+            std::filesystem::path candidate = candidate_raw.lexically_normal();
             ec.clear();
             if (std::filesystem::exists(candidate, ec) &&
                 std::filesystem::is_regular_file(candidate, ec)) {
                 return path_to_uri(candidate.string());
-            }
-        }
-
-        if (bases.empty()) {
-            ec.clear();
-            if (std::filesystem::exists(rel_path, ec) &&
-                std::filesystem::is_regular_file(rel_path, ec)) {
-                return path_to_uri(rel_path.lexically_normal().string());
             }
         }
     }
@@ -2162,7 +2198,7 @@ private:
             "\"workspaceSymbolProvider\":true,"
             "\"renameProvider\":{\"prepareProvider\":true}"
             "},"
-            "\"serverInfo\":{\"name\":\"mtc-lsp\",\"version\":\"0.3.0\"}"
+            "\"serverInfo\":{\"name\":\"mtc-lsp\",\"version\":\"1.0.0\"}"
             "}";
         send_response(id_raw, capabilities);
     }
